@@ -1,0 +1,19 @@
+# 运行时产物
+__pycache__/
+*.py[cod]
+*.so
+
+# 本地配置与数据（真配置在 AstrBot 的 data/config 下，不进仓库）
+data/
+config.json
+*.local.json
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 日志与缓存
+*.log
+.cache/

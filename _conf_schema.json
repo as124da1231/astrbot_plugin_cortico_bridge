@@ -1,0 +1,102 @@
+{
+  "enabled": {
+    "description": "接管对话",
+    "type": "bool",
+    "default": false,
+    "hint": "打开后，QQ 消息交给 Cortico 想，AstrBot 自己的模型不再参与这一轮。Cortico 没连上时自动退回 AstrBot 原有行为。"
+  },
+  "observe_all": {
+    "description": "B 模式：群里每条消息都交给 Cortico",
+    "type": "bool",
+    "default": false,
+    "hint": "关着时只有 @ 或叫到称呼的消息才会进来（A 模式）。打开后没有 @ 的普通闲聊也会交给 Cortico，由它自己决定要不要开口。注意 token 消耗会明显上升。"
+  },
+  "observe_groups": {
+    "description": "接管的群（A/B 模式都生效）",
+    "type": "list",
+    "default": [],
+    "hint": "一行一个群号。名单里的群才会交给 Cortico：B 模式全量推送，A 模式只推点名的。留空表示所有群都接管。不在名单里的群由 AstrBot 自己处理。"
+  },
+  "name_aliases": {
+    "description": "算作叫到自己的称呼",
+    "type": "list",
+    "default": [],
+    "hint": "除 @ 之外，正文里出现这些词也算点名，例如 Coo、库。A 模式下靠它判断「是不是在叫我」。"
+  },
+  "listen_port": {
+    "description": "桥的监听端口",
+    "type": "int",
+    "default": 17999,
+    "hint": "Cortico 从这里连进来。需要在云服务器安全组里放行这个端口，否则连不上。"
+  },
+  "listen_host": {
+    "description": "桥的监听地址",
+    "type": "string",
+    "default": "0.0.0.0",
+    "hint": "填 0.0.0.0 表示所有网卡；只允许本机连时填 127.0.0.1。"
+  },
+  "token": {
+    "description": "校验 token",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "obvious_hint": true,
+    "hint": "必须与 Cortico 部署里 worlds.astrbot.token 完全一致。留空表示不校验——端口暴露在公网时不要留空。"
+  },
+  "max_sends_per_minute": {
+    "description": "每分钟发送上限",
+    "type": "int",
+    "default": 30,
+    "hint": "防止 Cortico 失控刷屏。0 表示不限。"
+  },
+  "image_vision_provider": {
+    "description": "群里的图片用哪个模型看",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "只在「转述」这条路上用：把图片描述成文字再交给 Cortico。留空则自动挑一个带 vision / VL 的模型。"
+  },
+  "image_mode": {
+    "description": "群里的图片怎么给 Cortico",
+    "type": "string",
+    "options": ["auto", "image", "describe", "off"],
+    "default": "auto",
+    "hint": "auto=能读图就传原图、不能就让视觉模型转述；image=始终传原图（要求 Cortico 端点勾了「支持图片输入」）；describe=始终转述成文字；off=只留 [图片] 占位，不花任何视觉调用。"
+  },
+  "tts_enabled": {
+    "description": "允许 Coo 用语音说话",
+    "type": "bool",
+    "default": false,
+    "hint": "打开后，Cortico 可以要求某条回复用语音发出。语音由下面指定的 TTS Provider 合成；没配 Provider 时会自动退回文字。"
+  },
+  "tts_provider_id": {
+    "description": "用哪个 TTS Provider",
+    "type": "string",
+    "default": "",
+    "hint": "填 AstrBot 里 TTS Provider 的 id，例如 edge_tts。留空则用 AstrBot 的「当前 TTS Provider」。填了之后不再依赖 AstrBot 的全局语音开关。"
+  },
+  "tts_max_chars": {
+    "description": "语音最长字数",
+    "type": "int",
+    "default": 120,
+    "hint": "超过这个长度的文字会改用普通文字发送，避免一条语音太长。0 表示不限制。"
+  },
+  "stt_enabled": {
+    "description": "把 QQ 语音转成文字",
+    "type": "bool",
+    "default": false,
+    "hint": "打开后，群里发来的语音会先用下面指定的 STT Provider 转写，再交给 Cortico。只转写本插件接管的群，不依赖 AstrBot 的全局 STT 开关。"
+  },
+  "stt_provider_id": {
+    "description": "用哪个 STT Provider",
+    "type": "string",
+    "default": "",
+    "hint": "填 AstrBot 里 STT Provider 的 id，例如 siliconflow-sensevoice。留空则用 AstrBot 的「当前 STT Provider」。"
+  },
+  "tools_allow": {
+    "description": "允许 Cortico 调用的 AstrBot 工具",
+    "type": "list",
+    "default": [],
+    "hint": "一行一个工具名，留空表示一个都不给，填 * 表示全部。工具执行时用「触发那条消息的人」的身份，管理员工具会被 AstrBot 自己的权限层拦下。可用工具名在插件启动日志里列出（搜「可调工具」）。"
+  }
+}

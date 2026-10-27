@@ -1,0 +1,8 @@
+{
+  "views": {
+    "status": {
+      "title": "Console",
+      "description": "Connection, message stream, recent tool calls, tool permissions, and voice settings."
+    }
+  }
+}

@@ -1,0 +1,20 @@
+name: astrbot_plugin_cortico_bridge
+display_name: Cortico 桥
+short_desc: 让 Cortico 的 Persona 在 QQ 群里说话，AstrBot 只当手脚。
+desc: 把 QQ 会话接到 Cortico 的人格上。AstrBot 保留 QQ 连接、账号与全部已有插件，Cortico 负责说什么；支持 A/B 两种消息范围、图片原图或转述、语音转写与 TTS 语音回复、撤回与戳一戳等群通知，主人身份直接复用 AstrBot 管理员名单。
+version: 1.3.1
+author: as124da1231
+repo: https://github.com/as124da1231/astrbot_plugin_cortico_bridge
+entry: main.py
+license: MIT
+astrbot_version: ">=4.25.3"
+support_platforms:
+  - aiocqhttp
+tags:
+  - bridge
+  - agent
+  - cortico
+help: >-
+  先在本插件配置页填 token 并打开「接管对话」，再到 Cortico 侧装配套扩展
+  cortico-world-astrbot，填同一个 token 和 ws://<本机地址>:17999。
+  插件详情页的「控制台」分「概览 / 工具 / 语音」：看连接与流水、给 Coo 授权工具、开关语音并试听。

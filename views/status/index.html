@@ -1,0 +1,356 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cortico 桥 · 控制台</title>
+<script>
+  // Bridge 会在 ready 后设置 data-theme；先按 URL 上的 theme 参数铺一次，避免闪白。
+  try {
+    var t = new URLSearchParams(location.search).get('theme');
+    if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t;
+  } catch (e) {}
+</script>
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+<div class="app">
+
+  <aside class="rail">
+    <div class="brand">
+      <svg class="brandmark" viewBox="14 14 228 228" aria-hidden="true">
+        <path d="M182 63.66A84 84 0 1 0 182 192.34" fill="none" stroke="currentColor" stroke-width="30" stroke-linecap="round" />
+        <circle cx="113" cy="117" r="16" fill="none" stroke="var(--accent)" stroke-width="11" />
+        <circle cx="163" cy="117" r="16" fill="none" stroke="var(--accent)" stroke-width="11" />
+      </svg>
+      <div class="brandtext">
+        <div class="wordmark">cortico</div>
+        <div class="brandsub">ASTRBOT 桥</div>
+      </div>
+    </div>
+
+    <nav class="stack" aria-label="面板">
+      <div class="stacklabel">控制台</div>
+      <button class="navitem active" type="button" data-panel="status">
+        <span class="tag" aria-hidden="true"></span>
+        <svg class="navicon" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M3 10h4l2-5 2 10 2-5h4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        <span class="lbl">概览</span>
+        <span class="navdot" id="railDot" hidden aria-hidden="true"></span>
+      </button>
+      <button class="navitem" type="button" data-panel="tools">
+        <span class="tag" aria-hidden="true"></span>
+        <svg class="navicon" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M4 15l7-7M12.5 3.5l1.6 1.6-1.1 1.1 1.8 1.8-2.4 2.4-1.8-1.8-1.1 1.1-1.6-1.6z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        <span class="lbl">工具</span>
+        <span class="navcount mono" id="railTools">—</span>
+      </button>
+
+      <button class="navitem" type="button" data-panel="voice">
+        <span class="tag" aria-hidden="true"></span>
+        <svg class="navicon" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M3 10v0M6 7v6M9 4v12M12 7v6M15 9v2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+        <span class="lbl">语音</span>
+      </button>
+
+      <div class="stacklabel">这条桥</div>
+      <p class="railnote">Coo 在 QQ 里说话，<br />AstrBot 提供手和眼睛。</p>
+    </nav>
+
+    <div class="railfoot">
+      <div class="footstate">
+        <span class="lamp" id="railLamp" aria-hidden="true"></span>
+        <span id="railState">连接中…</span>
+      </div>
+      <div class="addr mono" id="railAddr">—</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="featureintro">
+      <div class="eyebrow" id="eyebrow">CORTICO BRIDGE · 概览</div>
+      <div class="headrow">
+        <div class="headtext">
+          <h1 class="pagetitle" id="pageTitle">概览</h1>
+          <p class="pagedesc" id="pageDesc">Cortico 连着没有，消息都在往哪儿走。</p>
+        </div>
+        <div class="headactions" id="actionsStatus">
+          <span class="headerstate" id="headState"><i aria-hidden="true"></i><span>连接中</span></span>
+          <button class="btn sm" type="button" id="btnRestart" title="按当前配置重新绑定监听地址、端口和 token">重开监听</button>
+          <button class="btn sm danger" type="button" id="btnReset">清空统计</button>
+        </div>
+        <div class="headactions" id="actionsTools" hidden>
+          <button class="btn sm" type="button" id="btnReadOnly">只勾只读</button>
+          <button class="btn sm danger" type="button" id="btnClear">清空选择</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="scroll" id="scroll">
+
+      <!-- ============ 概览 ============ -->
+      <div class="panel" id="panel-status">
+
+        <section class="overview">
+          <div class="herostate">
+            <span class="lamp big" id="heroLamp" aria-hidden="true"></span>
+            <div class="herotext">
+              <div class="hero-kicker">连接状态</div>
+              <div class="hero-title" id="connText">读取中…</div>
+              <div class="hero-sub mono" id="connSub"></div>
+            </div>
+          </div>
+          <div class="statgrid">
+            <article class="stat">
+              <div class="k">推送</div>
+              <div class="v mono" id="mPushed">0</div>
+              <small>PUSHED IN</small>
+            </article>
+            <article class="stat">
+              <div class="k">发出</div>
+              <div class="v mono" id="mSent">0</div>
+              <small>SENT OUT</small>
+            </article>
+            <article class="stat">
+              <div class="k">失败</div>
+              <div class="v mono" id="mFailed">0</div>
+              <small>FAILED</small>
+            </article>
+            <button class="stat link accent" type="button" id="metricTools" title="去工具设置">
+              <div class="k">已授权</div>
+              <div class="v mono" id="mTools">0</div>
+              <small>TOOLS ENABLED</small>
+            </button>
+          </div>
+        </section>
+
+        <div class="cols">
+          <section class="sheet msgcard">
+            <div class="sheethead">
+              <div class="sheethead-text">
+                <div class="sh-kicker">01—A · 消息流</div>
+                <h3>会话流水</h3>
+                <div class="sh-desc">消息从 QQ 进来、从 Coo 出去，都在这里。</div>
+              </div>
+              <div class="chips filterchips" id="msgFilters">
+                <button class="chip on" type="button" data-msg="all">全部</button>
+                <button class="chip" type="button" data-msg="in">收到</button>
+                <button class="chip" type="button" data-msg="out">发出</button>
+                <button class="chip" type="button" data-msg="at">叫到</button>
+              </div>
+            </div>
+            <div class="liveband">
+              <span class="pulse" aria-hidden="true"></span>
+              <span class="livelabel">实时</span>
+              <span class="grow"></span>
+              <span class="mono dim count-pill" id="msgCount">0 条</span>
+            </div>
+            <div class="msglist" id="rows"></div>
+            <div class="empty" id="empty">
+              <div class="empty-orbit" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 8-8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /><path d="M4 4v4h4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+              </div>
+              <h4>还没有消息</h4>
+              <p>在 QQ 里 @ 一下 Coo，或让它听到一句话。</p>
+            </div>
+          </section>
+
+          <div class="side">
+            <section class="sheet">
+              <div class="sheethead">
+                <div class="sheethead-text">
+                  <div class="sh-kicker">01—B · 工具回执</div>
+                  <h3>最近调用</h3>
+                  <div class="sh-desc">Coo 用 AstrBot 的手做过什么。</div>
+                </div>
+              </div>
+              <div class="tlog" id="toolLog"></div>
+              <div class="compare placeholder left" id="toolLogEmpty">还没用过工具。</div>
+            </section>
+
+            <section class="sheet">
+              <div class="sheethead">
+                <div class="sheethead-text">
+                  <div class="sh-kicker">01—C · 只读</div>
+                  <h3>生效中的设置</h3>
+                  <div class="sh-desc">改值请去插件「配置」页；端口、监听地址和 token 改完点右上角「重开监听」，端口变了还要同步 World 的桥地址。</div>
+                </div>
+              </div>
+              <table class="kvtable">
+                <tbody>
+                  <tr><td>最近一条</td><td id="chLast">—</td></tr>
+                  <tr><td>建议出口</td><td id="chReply" title="QQ 消息用 astrbot_send_message；桌宠事件用 pet_say。">—</td></tr>
+                  <tr><td>接管对话</td><td id="kEnabled">—</td></tr>
+                  <tr><td>B 模式</td><td id="kObserve">—</td></tr>
+                  <tr><td>B 模式群</td><td id="kGroups">—</td></tr>
+                  <tr><td>称呼</td><td id="kAliases">—</td></tr>
+                  <tr><td>每分钟上限</td><td id="kMax">—</td></tr>
+                  <tr><td>图片</td><td id="kImage">—</td></tr>
+                  <tr><td>语音输入</td><td id="kVoiceIn">—</td></tr>
+                  <tr><td>语音输出</td><td id="kVoiceOut">—</td></tr>
+                  <tr><td>Token</td><td id="kToken">—</td></tr>
+                  <tr><td>QQ 上的主人</td><td id="kOwner">—</td></tr>
+                  <tr><td>已登记会话</td><td id="kConvs">—</td></tr>
+                </tbody>
+              </table>
+            </section>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ 工具 ============ -->
+      <div class="panel" id="panel-tools" hidden>
+
+        <section class="sheet toolhero">
+          <div class="thsum">
+            <div class="sh-kicker">02—A · 工具授权</div>
+            <div class="thbig mono"><span id="pickedCount">0</span><span class="thof">/ <span id="totalCount">0</span></span></div>
+            <div class="thlabel">个工具已交给 Coo</div>
+          </div>
+          <div class="thbody">
+            <p class="sh-desc">勾选后 Coo 会自己在需要时挑；没勾的它连名字都看不到。工具由 AstrBot 执行，权限按「触发这条消息的人」算。</p>
+            <div class="mixbar" id="mixBar" aria-hidden="true">
+              <span class="m-read" id="mixRead"></span><span class="m-write" id="mixWrite"></span><span class="m-exec" id="mixExec"></span>
+            </div>
+            <div class="chips" id="mixLegend"></div>
+          </div>
+        </section>
+
+        <div class="toolsbar">
+          <label class="searchbox">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="M16 16l4.2 4.2" /></svg>
+            <input id="toolSearch" type="search" placeholder="搜索工具名、参数、说明或插件…" autocomplete="off" spellcheck="false" />
+            <kbd>/</kbd>
+          </label>
+          <div class="seg" id="riskChips" role="group" aria-label="按风险筛选">
+            <button class="segbtn on" type="button" data-risk="all">全部 <b id="cAll">0</b></button>
+            <button class="segbtn" type="button" data-risk="read">读 <b id="cRead">0</b></button>
+            <button class="segbtn" type="button" data-risk="write">写 <b id="cWrite">0</b></button>
+            <button class="segbtn" type="button" data-risk="exec">执行 <b id="cExec">0</b></button>
+          </div>
+          <label class="cortico-switchrow">
+            <input type="checkbox" id="onlySel" />
+            <span class="cortico-switch" aria-hidden="true"></span>
+            <span>只看已选</span>
+          </label>
+        </div>
+
+        <div class="groups" id="toolGroups"></div>
+
+        <div class="emptybox" id="toolEmpty" hidden>
+          <div class="emptymark" aria-hidden="true">◍</div>
+          <div class="emptytitle">没有符合条件的工具</div>
+          <p class="muted">换个关键词，或把筛选放宽。</p>
+          <button class="btn sm" type="button" id="btnClearFilters">清除筛选</button>
+        </div>
+
+        <div class="loadbox" id="toolLoading">
+          <div class="skelrow"></div>
+          <div class="skelrow"></div>
+          <div class="skelrow"></div>
+        </div>
+
+        <div class="savebar" id="savebar" hidden>
+          <span class="dotpulse" aria-hidden="true"></span>
+          <span class="dirtytext" id="dirtyText">有未保存的改动</span>
+          <span class="grow"></span>
+          <button class="btn sm" type="button" id="btnRevert">撤销</button>
+          <button class="btn sm primary" type="button" id="btnSave">保存并同步</button>
+        </div>
+      </div>
+
+      <!-- ============ 语音 ============ -->
+      <div class="panel" id="panel-voice" hidden>
+
+        <div class="voice-grid">
+          <section class="sheet voice-sheet">
+            <div class="sheethead">
+              <div class="sheethead-text">
+                <div class="sh-kicker">03—A · 输入</div>
+                <h3>听</h3>
+                <div class="sh-desc">QQ 语音先转成文字，再交给 Coo。</div>
+              </div>
+              <label class="cortico-switchrow">
+                <input type="checkbox" id="sttEnabled" />
+                <span class="cortico-switch" aria-hidden="true"></span>
+                <span>转写语音</span>
+              </label>
+            </div>
+            <div class="voice-state">
+              <span class="voice-state-k">状态</span>
+              <span class="pill bad" id="sttPill">未配置</span>
+            </div>
+            <div class="voice-field">
+              <label class="voice-label" for="sttProvider">用哪个 Provider</label>
+              <select id="sttProvider" class="kvselect"></select>
+              <div class="voice-current">
+                <span class="voice-current-k">当前</span><span id="sttName">—</span>
+              </div>
+            </div>
+            <p class="voice-hint">
+              只转写本插件接管的群，不依赖 AstrBot 的全局 STT 开关。没配或关着时语音只会留下
+              <code>[语音]</code>，没有转写文字。
+            </p>
+          </section>
+
+          <section class="sheet voice-sheet">
+            <div class="sheethead">
+              <div class="sheethead-text">
+                <div class="sh-kicker">03—B · 输出</div>
+                <h3>说</h3>
+                <div class="sh-desc">Coo 想用语音时，桥会调 TTS 合成再发到 QQ。</div>
+              </div>
+              <label class="cortico-switchrow">
+                <input type="checkbox" id="ttsEnabled" />
+                <span class="cortico-switch" aria-hidden="true"></span>
+                <span>允许语音</span>
+              </label>
+            </div>
+            <div class="voice-state">
+              <span class="voice-state-k">状态</span>
+              <span class="pill bad" id="ttsPill">未配置</span>
+            </div>
+            <div class="voice-field">
+              <label class="voice-label" for="ttsProvider">用哪个 Provider</label>
+              <select id="ttsProvider" class="kvselect"></select>
+              <div class="voice-current">
+                <span class="voice-current-k">当前</span><span id="ttsName">—</span>
+              </div>
+              <div class="voice-current">
+                <span class="voice-current-k">长度</span><span id="ttsMeta">—</span>
+              </div>
+            </div>
+            <div class="voice-test">
+              <textarea id="ttsText" maxlength="300" rows="2" spellcheck="false">你好，我是 Coo。</textarea>
+              <div class="voice-actions">
+                <button class="btn sm" type="button" id="btnVoicePreview">试听</button>
+                <button class="btn sm" type="button" id="btnVoiceSend">发到最近的 QQ 会话</button>
+                <span class="msgline" id="voiceMsg"></span>
+              </div>
+              <audio id="voicePlayer" controls hidden></audio>
+            </div>
+            <p class="voice-hint">
+              语音只适合短句。桥没开 TTS、没有 Provider 或超过字数时会自动退回文字，
+              Cortico 那边会收到说明。
+            </p>
+          </section>
+        </div>
+
+      </div>
+
+      <footer class="pagefoot">
+        <span>CORTICO BRIDGE</span>
+        <span>消息从 QQ 来，从这里回去。</span>
+      </footer>
+
+    </div>
+  </main>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
