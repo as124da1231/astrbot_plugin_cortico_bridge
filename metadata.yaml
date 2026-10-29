@@ -1,8 +1,10 @@
 name: astrbot_plugin_cortico_bridge
 display_name: Cortico 桥
-short_desc: 让 Cortico 的 Persona 在 QQ 群里说话，AstrBot 只当手脚。
-desc: 把 QQ 会话接到 Cortico 的人格上。AstrBot 保留 QQ 连接、账号与全部已有插件，Cortico 负责说什么；支持 A/B 两种消息范围、图片原图或转述、语音转写与 TTS 语音回复、撤回与戳一戳等群通知，主人身份直接复用 AstrBot 管理员名单。
-version: 1.3.1
+short_desc: 让 Cortico 的 Persona 在 QQ 群里说话，AstrBot 只当手脚 / Bridge QQ chat to Cortico persona while AstrBot handles plugins
+desc: >-
+  把 QQ 会话接到 Cortico 的人格上。AstrBot 保留 QQ 连接、账号与全部已有插件，Cortico 负责说什么；支持 A/B 两种消息范围、图片原图或转述、语音转写与 TTS 语音回复、撤回与戳一戳等群通知，主人身份直接复用 AstrBot 管理员名单。
+  / Bridge QQ conversations to Cortico persona. AstrBot maintains connections, accounts, and plugins, while Cortico decides what to say; supports mention/all scopes, images, speech-to-text and TTS replies, group notifications, and owner role mapping.
+version: 1.3.3
 author: as124da1231
 repo: https://github.com/as124da1231/astrbot_plugin_cortico_bridge
 entry: main.py

@@ -2,11 +2,13 @@
 
 <img src="./logo.png" width="88" alt="Cortico 桥" align="right">
 
-**当前版本：1.3.1**
+**当前版本：1.3.3**
 
-把 AstrBot 收到的 QQ 消息转给 [Cortico](https://github.com/Pal-AI-Lab/Cortico) 的人格，再把它的回复发回群里。
+把 AstrBot 收到的 QQ 消息转给 [Cortico](https://github.com/Pal-AI-Lab/Cortico) 的人格，再把它的回复发回群里。  
+*Bridge QQ messages from AstrBot to [Cortico](https://github.com/Pal-AI-Lab/Cortico) persona and send replies back to QQ.*
 
-**分工**：AstrBot 保留 QQ 连接、账号、白名单和所有已有插件；Cortico 只负责「说什么」。
+**分工**：AstrBot 保留 QQ 连接、账号、白名单和所有已有插件；Cortico 只负责「说什么」。  
+***Division of work***: *AstrBot maintains QQ connections, accounts, whitelists, and all existing plugins; Cortico is only responsible for what to say.*
 
 Cortico 侧还有一个配套扩展 [`cortico-world-astrbot`](https://github.com/as124da1231/cortico-world-astrbot)，两个包按协议 v1 对接，**必须都装**。
 
