@@ -302,7 +302,20 @@ mark {
   font-size: 13px;
   line-height: 1.6;
 }
+.headmeta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-bottom: 2px; }
 .headactions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-bottom: 2px; }
+.versionbadge {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-dim);
+  font: 10px/1 var(--mono);
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
 .headerstate {
   display: inline-flex;
   align-items: center;

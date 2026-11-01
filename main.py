@@ -79,6 +79,22 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime())
 
 
+def _read_plugin_version() -> str:
+    """从同目录 metadata.yaml 读版本，避免面板里再手写一份。"""
+    try:
+        path = os.path.join(os.path.dirname(__file__), "metadata.yaml")
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("version:"):
+                    return line.split(":", 1)[1].strip()
+    except Exception:  # noqa: BLE001 - 读不到就不显示版本
+        pass
+    return ""
+
+
+PLUGIN_VERSION = _read_plugin_version()
+
+
 def _sniff_image_mime(b64: str) -> str:
     """从 base64 开头几个字节认出图片格式；认不出按 jpeg 算。"""
     head = b64[:16]
@@ -1141,6 +1157,7 @@ class CorticoBridge(Star):
         last = self._recent[-1] if self._recent else None
         return json_response(
             {
+                "version": PLUGIN_VERSION,
                 "connected": self.server.connected,
                 "listening": self.server.listening,
                 "listenError": self.server.listen_error,

@@ -193,6 +193,12 @@ function applyStatus(s) {
   $('connText').textContent = text;
   $('railState').textContent = s.connected ? '已连接' : s.listening ? '等待连接' : s.listenError ? '监听失败' : '未监听';
 
+  const versionBadge = $('versionBadge');
+  if (versionBadge) {
+    versionBadge.textContent = s.version ? 'v' + s.version : 'v—';
+    versionBadge.title = s.version ? `Cortico 桥 v${s.version}` : 'Cortico 桥版本';
+  }
+
   const headState = $('headState');
   if (headState) {
     headState.className =

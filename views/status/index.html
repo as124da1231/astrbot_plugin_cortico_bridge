@@ -77,14 +77,17 @@
           <h1 class="pagetitle" id="pageTitle">概览</h1>
           <p class="pagedesc" id="pageDesc">Cortico 连着没有，消息都在往哪儿走。</p>
         </div>
-        <div class="headactions" id="actionsStatus">
-          <span class="headerstate" id="headState"><i aria-hidden="true"></i><span>连接中</span></span>
-          <button class="btn sm" type="button" id="btnRestart" title="按当前配置重新绑定监听地址、端口和 token">重开监听</button>
-          <button class="btn sm danger" type="button" id="btnReset">清空统计</button>
-        </div>
-        <div class="headactions" id="actionsTools" hidden>
-          <button class="btn sm" type="button" id="btnReadOnly">只勾只读</button>
-          <button class="btn sm danger" type="button" id="btnClear">清空选择</button>
+        <div class="headmeta">
+          <div class="headactions" id="actionsStatus">
+            <span class="headerstate" id="headState"><i aria-hidden="true"></i><span>连接中</span></span>
+            <button class="btn sm" type="button" id="btnRestart" title="按当前配置重新绑定监听地址、端口和 token">重开监听</button>
+            <button class="btn sm danger" type="button" id="btnReset">清空统计</button>
+          </div>
+          <div class="headactions" id="actionsTools" hidden>
+            <button class="btn sm" type="button" id="btnReadOnly">只勾只读</button>
+            <button class="btn sm danger" type="button" id="btnClear">清空选择</button>
+          </div>
+          <span class="versionbadge mono" id="versionBadge" title="Cortico 桥版本">v—</span>
         </div>
       </div>
     </header>
