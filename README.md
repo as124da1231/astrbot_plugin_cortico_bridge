@@ -2,7 +2,7 @@
 
 <img src="./logo.png" width="88" alt="Cortico 桥" align="right">
 
-**当前版本：1.3.3**
+**当前版本：1.3.4**
 
 把 AstrBot 收到的 QQ 消息转给 [Cortico](https://github.com/Pal-AI-Lab/Cortico) 的人格，再把它的回复发回群里。  
 *Bridge QQ messages from AstrBot to [Cortico](https://github.com/Pal-AI-Lab/Cortico) persona and send replies back to QQ.*
@@ -20,6 +20,9 @@ Cortico 侧还有一个配套扩展 [`cortico-world-astrbot`](https://github.com
 
 - 语音转写、引用回复（`reply_to`）、状态工具目前只做过单测，没有实机用例。
 - 图片单张上限 12MB（base64），超过会被跳过并记一条 WARN。
+- 首次连接桥最多等 12 秒；超时先继续启动，桥在后台重连，不会拖住后面的扩展。
+- 发送确认超时会标成「结果未知」，不会自动重试；要重发前先确认对方有没有收到。
+- 发图要求授权来自这一轮最后一条管理员消息；桌宠轮次和只收到通知的轮次不能复用旧授权。
 
 ## 它解决什么
 

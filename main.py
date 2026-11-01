@@ -399,6 +399,7 @@ class CorticoBridge(Star):
         await self.server.start()
 
     async def terminate(self):
+        self.delivery.flush()
         await self.server.stop()
         if getattr(builtins, _ACTIVE_SERVER_ATTR, None) is self.server:
             with contextlib.suppress(Exception):
@@ -468,8 +469,8 @@ class CorticoBridge(Star):
         platform: str,
         image: dict | None = None,
         voice: bool = False,
-    ) -> tuple[bool, str, bool]:
-        ok, note, used_voice = await self.delivery.send(
+    ) -> tuple[bool, str, bool, bool]:
+        ok, note, used_voice, uncertain = await self.delivery.send(
             platform, conv_kind, conv_id, text, reply_to, image, voice
         )
         if ok:
@@ -493,15 +494,17 @@ class CorticoBridge(Star):
                 logger.info(f"Cortico Bridge: 语音回退 —— {note}")
         else:
             self.stats["failed"] += 1
-            logger.warning(f"Cortico Bridge: 发送失败 conv={conv_kind}:{conv_id} —— {note}")
+            # 结果未知和「确定没发」要分开说，否则模型会直接重发造成重复。
+            prefix = "发送结果未知" if uncertain else "发送失败"
+            logger.warning(f"Cortico Bridge: {prefix} conv={conv_kind}:{conv_id} —— {note}")
             self._broadcast(
                 {
                     "type": "error",
                     "ts": _now_iso(),
-                    "text": f"发送失败 {conv_kind}:{conv_id} —— {note}",
+                    "text": f"{prefix} {conv_kind}:{conv_id} —— {note}",
                 }
             )
-        return ok, note, used_voice
+        return ok, note, used_voice, uncertain
 
     def _remember_out(
         self,
@@ -1077,8 +1080,11 @@ class CorticoBridge(Star):
             source = _s(getattr(comp, "url", "")) or _s(getattr(comp, "file", ""))
             if not source:
                 return ""
-            result = await provider.get_text(source)
+            result = await asyncio.wait_for(provider.get_text(source), timeout=20)
             return _s(result).strip()
+        except asyncio.TimeoutError:
+            logger.warning("Cortico Bridge: 语音转写超过 20 秒，本条按无转写处理")
+            return ""
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"Cortico Bridge: 语音转写失败 —— {exc}")
             return ""
@@ -1390,7 +1396,7 @@ class CorticoBridge(Star):
         if len(parts) != 3:
             return error_response("最近的会话标识不完整。", status_code=400)
         platform, kind, conv_id = parts
-        ok, note, used_voice = await self.delivery.send(
+        ok, note, used_voice, _uncertain = await self.delivery.send(
             platform, kind, conv_id, text, "", None, True
         )
         if not ok:

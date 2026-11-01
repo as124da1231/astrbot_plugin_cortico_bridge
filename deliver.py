@@ -21,6 +21,8 @@ CONV_KINDS = ("group", "private")
 UMO_SAVE_INTERVAL = 10.0
 # 最多记住多少个会话；和内存表一致。
 UMO_MAX = 200
+# 单次平台发送的上限；超时后结果就是「未知」，不能当成功，也不能当没发。
+SEND_TIMEOUT = 20.0
 
 
 def _s(value: Any) -> str:
@@ -37,6 +39,7 @@ class Delivery:
         # 重启后会话表为空会发不出去；把 umo 落到插件数据目录。
         self._umos_file = os.path.join(data_dir, "umos.json") if data_dir else ""
         self._last_save = 0.0
+        self._dirty = False
         self._load_umos()
 
     # ---------- umo 登记 ----------
@@ -83,8 +86,9 @@ class Delivery:
             return
         now = time.time()
         if not force and now - self._last_save < UMO_SAVE_INTERVAL:
+            # 这次改动还在内存里；下次落盘或 terminate 时补上。
+            self._dirty = True
             return
-        self._last_save = now
         try:
             os.makedirs(os.path.dirname(self._umos_file), exist_ok=True)
             payload = {
@@ -94,8 +98,16 @@ class Delivery:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=0)
             os.replace(tmp, self._umos_file)
+            self._last_save = now
+            self._dirty = False
         except Exception as exc:  # noqa: BLE001 - 落盘失败不影响发送
+            self._dirty = True
             logger.debug(f"Cortico Bridge: 会话表落盘失败 —— {exc}")
+
+    def flush(self) -> None:
+        """把内存里的会话表立刻写盘；插件卸载/重启前调用。"""
+        if self._dirty or self._last_save == 0:
+            self._save_umos(force=True)
 
     def remember(self, platform_id: str, conv_kind: str, conv_id: str, umo: str) -> None:
         if not umo:
@@ -221,19 +233,19 @@ class Delivery:
         reply_to: str = "",
         image: dict | None = None,
         voice: bool = False,
-    ) -> tuple[bool, str, bool]:
-        """发一条消息。返回 (成功, 备注, 是否真的用了语音)。
+    ) -> tuple[bool, str, bool, bool]:
+        """发一条消息。返回 (成功, 备注, 是否真的用了语音, 结果是否未知)。
 
         语音是「尽量」：没开 TTS、没 Provider、太长或合成失败，都会退回文字，
         并在备注里说明，不把整条消息吞掉。
         """
         if conv_kind not in CONV_KINDS:
-            return False, f"未知的会话类型 {conv_kind}", False
+            return False, f"未知的会话类型 {conv_kind}", False, False
         umo = self.umo_for(platform_id, conv_kind, conv_id)
         if not umo:
-            return False, "还没有收到过这个会话的消息，缺少可用的会话标识", False
+            return False, "还没有收到过这个会话的消息，缺少可用的会话标识", False, False
         if not self.allow():
-            return False, f"已达到每分钟 {self._limit()} 条的上限，本条没有发出", False
+            return False, f"已达到每分钟 {self._limit()} 条的上限，本条没有发出", False, False
 
         used_voice = False
         note = ""
@@ -252,7 +264,7 @@ class Delivery:
                 if not self._tts_enabled():
                     note = "TTS 没有在插件配置里打开，已改发文字"
                 elif not text.strip():
-                    return False, "语音需要正文", False
+                    return False, "语音需要正文", False, False
                 elif self._tts_limit() > 0 and len(text) > self._tts_limit():
                     note = f"文字超过 {self._tts_limit()} 字，已改发文字"
                 else:
@@ -282,12 +294,29 @@ class Delivery:
             if image:
                 chain.chain.append(Image.fromBase64(_s(image.get("base64"))))
             if not chain.chain:
-                return False, "正文和图片都是空的", False
+                return False, "正文和图片都是空的", False, False
 
-            ok = await self._context.send_message(umo, chain)
+            try:
+                ok = await asyncio.wait_for(
+                    self._context.send_message(umo, chain), timeout=SEND_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Cortico Bridge: 平台发送超过 %.0f 秒没有确认，消息可能已经发出",
+                    SEND_TIMEOUT,
+                )
+                return (
+                    False,
+                    f"平台发送超过 {SEND_TIMEOUT:.0f} 秒没有确认，消息可能已经发出",
+                    False,
+                    True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Cortico Bridge: 发送失败 —— {exc}")
+                return False, str(exc), False, True
             if ok is False:
-                return False, "AstrBot 没有找到该会话对应的平台", False
-            return True, note, used_voice
+                return False, "AstrBot 没有找到该会话对应的平台", False, False
+            return True, note, used_voice, False
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"Cortico Bridge: 发送失败 —— {exc}")
-            return False, str(exc), False
+            return False, str(exc), False, False
