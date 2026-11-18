@@ -112,7 +112,7 @@
       "allowlist",
       "all"
     ],
-    "default": "allowlist",
+    "default": "all",
     "hint": "off=不接私聊；allowlist=只接 private_allow 里的 UMO/QQ 号；all=所有能私聊到 bot 的人都接。"
   },
   "private_allow": {
