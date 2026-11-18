@@ -316,6 +316,19 @@ mark {
   letter-spacing: .04em;
   white-space: nowrap;
 }
+.umo {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: .72;
+}
+.policy-sheet { padding-bottom: 22px; }
+.policy { display: flex; flex-direction: column; gap: 12px; padding: 16px 0 0; }
+.policy-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.policy-label { color: var(--ink-dim); font: 11px/1.4 var(--sans); }
+.policy .chips { min-height: 24px; }
+.policy .seg { flex-wrap: wrap; }
 .headerstate {
   display: inline-flex;
   align-items: center;

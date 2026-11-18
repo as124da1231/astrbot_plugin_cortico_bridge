@@ -183,6 +183,8 @@ class CorticoBridge(Star):
         if HAS_WEB_API:
             for route, handler, methods, desc in (
                 ("status", self.page_status, ["GET"], "桥的状态与配置"),
+                ("groups", self.page_groups, ["GET", "POST"], "群聊接管设置"),
+                ("private", self.page_private, ["GET", "POST"], "私聊接管设置"),
                 ("tools", self.page_tools, ["GET", "POST"], "给 Cortico 用的工具设置"),
                 ("voice", self.page_voice, ["GET", "POST"], "语音输入/输出设置"),
                 ("voice/preview", self.page_voice_preview, ["POST"], "合成一段试听语音"),
@@ -241,6 +243,61 @@ class CorticoBridge(Star):
         if isinstance(raw, list):
             return [str(x).strip() for x in raw if str(x).strip()]
         return [x.strip() for x in _s(raw).replace("，", ",").split(",") if x.strip()]
+
+    def _private_mode(self) -> str:
+        raw = self.config.get("private_mode")
+        # 旧配置没有这个键：保持原来“私聊全收”的行为，避免升级后突然断私聊。
+        if raw in (None, ""):
+            return "all"
+        mode = _s(raw).strip().lower()
+        return mode if mode in ("off", "allowlist", "all") else "all"
+
+    def _private_allow(self) -> list[str]:
+        raw = self.config.get("private_allow", [])
+        if isinstance(raw, list):
+            return [str(x).strip() for x in raw if str(x).strip()]
+        return [x.strip() for x in _s(raw).replace("，", ",").split(",") if x.strip()]
+
+    def _private_admin_bypass(self) -> bool:
+        return bool(self.config.get("private_admin_bypass", True))
+
+    def _private_deny(self) -> str:
+        mode = _s(self.config.get("private_deny", "ignore")).strip().lower()
+        return mode if mode in ("ignore", "astrbot") else "ignore"
+
+    def _umo_of(self, event: AstrMessageEvent) -> str:
+        return _s(getattr(event, "unified_msg_origin", "")).strip()
+
+    def _matches_scope(self, event: AstrMessageEvent, items: list[str]) -> bool:
+        """UMO 优先；旧配置里的群号/QQ 号继续兼容。"""
+        if not items:
+            return False
+        umo = self._umo_of(event)
+        if umo and umo in items:
+            return True
+        if event.is_private_chat():
+            sid = _s(event.get_sender_id() or event.get_session_id())
+        else:
+            sid = _s(event.get_group_id())
+        return bool(sid) and sid in items
+
+    def _group_allowed(self, event: AstrMessageEvent) -> bool:
+        if event.is_private_chat():
+            return True
+        groups = self._observe_groups()
+        return not groups or self._matches_scope(event, groups)
+
+    def _private_allowed(self, event: AstrMessageEvent) -> bool:
+        if not event.is_private_chat():
+            return True
+        mode = self._private_mode()
+        if mode == "off":
+            return False
+        if mode == "all":
+            return True
+        if self._private_admin_bypass() and self._is_admin(event):
+            return True
+        return self._matches_scope(event, self._private_allow())
 
     def _aliases(self) -> list[str]:
         raw = self.config.get("name_aliases", "")
@@ -496,7 +553,7 @@ class CorticoBridge(Star):
                 self.stats["voices"] = self.stats.get("voices", 0) + 1
             if image is not None:
                 self.stats["images"] = self.stats.get("images", 0) + 1
-            self._remember_out(conv_kind, conv_id, text, image, used_voice)
+            self._remember_out(conv_kind, conv_id, text, image, used_voice, umo)
             logger.info(
                 "Cortico Bridge: 已发出 conv=%s:%s %s%s%s"
                 % (
@@ -530,6 +587,7 @@ class CorticoBridge(Star):
         text: str,
         image: dict | None = None,
         voice: bool = False,
+        umo: str = "",
     ) -> None:
         conv_key = f"{conv_kind}:{conv_id}"
         conv_name = next(
@@ -546,6 +604,7 @@ class CorticoBridge(Star):
             "channel": "qq",
             "conv": conv_key,
             "convName": conv_name,
+            "umo": umo,
             "sender": "Coo",
             "text": ("[语音] " + text[:200]).strip() if voice else ("[图片] " + text[:200]).strip() if image else text[:200],
             "image": image is not None,
@@ -591,9 +650,9 @@ class CorticoBridge(Star):
         if not self.server.connected:
             return
 
-        groups = self._observe_groups()
-        gid = _s(event.get_group_id())
-        if groups and gid not in groups:
+        if event.is_private_chat():
+            return
+        if not self._group_allowed(event):
             return
 
         event.is_at_or_wake_command = True
@@ -638,10 +697,14 @@ class CorticoBridge(Star):
         # 群名单对 A/B 两种模式都生效：名单外的群完全不接管，交回 AstrBot。
         # 否则 B 模式只认名单、A 模式却谁 @ 都接，行为会不一致。
         if conv_kind == "group":
-            groups = self._observe_groups()
-            if groups and conv_id not in groups:
+            if not self._group_allowed(event):
                 logger.debug(f"Cortico Bridge: 群 {conv_id} 不在接管名单里，本轮交给 AstrBot")
                 return
+        elif not self._private_allowed(event):
+            logger.debug(f"Cortico Bridge: 私聊 {conv_id} 不在允许名单里")
+            if self._private_deny() == "ignore":
+                event.stop_event()
+            return
 
         platform_id = _s(event.get_platform_id())
         is_admin = self._is_admin(event)
@@ -709,6 +772,7 @@ class CorticoBridge(Star):
             "notice": False,
             "conv": f"{conv_kind}:{conv_id}",
             "convName": conv_name,
+            "umo": frame.get("umo", ""),
             "sender": frame["sender"]["name"] or frame["sender"]["id"],
             "text": preview[:200],
             "mentioned": frame["mentioned"],
@@ -1006,12 +1070,10 @@ class CorticoBridge(Star):
         return "", ""
 
     def _notice_in_scope(self, event: AstrMessageEvent) -> bool:
-        """这条通知是不是归我们接管；私聊一律算，群聊看名单。"""
+        """这条通知是不是归我们接管；群聊看名单，私聊看 private 策略。"""
         if event.is_private_chat():
-            return True
-        groups = self._observe_groups()
-        gid = _s(event.get_group_id())
-        return not groups or gid in groups
+            return self._private_allowed(event)
+        return self._group_allowed(event)
 
     async def _push_notice(
         self, event: AstrMessageEvent, text: str, ref: str = ""
@@ -1032,10 +1094,10 @@ class CorticoBridge(Star):
         )
         if not conv_id:
             return False
-        if conv_kind == "group":
-            groups = self._observe_groups()
-            if groups and conv_id not in groups:
-                return False
+        if conv_kind == "group" and not self._group_allowed(event):
+            return False
+        if conv_kind == "private" and not self._private_allowed(event):
+            return False
 
         platform_id = _s(event.get_platform_id())
         self.delivery.remember(platform_id, conv_kind, conv_id, event.unified_msg_origin)
@@ -1078,6 +1140,7 @@ class CorticoBridge(Star):
                 "notice": True,
                 "conv": f"{conv_kind}:{conv_id}",
                 "convName": conv_name,
+                "umo": frame.get("umo", ""),
                 "sender": "通知",
                 "text": text[:200],
                 "mentioned": False,
@@ -1175,6 +1238,10 @@ class CorticoBridge(Star):
                 "enabled": bool(self.config.get("enabled", False)),
                 "observeAll": bool(self.config.get("observe_all", False)),
                 "groups": self._observe_groups(),
+                "privateMode": self._private_mode(),
+                "privateAllow": self._private_allow(),
+                "privateAdminBypass": self._private_admin_bypass(),
+                "privateDeny": self._private_deny(),
                 "aliases": self._aliases(),
                 "host": self.server.host,
                 "port": self.server.port,
@@ -1248,6 +1315,79 @@ class CorticoBridge(Star):
             "lastMessage": last,
             "replyWith": "astrbot_send_message" if last else "",
         }
+
+    def _persist_plugin_config(self) -> bool:
+        save = getattr(self.config, "save_config", None)
+        if not callable(save):
+            return False
+        try:
+            save()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Cortico Bridge: 保存配置失败 —— {exc}")
+            return False
+
+    async def page_groups(self):
+        """群聊设置：observe_groups，支持 UMO 或旧群号。"""
+        if request is not None and _s(request.method).upper() == "POST":
+            payload = await request.json(default={})
+            groups = payload.get("groups") if isinstance(payload, dict) else None
+            if not isinstance(groups, list):
+                return error_response("groups 必须是列表。", status_code=400)
+            picked = []
+            for item in groups:
+                value = _s(item).strip()
+                if value and value not in picked:
+                    picked.append(value)
+            self.config["observe_groups"] = picked
+            if not self._persist_plugin_config():
+                return error_response("当前 AstrBot 不支持保存配置。", status_code=500)
+            return json_response({"saved": True, "groups": picked})
+        return json_response({"groups": self._observe_groups()})
+
+    async def page_private(self):
+        """私聊设置：模式、UMO 白名单、管理员豁免、拒绝策略。"""
+        if request is not None and _s(request.method).upper() == "POST":
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求格式不正确。", status_code=400)
+            mode = _s(payload.get("mode", self._private_mode())).strip().lower()
+            if mode not in ("off", "allowlist", "all"):
+                return error_response("mode 必须是 off / allowlist / all。", status_code=400)
+            deny = _s(payload.get("deny", self._private_deny())).strip().lower()
+            if deny not in ("ignore", "astrbot"):
+                return error_response("deny 必须是 ignore / astrbot。", status_code=400)
+            allow_raw = payload.get("allow", self._private_allow())
+            if not isinstance(allow_raw, list):
+                return error_response("allow 必须是列表。", status_code=400)
+            allow = []
+            for item in allow_raw:
+                value = _s(item).strip()
+                if value and value not in allow:
+                    allow.append(value)
+            self.config["private_mode"] = mode
+            self.config["private_allow"] = allow
+            self.config["private_admin_bypass"] = bool(payload.get("adminBypass", self._private_admin_bypass()))
+            self.config["private_deny"] = deny
+            if not self._persist_plugin_config():
+                return error_response("当前 AstrBot 不支持保存配置。", status_code=500)
+            return json_response(
+                {
+                    "saved": True,
+                    "mode": mode,
+                    "allow": allow,
+                    "adminBypass": self._private_admin_bypass(),
+                    "deny": deny,
+                }
+            )
+        return json_response(
+            {
+                "mode": self._private_mode(),
+                "allow": self._private_allow(),
+                "adminBypass": self._private_admin_bypass(),
+                "deny": self._private_deny(),
+            }
+        )
 
     async def page_tools(self):
         """工具设置：列出可调工具，读写同一个配置项 tools_allow。"""

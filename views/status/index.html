@@ -39,6 +39,21 @@
         <span class="lbl">概览</span>
         <span class="navdot" id="railDot" hidden aria-hidden="true"></span>
       </button>
+      <button class="navitem" type="button" data-panel="groups">
+        <span class="tag" aria-hidden="true"></span>
+        <svg class="navicon" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M3 6.5h14M3 10h14M3 13.5h9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+        <span class="lbl">群聊</span>
+      </button>
+      <button class="navitem" type="button" data-panel="private">
+        <span class="tag" aria-hidden="true"></span>
+        <svg class="navicon" viewBox="0 0 20 20" aria-hidden="true">
+          <circle cx="10" cy="7" r="3" fill="none" stroke="currentColor" stroke-width="1.4" />
+          <path d="M4 16c1-3 3.2-4.5 6-4.5s5 1.5 6 4.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+        </svg>
+        <span class="lbl">私聊</span>
+      </button>
       <button class="navitem" type="button" data-panel="tools">
         <span class="tag" aria-hidden="true"></span>
         <svg class="navicon" viewBox="0 0 20 20" aria-hidden="true">
@@ -202,6 +217,79 @@
             </section>
           </div>
         </div>
+      </div>
+
+      <!-- ============ 群聊 ============ -->
+      <div class="panel" id="panel-groups" hidden>
+        <section class="sheet policy-sheet">
+          <div class="sheethead">
+            <div class="sheethead-text">
+              <div class="sh-kicker">02·A · 群聊</div>
+              <h3>接管哪些群</h3>
+              <div class="sh-desc">只处理列表里的群；列表为空表示接管全部群。</div>
+            </div>
+          </div>
+          <div class="policy">
+            <div class="policy-row">
+              <input class="kvselect grow" id="groupInput" placeholder="default:GroupMessage:123456789 或群号" />
+              <button class="btn sm" type="button" id="btnGroupAdd">添加</button>
+            </div>
+            <div class="chips" id="groupList"></div>
+            <label class="cortico-switchrow">
+              <input type="checkbox" id="groupAll" />
+              <span class="cortico-switch" aria-hidden="true"></span>
+              <span>接管全部群（列表为空，慎用）</span>
+            </label>
+            <div class="savebar" id="groupSavebar" hidden>
+              <span class="dirtytext">群聊设置未保存</span>
+              <span class="grow"></span>
+              <button class="btn sm primary" type="button" id="btnGroupSave">保存</button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- ============ 私聊 ============ -->
+      <div class="panel" id="panel-private" hidden>
+        <section class="sheet policy-sheet">
+          <div class="sheethead">
+            <div class="sheethead-text">
+              <div class="sh-kicker">02·B · 私聊</div>
+              <h3>谁可以私聊 Coo</h3>
+              <div class="sh-desc">QQ 私聊仍要求 bot 和对方是好友；这里控制谁进来。</div>
+            </div>
+          </div>
+          <div class="policy">
+            <div class="policy-label">模式</div>
+            <div class="seg" id="privateMode">
+              <button class="segbtn" type="button" data-mode="off">关闭</button>
+              <button class="segbtn" type="button" data-mode="allowlist">仅名单</button>
+              <button class="segbtn" type="button" data-mode="all">全部</button>
+            </div>
+            <div class="policy-row">
+              <input class="kvselect grow" id="privateInput" placeholder="default:FriendMessage:100000001 或 QQ 号" />
+              <button class="btn sm" type="button" id="btnPrivateAdd">添加</button>
+            </div>
+            <div class="chips" id="privateList"></div>
+            <label class="cortico-switchrow">
+              <input type="checkbox" id="privateAdmin" />
+              <span class="cortico-switch" aria-hidden="true"></span>
+              <span>管理员豁免</span>
+            </label>
+            <div class="policy-row">
+              <label class="policy-label" for="privateDeny">被拒时</label>
+              <select class="kvselect" id="privateDeny">
+                <option value="ignore">静默忽略</option>
+                <option value="astrbot">交给 AstrBot</option>
+              </select>
+            </div>
+            <div class="savebar" id="privateSavebar" hidden>
+              <span class="dirtytext">私聊设置未保存</span>
+              <span class="grow"></span>
+              <button class="btn sm primary" type="button" id="btnPrivateSave">保存</button>
+            </div>
+          </div>
+        </section>
       </div>
 
       <!-- ============ 工具 ============ -->

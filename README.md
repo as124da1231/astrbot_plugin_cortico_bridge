@@ -16,6 +16,19 @@ Cortico 侧还有一个配套扩展 [`cortico-world-astrbot`](https://github.com
 
 已在 **AstrBot 4.29.1 + aiocqhttp** 上实机验证：文字、图片（单图 / 多图 / 引用图）、撤回与戳一戳通知、主人身份、断线重连。
 
+## 群聊与私聊
+
+配置里的会话键优先用 AstrBot 的 UMO：`平台:消息类型:会话ID`。
+
+```text
+群聊：default:GroupMessage:123456789
+私聊：default:FriendMessage:100000001
+```
+
+- 群聊：`observe_groups` 接受 UMO 或旧群号；空列表表示接管全部群。
+- 私聊：`private_mode` 为 `off` / `allowlist` / `all`；`private_allow` 接受 UMO 或旧 QQ 号。
+- 私聊仍受 QQ 好友关系限制：bot 和对方不是好友时，QQ 会拒绝私聊回复。
+
 ## 已知边界
 
 - 语音转写、引用回复（`reply_to`）、状态工具目前只做过单测，没有实机用例。

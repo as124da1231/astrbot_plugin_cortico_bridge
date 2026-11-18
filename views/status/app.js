@@ -14,6 +14,16 @@ const PANELS = {
     title: '概览',
     desc: 'Cortico 连着没有，消息都在往哪儿走。',
   },
+  groups: {
+    eyebrow: 'CORTICO BRIDGE · 群聊',
+    title: '群聊',
+    desc: '只接管列表里的群；列表为空表示接管全部群。',
+  },
+  private: {
+    eyebrow: 'CORTICO BRIDGE · 私聊',
+    title: '私聊',
+    desc: '谁可以私聊 Coo；QQ 私聊仍要求 bot 和对方是好友。',
+  },
   tools: {
     eyebrow: 'CORTICO BRIDGE · 工具',
     title: '工具',
@@ -35,6 +45,11 @@ const RISK = {
 const state = {
   panel: 'status',
   status: null,
+  groups: [],
+  groupAll: true,
+  groupsDirty: false,
+  private: { mode: 'allowlist', allow: [], adminBypass: true, deny: 'ignore' },
+  privateDirty: false,
   rows: [],
   msgFilter: 'all',
   toolLog: [],
@@ -140,6 +155,8 @@ function setPanel(name) {
     btn.setAttribute('aria-selected', btn.dataset.panel === name ? 'true' : 'false');
   });
   $('panel-status').hidden = name !== 'status';
+  $('panel-groups').hidden = name !== 'groups';
+  $('panel-private').hidden = name !== 'private';
   $('panel-tools').hidden = name !== 'tools';
   $('panel-voice').hidden = name !== 'voice';
   $('actionsStatus').hidden = name !== 'status';
@@ -163,6 +180,13 @@ function setPanel(name) {
 
   if (name === 'voice') {
     loadVoice().catch((e) => toast('读取语音设置失败：' + (e.message || e), true));
+  }
+
+  if (name === 'groups') {
+    loadGroups().catch((e) => toast('读取群聊设置失败：' + (e.message || e), true));
+  }
+  if (name === 'private') {
+    loadPrivate().catch((e) => toast('读取私聊设置失败：' + (e.message || e), true));
   }
 }
 
@@ -366,6 +390,11 @@ function renderRows() {
     meta.appendChild(
       el('span', 'who', `· ${kind === 'private' ? ch : `${ch} ${convLabel(kind, id, row.convName)}`}`),
     );
+    if (row.umo) {
+      const umo = el('span', 'who mono umo', row.umo);
+      umo.title = row.umo;
+      meta.appendChild(umo);
+    }
     const text = el('div', 'mtext');
     text.textContent = row.text || '';
 
@@ -822,6 +851,168 @@ function armClear() {
   state.armTimer = setTimeout(disarmClear, 3200);
 }
 
+/* ---------------- 群聊 / 私聊 ---------------- */
+
+function renderGroups() {
+  const list = $('groupList');
+  if (!list) return;
+  list.textContent = '';
+  state.groups.forEach((value) => {
+    const chip = el('button', 'chip on', value);
+    chip.type = 'button';
+    chip.title = '点击移除';
+    chip.addEventListener('click', () => {
+      state.groups = state.groups.filter((item) => item !== value);
+      state.groupsDirty = true;
+      renderGroups();
+    });
+    list.appendChild(chip);
+  });
+  if (!state.groups.length) {
+    list.appendChild(el('span', 'muted', '列表为空：接管全部群'));
+  }
+  $('groupAll').checked = state.groupAll;
+  $('groupList').hidden = state.groupAll;
+  $('groupInput').disabled = state.groupAll;
+  $('btnGroupAdd').disabled = state.groupAll;
+  $('groupSavebar').hidden = !state.groupsDirty;
+}
+
+async function loadGroups() {
+  const data = unwrap(await bridge.apiGet('groups'));
+  state.groups = Array.isArray(data.groups) ? data.groups.slice() : [];
+  state.groupAll = state.groups.length === 0;
+  state.groupsDirty = false;
+  renderGroups();
+}
+
+async function saveGroups() {
+  const groups = state.groupAll ? [] : state.groups;
+  const btn = $('btnGroupSave');
+  btn.disabled = true;
+  try {
+    await bridge.apiPost('groups', { groups });
+    state.groups = groups;
+    state.groupsDirty = false;
+    renderGroups();
+    toast(groups.length ? `已保存 ${groups.length} 个群` : '已设为接管全部群');
+  } catch (e) {
+    toast('保存失败：' + (e.message || e), true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderPrivate() {
+  const data = state.private;
+  document.querySelectorAll('#privateMode .segbtn').forEach((btn) => {
+    btn.classList.toggle('on', btn.dataset.mode === data.mode);
+  });
+  const list = $('privateList');
+  list.textContent = '';
+  (data.allow || []).forEach((value) => {
+    const chip = el('button', 'chip on', value);
+    chip.type = 'button';
+    chip.title = '点击移除';
+    chip.addEventListener('click', () => {
+      data.allow = data.allow.filter((item) => item !== value);
+      state.privateDirty = true;
+      renderPrivate();
+    });
+    list.appendChild(chip);
+  });
+  if (!(data.allow || []).length) {
+    list.appendChild(el('span', 'muted', data.mode === 'allowlist' ? '名单为空：没人能私聊' : '名单为空'));
+  }
+  $('privateAdmin').checked = data.adminBypass !== false;
+  $('privateDeny').value = data.deny || 'ignore';
+  $('privateSavebar').hidden = !state.privateDirty;
+}
+
+async function loadPrivate() {
+  const data = unwrap(await bridge.apiGet('private'));
+  state.private = {
+    mode: data.mode || 'allowlist',
+    allow: Array.isArray(data.allow) ? data.allow.slice() : [],
+    adminBypass: data.adminBypass !== false,
+    deny: data.deny || 'ignore',
+  };
+  state.privateDirty = false;
+  renderPrivate();
+}
+
+async function savePrivate() {
+  const btn = $('btnPrivateSave');
+  btn.disabled = true;
+  try {
+    await bridge.apiPost('private', state.private);
+    state.privateDirty = false;
+    renderPrivate();
+    toast('私聊设置已保存');
+  } catch (e) {
+    toast('保存失败：' + (e.message || e), true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function initScope() {
+  $('btnGroupAdd').addEventListener('click', () => {
+    const value = $('groupInput').value.trim();
+    if (!value) return;
+    if (!state.groups.includes(value)) state.groups.push(value);
+    $('groupInput').value = '';
+    state.groupAll = false;
+    state.groupsDirty = true;
+    renderGroups();
+  });
+  $('groupInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      $('btnGroupAdd').click();
+    }
+  });
+  $('groupAll').addEventListener('change', () => {
+    state.groupAll = $('groupAll').checked;
+    state.groupsDirty = true;
+    renderGroups();
+  });
+  $('btnGroupSave').addEventListener('click', saveGroups);
+
+  $('privateMode').addEventListener('click', (e) => {
+    const btn = e.target.closest('.segbtn');
+    if (!btn) return;
+    state.private.mode = btn.dataset.mode || 'allowlist';
+    state.privateDirty = true;
+    renderPrivate();
+  });
+  $('btnPrivateAdd').addEventListener('click', () => {
+    const value = $('privateInput').value.trim();
+    if (!value) return;
+    if (!state.private.allow.includes(value)) state.private.allow.push(value);
+    $('privateInput').value = '';
+    state.privateDirty = true;
+    renderPrivate();
+  });
+  $('privateInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      $('btnPrivateAdd').click();
+    }
+  });
+  $('privateAdmin').addEventListener('change', () => {
+    state.private.adminBypass = $('privateAdmin').checked;
+    state.privateDirty = true;
+    renderPrivate();
+  });
+  $('privateDeny').addEventListener('change', () => {
+    state.private.deny = $('privateDeny').value;
+    state.privateDirty = true;
+    renderPrivate();
+  });
+  $('btnPrivateSave').addEventListener('click', savePrivate);
+}
+
 function initTools() {
   $('toolSearch').addEventListener('input', (e) => {
     state.query = e.target.value;
@@ -1131,6 +1322,7 @@ async function main() {
   });
 
   initMessages();
+  initScope();
   initTools();
   initVoice();
 

@@ -59,7 +59,12 @@
   "image_mode": {
     "description": "群里的图片怎么给 Cortico",
     "type": "string",
-    "options": ["auto", "image", "describe", "off"],
+    "options": [
+      "auto",
+      "image",
+      "describe",
+      "off"
+    ],
     "default": "auto",
     "hint": "auto=能读图就传原图、不能就让视觉模型转述；image=始终传原图（要求 Cortico 端点勾了「支持图片输入」）；describe=始终转述成文字；off=只留 [图片] 占位，不花任何视觉调用。"
   },
@@ -98,5 +103,38 @@
     "type": "list",
     "default": [],
     "hint": "一行一个工具名，留空表示一个都不给，填 * 表示全部。工具执行时用「触发那条消息的人」的身份，管理员工具会被 AstrBot 自己的权限层拦下。可用工具名在插件启动日志里列出（搜「可调工具」）。"
+  },
+  "private_mode": {
+    "description": "私聊策略",
+    "type": "string",
+    "options": [
+      "off",
+      "allowlist",
+      "all"
+    ],
+    "default": "allowlist",
+    "hint": "off=不接私聊；allowlist=只接 private_allow 里的 UMO/QQ 号；all=所有能私聊到 bot 的人都接。"
+  },
+  "private_allow": {
+    "description": "私聊白名单",
+    "type": "list",
+    "default": [],
+    "hint": "一行一个 UMO（default:FriendMessage:QQ号）或 QQ 号。private_mode=allowlist 时生效；空列表表示没人能私聊。"
+  },
+  "private_admin_bypass": {
+    "description": "管理员私聊豁免",
+    "type": "bool",
+    "default": true,
+    "hint": "管理员即使不在 private_allow 里也可以私聊。"
+  },
+  "private_deny": {
+    "description": "私聊被拒时",
+    "type": "string",
+    "options": [
+      "ignore",
+      "astrbot"
+    ],
+    "default": "ignore",
+    "hint": "ignore=静默忽略；astrbot=不推给 Cortico，交回 AstrBot 自己的模型。"
   }
 }
