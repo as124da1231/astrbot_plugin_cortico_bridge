@@ -17,7 +17,7 @@ const PANELS = {
   groups: {
     eyebrow: 'CORTICO BRIDGE · 群聊',
     title: '群聊',
-    desc: '只接管列表里的群；列表为空表示接管全部群。',
+    desc: '选「全部群」接管所有群；选「指定群」只处理名单里的群。',
   },
   private: {
     eyebrow: 'CORTICO BRIDGE · 私聊',
@@ -48,7 +48,7 @@ const state = {
   groups: [],
   groupAll: true,
   groupsDirty: false,
-  private: { mode: 'allowlist', allow: [], adminBypass: true, deny: 'ignore' },
+  private: { mode: 'all', allow: [], adminBypass: true, deny: 'ignore' },
   privateDirty: false,
   rows: [],
   msgFilter: 'all',
@@ -87,6 +87,29 @@ function el(tag, cls, text) {
   if (cls) node.className = cls;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    // 受限 iframe 里可能没有 clipboard 权限，退回选中复制。
+  }
+  try {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand('copy');
+    area.remove();
+    return ok;
+  } catch (e) {
+    return false;
+  }
 }
 
 function ago(sec) {
@@ -151,8 +174,10 @@ function setPanel(name) {
   const meta = PANELS[name];
 
   document.querySelectorAll('.navitem').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.panel === name);
-    btn.setAttribute('aria-selected', btn.dataset.panel === name ? 'true' : 'false');
+    const on = btn.dataset.panel === name;
+    btn.classList.toggle('active', on);
+    if (on) btn.setAttribute('aria-current', 'page');
+    else btn.removeAttribute('aria-current');
   });
   $('panel-status').hidden = name !== 'status';
   $('panel-groups').hidden = name !== 'groups';
@@ -182,10 +207,11 @@ function setPanel(name) {
     loadVoice().catch((e) => toast('读取语音设置失败：' + (e.message || e), true));
   }
 
-  if (name === 'groups') {
+  // 有未保存改动时保留内存状态，切页回来不会被重新加载覆盖。
+  if (name === 'groups' && !state.groupsDirty) {
     loadGroups().catch((e) => toast('读取群聊设置失败：' + (e.message || e), true));
   }
-  if (name === 'private') {
+  if (name === 'private' && !state.privateDirty) {
     loadPrivate().catch((e) => toast('读取私聊设置失败：' + (e.message || e), true));
   }
 }
@@ -390,15 +416,25 @@ function renderRows() {
     meta.appendChild(
       el('span', 'who', `· ${kind === 'private' ? ch : `${ch} ${convLabel(kind, id, row.convName)}`}`),
     );
-    if (row.umo) {
-      const umo = el('span', 'who mono umo', row.umo);
-      umo.title = row.umo;
-      meta.appendChild(umo);
-    }
     const text = el('div', 'mtext');
     text.textContent = row.text || '';
 
-    body.append(meta, text);
+    body.append(meta);
+    if (row.umo) {
+      const wrap = el('div', 'mumo');
+      const umo = el('button', 'umobtn');
+      umo.type = 'button';
+      umo.title = `点击复制 ${row.umo}`;
+      umo.setAttribute('aria-label', `复制会话标识 ${row.umo}`);
+      umo.appendChild(el('span', 'umotext', row.umo));
+      umo.addEventListener('click', async () => {
+        const ok = await copyText(row.umo);
+        toast(ok ? '会话标识已复制' : '复制失败，请重试', !ok);
+      });
+      wrap.appendChild(umo);
+      body.appendChild(wrap);
+    }
+    body.appendChild(text);
     item.append(time, pill, body);
     host.appendChild(item);
   }
@@ -853,46 +889,126 @@ function armClear() {
 
 /* ---------------- 群聊 / 私聊 ---------------- */
 
+function renderRecent(hostId, kind, current, onPick) {
+  const host = $(hostId);
+  if (!host) return;
+  host.textContent = '';
+  const seen = new Set(current);
+  const items = [];
+  for (const conv of (state.status && state.status.conversations) || []) {
+    const umo = conv.umo || conv.key || '';
+    if (!umo.includes(`:${kind}:`) || seen.has(umo)) continue;
+    seen.add(umo);
+    items.push(umo);
+    if (items.length >= 4) break;
+  }
+  if (!items.length) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  host.appendChild(el('span', 'recent-label', '最近会话'));
+  for (const umo of items) {
+    const chip = el('button', 'chip recent', umo);
+    chip.type = 'button';
+    chip.title = `添加 ${umo}`;
+    chip.setAttribute('aria-label', `添加最近会话 ${umo}`);
+    chip.addEventListener('click', () => onPick(umo));
+    host.appendChild(chip);
+  }
+}
+
+function removableChip(value, disabled, onRemove) {
+  const chip = el('button', 'chip on removable');
+  chip.type = 'button';
+  chip.disabled = disabled;
+  chip.title = disabled ? value : `移除 ${value}`;
+  chip.setAttribute('aria-label', disabled ? value : `移除 ${value}`);
+  chip.appendChild(el('span', 'chip-label', value));
+  chip.appendChild(el('span', 'chip-x', '×'));
+  chip.addEventListener('click', onRemove);
+  return chip;
+}
+
 function renderGroups() {
   const list = $('groupList');
   if (!list) return;
   list.textContent = '';
   state.groups.forEach((value) => {
-    const chip = el('button', 'chip on', value);
-    chip.type = 'button';
-    chip.title = '点击移除';
-    chip.addEventListener('click', () => {
-      state.groups = state.groups.filter((item) => item !== value);
-      state.groupsDirty = true;
-      renderGroups();
-    });
-    list.appendChild(chip);
+    list.appendChild(
+      removableChip(value, false, () => {
+        state.groups = state.groups.filter((item) => item !== value);
+        state.groupsDirty = true;
+        renderGroups();
+      }),
+    );
   });
   if (!state.groups.length) {
-    list.appendChild(el('span', 'muted', '列表为空：接管全部群'));
+    list.appendChild(el('span', 'muted', state.groupAll ? '全部群' : '还没有群'));
   }
-  $('groupAll').checked = state.groupAll;
+
+  renderRecent('groupRecent', 'GroupMessage', state.groups, (umo) => {
+    if (!state.groups.includes(umo)) state.groups.push(umo);
+    state.groupAll = false;
+    state.groupsDirty = true;
+    renderGroups();
+  });
+  if (state.groupAll) $('groupRecent').hidden = true;
+
+  document.querySelectorAll('#groupScope .segbtn').forEach((btn) => {
+    const on = (btn.dataset.scope === 'all') === state.groupAll;
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+
+  const hint = $('groupHint');
+  if (state.groupAll) {
+    hint.textContent = '所有群都交给 Coo；指定群名单不生效。';
+    hint.classList.remove('warn');
+  } else if (!state.groups.length) {
+    hint.textContent = '至少添加一个群，否则保存会变成接管全部群。';
+    hint.classList.add('warn');
+  } else {
+    hint.textContent = '';
+    hint.classList.remove('warn');
+  }
+  hint.hidden = !hint.textContent;
+
+  $('groupAddRow').hidden = state.groupAll;
   $('groupList').hidden = state.groupAll;
   $('groupInput').disabled = state.groupAll;
   $('btnGroupAdd').disabled = state.groupAll;
+  $('btnGroupSave').disabled = !state.groupAll && state.groups.length === 0;
   $('groupSavebar').hidden = !state.groupsDirty;
 }
 
 async function loadGroups() {
-  const data = unwrap(await bridge.apiGet('groups'));
-  state.groups = Array.isArray(data.groups) ? data.groups.slice() : [];
-  state.groupAll = state.groups.length === 0;
-  state.groupsDirty = false;
-  renderGroups();
+  try {
+    const data = unwrap(await bridge.apiGet('groups'));
+    state.groups = Array.isArray(data.groups) ? data.groups.slice() : [];
+    state.groupAll = state.groups.length === 0;
+    state.groupsDirty = false;
+    $('groupError').hidden = true;
+    renderGroups();
+  } catch (e) {
+    $('groupErrorText').textContent = '读取失败：' + (e.message || e);
+    $('groupError').hidden = false;
+    throw e;
+  }
 }
 
 async function saveGroups() {
-  const groups = state.groupAll ? [] : state.groups;
+  if (!state.groupAll && !state.groups.length) {
+    toast('至少添加一个群，或选择「全部群」', true);
+    return;
+  }
+  const groups = state.groupAll ? [] : state.groups.slice();
   const btn = $('btnGroupSave');
   btn.disabled = true;
   try {
     await bridge.apiPost('groups', { groups });
     state.groups = groups;
+    state.groupAll = groups.length === 0;
     state.groupsDirty = false;
     renderGroups();
     toast(groups.length ? `已保存 ${groups.length} 个群` : '已设为接管全部群');
@@ -903,42 +1019,90 @@ async function saveGroups() {
   }
 }
 
+async function revertGroups() {
+  try {
+    await loadGroups();
+    toast('已恢复上次保存的群聊设置');
+  } catch (e) {
+    toast('读取群聊设置失败：' + (e.message || e), true);
+  }
+}
+
 function renderPrivate() {
   const data = state.private;
+  const mode = data.mode || 'allowlist';
+  data.mode = mode;
+
   document.querySelectorAll('#privateMode .segbtn').forEach((btn) => {
-    btn.classList.toggle('on', btn.dataset.mode === data.mode);
+    const on = btn.dataset.mode === mode;
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
   });
+
+  const hint = $('privateHint');
+  if (mode === 'all') {
+    hint.textContent = '全部私聊都交给 Coo；白名单和管理员豁免不生效。';
+  } else if (mode === 'off') {
+    hint.textContent = '私聊不交给 Coo；「被拒时」仍决定消息是否留给 AstrBot。';
+  } else {
+    hint.textContent = '只处理名单里的私聊；管理员可以绕过名单。';
+  }
+
+  const allowlistOn = mode === 'allowlist';
   const list = $('privateList');
   list.textContent = '';
   (data.allow || []).forEach((value) => {
-    const chip = el('button', 'chip on', value);
-    chip.type = 'button';
-    chip.title = '点击移除';
-    chip.addEventListener('click', () => {
-      data.allow = data.allow.filter((item) => item !== value);
-      state.privateDirty = true;
-      renderPrivate();
-    });
-    list.appendChild(chip);
+    list.appendChild(
+      removableChip(value, !allowlistOn, () => {
+        data.allow = data.allow.filter((item) => item !== value);
+        state.privateDirty = true;
+        renderPrivate();
+      }),
+    );
   });
   if (!(data.allow || []).length) {
-    list.appendChild(el('span', 'muted', data.mode === 'allowlist' ? '名单为空：没人能私聊' : '名单为空'));
+    list.appendChild(
+      el('span', 'muted', allowlistOn ? '名单为空：没人能私聊' : '名单已保留，但当前模式不读取'),
+    );
   }
+  list.classList.toggle('disabled', !allowlistOn);
+
+  renderRecent('privateRecent', 'FriendMessage', data.allow || [], (umo) => {
+    if (!data.allow.includes(umo)) data.allow.push(umo);
+    state.privateDirty = true;
+    renderPrivate();
+  });
+  if (!allowlistOn) $('privateRecent').hidden = true;
+
+  $('privateInput').disabled = !allowlistOn;
+  $('btnPrivateAdd').disabled = !allowlistOn;
+  $('privateAddRow').classList.toggle('is-disabled', !allowlistOn);
+  $('privateAdmin').disabled = !allowlistOn;
   $('privateAdmin').checked = data.adminBypass !== false;
+  $('privateAdminRow').classList.toggle('is-disabled', !allowlistOn);
+  $('privateDeny').disabled = mode === 'all';
   $('privateDeny').value = data.deny || 'ignore';
+  $('privateDenyRow').classList.toggle('is-disabled', mode === 'all');
   $('privateSavebar').hidden = !state.privateDirty;
 }
 
 async function loadPrivate() {
-  const data = unwrap(await bridge.apiGet('private'));
-  state.private = {
-    mode: data.mode || 'allowlist',
-    allow: Array.isArray(data.allow) ? data.allow.slice() : [],
-    adminBypass: data.adminBypass !== false,
-    deny: data.deny || 'ignore',
-  };
-  state.privateDirty = false;
-  renderPrivate();
+  try {
+    const data = unwrap(await bridge.apiGet('private'));
+    state.private = {
+      mode: data.mode || 'allowlist',
+      allow: Array.isArray(data.allow) ? data.allow.slice() : [],
+      adminBypass: data.adminBypass !== false,
+      deny: data.deny || 'ignore',
+    };
+    state.privateDirty = false;
+    $('privateError').hidden = true;
+    renderPrivate();
+  } catch (e) {
+    $('privateErrorText').textContent = '读取失败：' + (e.message || e);
+    $('privateError').hidden = false;
+    throw e;
+  }
 }
 
 async function savePrivate() {
@@ -953,6 +1117,15 @@ async function savePrivate() {
     toast('保存失败：' + (e.message || e), true);
   } finally {
     btn.disabled = false;
+  }
+}
+
+async function revertPrivate() {
+  try {
+    await loadPrivate();
+    toast('已恢复上次保存的私聊设置');
+  } catch (e) {
+    toast('读取私聊设置失败：' + (e.message || e), true);
   }
 }
 
@@ -972,16 +1145,25 @@ function initScope() {
       $('btnGroupAdd').click();
     }
   });
-  $('groupAll').addEventListener('change', () => {
-    state.groupAll = $('groupAll').checked;
+  $('groupScope').addEventListener('click', (e) => {
+    const btn = e.target.closest('.segbtn');
+    if (!btn) return;
+    const all = btn.dataset.scope === 'all';
+    if (state.groupAll === all) return;
+    state.groupAll = all;
     state.groupsDirty = true;
     renderGroups();
   });
   $('btnGroupSave').addEventListener('click', saveGroups);
+  $('btnGroupRevert').addEventListener('click', revertGroups);
+  $('btnGroupRetry').addEventListener('click', () => {
+    loadGroups().catch((e) => toast('读取群聊设置失败：' + (e.message || e), true));
+  });
 
   $('privateMode').addEventListener('click', (e) => {
     const btn = e.target.closest('.segbtn');
     if (!btn) return;
+    if (state.private.mode === btn.dataset.mode) return;
     state.private.mode = btn.dataset.mode || 'allowlist';
     state.privateDirty = true;
     renderPrivate();
@@ -1011,6 +1193,10 @@ function initScope() {
     renderPrivate();
   });
   $('btnPrivateSave').addEventListener('click', savePrivate);
+  $('btnPrivateRevert').addEventListener('click', revertPrivate);
+  $('btnPrivateRetry').addEventListener('click', () => {
+    loadPrivate().catch((e) => toast('读取私聊设置失败：' + (e.message || e), true));
+  });
 }
 
 function initTools() {

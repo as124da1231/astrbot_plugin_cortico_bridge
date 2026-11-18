@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Cortico 桥控制台：管理 Cortico 与 AstrBot 之间的群聊、私聊、工具和语音。" />
 <title>Cortico 桥 · 控制台</title>
 <script>
   // Bridge 会在 ready 后设置 data-theme；先按 URL 上的 theme 参数铺一次，避免闪白。
@@ -31,7 +32,7 @@
 
     <nav class="stack" aria-label="面板">
       <div class="stacklabel">控制台</div>
-      <button class="navitem active" type="button" data-panel="status">
+      <button class="navitem active" type="button" data-panel="status" aria-current="page">
         <span class="tag" aria-hidden="true"></span>
         <svg class="navicon" viewBox="0 0 20 20" aria-hidden="true">
           <path d="M3 10h4l2-5 2 10 2-5h4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
@@ -150,7 +151,7 @@
             <div class="sheethead">
               <div class="sheethead-text">
                 <div class="sh-kicker">01—A · 消息流</div>
-                <h3>会话流水</h3>
+                <h2>会话流水</h2>
                 <div class="sh-desc">消息从 QQ 进来、从 Coo 出去，都在这里。</div>
               </div>
               <div class="chips filterchips" id="msgFilters">
@@ -171,7 +172,7 @@
               <div class="empty-orbit" aria-hidden="true">
                 <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 8-8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /><path d="M4 4v4h4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
               </div>
-              <h4>还没有消息</h4>
+              <h3>还没有消息</h3>
               <p>在 QQ 里 @ 一下 Coo，或让它听到一句话。</p>
             </div>
           </section>
@@ -181,7 +182,7 @@
               <div class="sheethead">
                 <div class="sheethead-text">
                   <div class="sh-kicker">01—B · 工具回执</div>
-                  <h3>最近调用</h3>
+                  <h2>最近调用</h2>
                   <div class="sh-desc">Coo 用 AstrBot 的手做过什么。</div>
                 </div>
               </div>
@@ -193,7 +194,7 @@
               <div class="sheethead">
                 <div class="sheethead-text">
                   <div class="sh-kicker">01—C · 只读</div>
-                  <h3>生效中的设置</h3>
+                  <h2>生效中的设置</h2>
                   <div class="sh-desc">改值请去插件「配置」页；端口、监听地址和 token 改完点右上角「重开监听」，端口变了还要同步 World 的桥地址。</div>
                 </div>
               </div>
@@ -224,25 +225,33 @@
         <section class="sheet policy-sheet">
           <div class="sheethead">
             <div class="sheethead-text">
-              <div class="sh-kicker">02·A · 群聊</div>
-              <h3>接管哪些群</h3>
-              <div class="sh-desc">只处理列表里的群；列表为空表示接管全部群。</div>
+              <div class="sh-kicker">02—A · 群聊</div>
+              <h2>接管哪些群</h2>
+              <div class="sh-desc">「全部群」时每个群都交给 Coo；「指定群」只处理名单里的群。</div>
             </div>
           </div>
           <div class="policy">
-            <div class="policy-row">
-              <input class="kvselect grow" id="groupInput" placeholder="default:GroupMessage:123456789 或群号" />
+            <div class="policy-label" id="groupScopeLabel">范围</div>
+            <div class="seg" id="groupScope" role="group" aria-labelledby="groupScopeLabel">
+              <button class="segbtn" type="button" data-scope="all" aria-pressed="false">全部群</button>
+              <button class="segbtn" type="button" data-scope="list" aria-pressed="true">指定群</button>
+            </div>
+            <p class="policy-hint" id="groupHint" aria-live="polite"></p>
+            <div class="policy-row" id="groupAddRow">
+              <label class="sr-only" for="groupInput">群 UMO 或群号</label>
+              <input class="kvselect grow" id="groupInput" placeholder="default:GroupMessage:123456789 或群号" autocomplete="off" spellcheck="false" />
               <button class="btn sm" type="button" id="btnGroupAdd">添加</button>
             </div>
             <div class="chips" id="groupList"></div>
-            <label class="cortico-switchrow">
-              <input type="checkbox" id="groupAll" />
-              <span class="cortico-switch" aria-hidden="true"></span>
-              <span>接管全部群（列表为空，慎用）</span>
-            </label>
+            <div class="recent" id="groupRecent" hidden></div>
+            <div class="loaderr" id="groupError" hidden>
+              <span id="groupErrorText">读取群聊设置失败</span>
+              <button class="btn sm" type="button" id="btnGroupRetry">重试</button>
+            </div>
             <div class="savebar" id="groupSavebar" hidden>
               <span class="dirtytext">群聊设置未保存</span>
               <span class="grow"></span>
+              <button class="btn sm" type="button" id="btnGroupRevert">撤销</button>
               <button class="btn sm primary" type="button" id="btnGroupSave">保存</button>
             </div>
           </div>
@@ -254,38 +263,46 @@
         <section class="sheet policy-sheet">
           <div class="sheethead">
             <div class="sheethead-text">
-              <div class="sh-kicker">02·B · 私聊</div>
-              <h3>谁可以私聊 Coo</h3>
+              <div class="sh-kicker">02—B · 私聊</div>
+              <h2>谁可以私聊 Coo</h2>
               <div class="sh-desc">QQ 私聊仍要求 bot 和对方是好友；这里控制谁进来。</div>
             </div>
           </div>
           <div class="policy">
-            <div class="policy-label">模式</div>
-            <div class="seg" id="privateMode">
-              <button class="segbtn" type="button" data-mode="off">关闭</button>
-              <button class="segbtn" type="button" data-mode="allowlist">仅名单</button>
-              <button class="segbtn" type="button" data-mode="all">全部</button>
+            <div class="policy-label" id="privateModeLabel">模式</div>
+            <div class="seg" id="privateMode" role="group" aria-labelledby="privateModeLabel">
+              <button class="segbtn" type="button" data-mode="off" aria-pressed="false">关闭</button>
+              <button class="segbtn" type="button" data-mode="allowlist" aria-pressed="false">仅名单</button>
+              <button class="segbtn" type="button" data-mode="all" aria-pressed="false">全部</button>
             </div>
-            <div class="policy-row">
-              <input class="kvselect grow" id="privateInput" placeholder="default:FriendMessage:100000001 或 QQ 号" />
+            <p class="policy-hint" id="privateHint" aria-live="polite"></p>
+            <div class="policy-row" id="privateAddRow">
+              <label class="sr-only" for="privateInput">私聊 UMO 或 QQ 号</label>
+              <input class="kvselect grow" id="privateInput" placeholder="default:FriendMessage:100000001 或 QQ 号" autocomplete="off" spellcheck="false" />
               <button class="btn sm" type="button" id="btnPrivateAdd">添加</button>
             </div>
             <div class="chips" id="privateList"></div>
-            <label class="cortico-switchrow">
+            <div class="recent" id="privateRecent" hidden></div>
+            <label class="cortico-switchrow" id="privateAdminRow">
               <input type="checkbox" id="privateAdmin" />
               <span class="cortico-switch" aria-hidden="true"></span>
               <span>管理员豁免</span>
             </label>
-            <div class="policy-row">
+            <div class="policy-row" id="privateDenyRow">
               <label class="policy-label" for="privateDeny">被拒时</label>
               <select class="kvselect" id="privateDeny">
                 <option value="ignore">静默忽略</option>
                 <option value="astrbot">交给 AstrBot</option>
               </select>
             </div>
+            <div class="loaderr" id="privateError" hidden>
+              <span id="privateErrorText">读取私聊设置失败</span>
+              <button class="btn sm" type="button" id="btnPrivateRetry">重试</button>
+            </div>
             <div class="savebar" id="privateSavebar" hidden>
               <span class="dirtytext">私聊设置未保存</span>
               <span class="grow"></span>
+              <button class="btn sm" type="button" id="btnPrivateRevert">撤销</button>
               <button class="btn sm primary" type="button" id="btnPrivateSave">保存</button>
             </div>
           </div>
@@ -297,7 +314,7 @@
 
         <section class="sheet toolhero">
           <div class="thsum">
-            <div class="sh-kicker">02—A · 工具授权</div>
+            <div class="sh-kicker">03—A · 工具授权</div>
             <div class="thbig mono"><span id="pickedCount">0</span><span class="thof">/ <span id="totalCount">0</span></span></div>
             <div class="thlabel">个工具已交给 Coo</div>
           </div>
@@ -360,8 +377,8 @@
           <section class="sheet voice-sheet">
             <div class="sheethead">
               <div class="sheethead-text">
-                <div class="sh-kicker">03—A · 输入</div>
-                <h3>听</h3>
+                <div class="sh-kicker">04—A · 输入</div>
+                <h2>听</h2>
                 <div class="sh-desc">QQ 语音先转成文字，再交给 Coo。</div>
               </div>
               <label class="cortico-switchrow">
@@ -390,8 +407,8 @@
           <section class="sheet voice-sheet">
             <div class="sheethead">
               <div class="sheethead-text">
-                <div class="sh-kicker">03—B · 输出</div>
-                <h3>说</h3>
+                <div class="sh-kicker">04—B · 输出</div>
+                <h2>说</h2>
                 <div class="sh-desc">Coo 想用语音时，桥会调 TTS 合成再发到 QQ。</div>
               </div>
               <label class="cortico-switchrow">
