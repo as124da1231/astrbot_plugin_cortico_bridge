@@ -124,6 +124,13 @@ class Delivery:
         if changed:
             self._save_umos()
 
+    def has_umo(self, umo: str) -> bool:
+        """桥是否见过这个 UMO；发送只允许回到见过的会话。"""
+        target = _s(umo).strip()
+        if not target:
+            return False
+        return any(known == target for known, _ in self._umos.values())
+
     def umo_for(self, platform_id: str, conv_kind: str, conv_id: str) -> str | None:
         """找这个会话的 umo。
 
@@ -233,6 +240,7 @@ class Delivery:
         reply_to: str = "",
         image: dict | None = None,
         voice: bool = False,
+        umo: str = "",
     ) -> tuple[bool, str, bool, bool]:
         """发一条消息。返回 (成功, 备注, 是否真的用了语音, 结果是否未知)。
 
@@ -241,7 +249,12 @@ class Delivery:
         """
         if conv_kind not in CONV_KINDS:
             return False, f"未知的会话类型 {conv_kind}", False, False
-        umo = self.umo_for(platform_id, conv_kind, conv_id)
+        # UMO 是主键；只有桥见过的会话才允许发送，避免模型乱填 UMO。
+        if umo:
+            if not self.has_umo(umo):
+                return False, f"未知会话 {umo}，桥没有见过这个会话", False, False
+        else:
+            umo = self.umo_for(platform_id, conv_kind, conv_id) or ""
         if not umo:
             return False, "还没有收到过这个会话的消息，缺少可用的会话标识", False, False
         if not self.allow():

@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover - 缺依赖时插件仍要能加载
 
 # (ok, 备注, 是否用了语音, 结果是否未知)
 SendCallback = Callable[
-    [str, str, str, str, str, "dict | None", bool],
+    [str, str, str, str, str, "dict | None", bool, str],
     Awaitable[tuple[bool, str, bool, bool]],
 ]
 EventCallback = Callable[[str, dict], None]
@@ -462,6 +462,8 @@ class BridgeServer:
         text = _s(frame.get("text"))
         reply_to = _s(frame.get("replyTo"))
         platform = _s(frame.get("platform"))
+        # UMO 是 AstrBot 的统一会话键；旧客户端没有时退回 conv。
+        umo = _s(frame.get("umo")).strip()
         conv_kind = _s(conv.get("kind"))
         conv_id = _s(conv.get("id"))
         voice = frame.get("voice") is True
@@ -493,7 +495,7 @@ class BridgeServer:
             else:
                 try:
                     ok, err, used_voice, uncertain = await self._on_send(
-                        conv_kind, conv_id, text, reply_to, platform, image, voice
+                        conv_kind, conv_id, text, reply_to, platform, image, voice, umo
                     )
                 except Exception as exc:  # noqa: BLE001 - 发送层异常也要回执
                     logger.warning(f"Cortico Bridge: 发送异常 —— {exc}")

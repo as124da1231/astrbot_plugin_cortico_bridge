@@ -485,9 +485,10 @@ class CorticoBridge(Star):
         platform: str,
         image: dict | None = None,
         voice: bool = False,
+        umo: str = "",
     ) -> tuple[bool, str, bool, bool]:
         ok, note, used_voice, uncertain = await self.delivery.send(
-            platform, conv_kind, conv_id, text, reply_to, image, voice
+            platform, conv_kind, conv_id, text, reply_to, image, voice, umo
         )
         if ok:
             self.stats["sent"] += 1
@@ -664,6 +665,7 @@ class CorticoBridge(Star):
             "t": "msg",
             "channel": "qq",
             "id": msg_id,
+            "umo": _s(event.unified_msg_origin).strip(),
             "ts": _now_iso(),
             "conv": {"kind": conv_kind, "id": conv_id, "name": conv_name},
             "sender": {"id": event.get_sender_id(), "name": event.get_sender_name()},
@@ -1050,6 +1052,7 @@ class CorticoBridge(Star):
             "kind": "notice",
             "channel": "qq",
             "id": "",
+            "umo": _s(event.unified_msg_origin).strip(),
             "ref": ref,
             "ts": _now_iso(),
             "conv": {"kind": conv_kind, "id": conv_id, "name": conv_name},
