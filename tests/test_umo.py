@@ -22,6 +22,63 @@ astrbot.api = api
 sys.modules.setdefault("astrbot", astrbot)
 sys.modules.setdefault("astrbot.api", api)
 
+# deliver.send 在函数内 import 消息组件；测试给一套最小替身。
+components = types.ModuleType("astrbot.api.message_components")
+
+
+class _Plain:
+    def __init__(self, text):
+        self.text = text
+
+
+class _Image:
+    @classmethod
+    def fromBase64(cls, _b64):
+        return cls()
+
+
+class _Record:
+    @classmethod
+    def fromFileSystem(cls, _path):
+        return cls()
+
+
+class _Reply:
+    def __init__(self, id):
+        self.id = id
+
+
+components.Plain = _Plain
+components.Image = _Image
+components.Record = _Record
+components.Reply = _Reply
+
+event_mod = types.ModuleType("astrbot.api.event")
+
+
+class _MessageChain:
+    def __init__(self):
+        self.chain = []
+
+    def append(self, item):
+        self.chain.append(item)
+
+
+event_mod.MessageChain = _MessageChain
+api.message_components = components
+api.event = event_mod
+sys.modules.setdefault("astrbot.api.message_components", components)
+sys.modules.setdefault("astrbot.api.event", event_mod)
+
+
+class _SendContext:
+    def __init__(self):
+        self.sent = []
+
+    async def send_message(self, umo, chain):
+        self.sent.append((umo, chain))
+        return True
+
 import bridge  # noqa: E402
 from deliver import Delivery  # noqa: E402
 
@@ -56,12 +113,106 @@ class UmoContractTests(unittest.TestCase):
         delivery = Delivery(None, lambda: {})
         umo = "default:GroupMessage:123456789"
         delivery.remember("default", "group", "123456789", umo)
-        delivery._umos["default|group|123456789"] = (
-            umo,
-            time.time() - 31 * 24 * 3600,
-        )
+        delivery._umos[umo]["lastSeen"] = time.time() - 31 * 24 * 3600
         self.assertFalse(delivery.has_umo(umo))
         self.assertEqual(delivery.known_conversations(), [])
+
+    def test_v1_registry_migrates_to_v2_and_backs_up(self):
+        import tempfile
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "umos.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "default|group|123456789": {
+                            "umo": "default:GroupMessage:123456789",
+                            "ts": time.time(),
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            delivery = Delivery(None, lambda: {}, data_dir=tmp)
+            self.assertTrue(delivery.has_umo("default:GroupMessage:123456789"))
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(data.get("version"), 2)
+            self.assertIn("default:GroupMessage:123456789", data.get("umos", {}))
+            self.assertTrue((Path(tmp) / "umos.v1.json").exists())
+
+    def test_send_without_umo_is_refused(self):
+        import asyncio
+
+        delivery = Delivery(None, lambda: {})
+        ok, _note, _voice, _uncertain = asyncio.run(
+            delivery.send("default", "group", "123456789", "hi")
+        )
+        self.assertFalse(ok)
+        self.assertEqual(delivery.last_error_code, "missing_umo")
+
+    def test_send_with_unknown_umo_is_refused(self):
+        import asyncio
+
+        delivery = Delivery(None, lambda: {})
+        ok, _note, _voice, _uncertain = asyncio.run(
+            delivery.send("", "", "", "hi", umo="default:GroupMessage:999")
+        )
+        self.assertFalse(ok)
+        self.assertEqual(delivery.last_error_code, "unknown_umo")
+
+    def test_send_with_umo_and_missing_conv_uses_umo(self):
+        import asyncio
+
+        ctx = _SendContext()
+        delivery = Delivery(ctx, lambda: {"max_sends_per_minute": 0})
+        umo = "default:FriendMessage:100000001"
+        delivery.remember("default", "private", "100000001", umo)
+
+        ok, _note, _voice, _uncertain = asyncio.run(
+            delivery.send("", "", "", "hi", umo=umo)
+        )
+        self.assertTrue(ok)
+        self.assertEqual(ctx.sent[-1][0], umo)
+
+    def test_send_with_umo_ignores_conflicting_conv(self):
+        import asyncio
+
+        ctx = _SendContext()
+        delivery = Delivery(ctx, lambda: {"max_sends_per_minute": 0})
+        umo = "default:FriendMessage:100000001"
+        delivery.remember("default", "private", "100000001", umo)
+
+        # conv 写成别的群：交付层以 umo 为准；帧层是否拒绝由 bridge 负责。
+        ok, _note, _voice, _uncertain = asyncio.run(
+            delivery.send("default", "group", "999999", "hi", umo=umo)
+        )
+        self.assertTrue(ok)
+        self.assertEqual(ctx.sent[-1][0], umo)
+
+    def test_registry_cap_evicts_oldest(self):
+        delivery = Delivery(None, lambda: {})
+        for i in range(501):
+            umo = f"default:GroupMessage:{i}"
+            delivery._umos[umo] = {
+                "umo": umo,
+                "platform": "default",
+                "kind": "group",
+                "id": str(i),
+                "name": "",
+                "firstSeen": float(i),
+                "lastSeen": float(i),
+                "lastMessageId": "",
+                "lastSender": "",
+            }
+            delivery._legacy[f"default|group|{i}"] = umo
+
+        delivery._prune()
+
+        self.assertEqual(len(delivery._umos), 500)
+        self.assertNotIn("default:GroupMessage:0", delivery._umos)
+        self.assertNotIn("default|group|0", delivery._legacy)
+        self.assertIn("default:GroupMessage:500", delivery._umos)
 
     def test_delivery_flush_roundtrip(self):
         import tempfile

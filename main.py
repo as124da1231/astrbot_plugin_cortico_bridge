@@ -27,6 +27,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import secrets
 import time
 from collections import OrderedDict, deque
 from typing import Any
@@ -307,6 +308,37 @@ class CorticoBridge(Star):
     def _umo_of(self, event: AstrMessageEvent) -> str:
         return _s(getattr(event, "unified_msg_origin", "")).strip()
 
+    def _normalize_scope_items(self, items: list[str], kind: str) -> list[str]:
+        """把旧群号 / QQ 号归一化成 UMO；已经是 UMO 的原样保留。"""
+        platform = (self._bridge_platforms() or ["default"])[0]
+        msg_type = "GroupMessage" if kind == "group" else "FriendMessage"
+        out: list[str] = []
+        for item in items:
+            value = _s(item).strip()
+            if not value:
+                continue
+            if ":" not in value:
+                value = f"{platform}:{msg_type}:{value}"
+            if value not in out:
+                out.append(value)
+        return out
+
+    def _ensure_token(self) -> str:
+        """token 为空时生成一个随机值并写回配置；已有的自定义值不覆盖。"""
+        token = _s(self.config.get("token", "")).strip()
+        if token:
+            return token
+        token = secrets.token_urlsafe(32)
+        self.config["token"] = token
+        if self._persist_plugin_config():
+            logger.info(
+                "Cortico Bridge: 已自动生成 token（%d 位），请复制到 Coo 的 worlds.astrbot.token"
+                % len(token)
+            )
+        else:
+            logger.warning("Cortico Bridge: 已生成 token，但保存配置失败；本次运行有效，重启会变")
+        return token
+
     def _matches_scope(self, event: AstrMessageEvent, items: list[str]) -> bool:
         """UMO 优先；旧配置里的群号/QQ 号继续兼容。"""
         if not items:
@@ -480,7 +512,7 @@ class CorticoBridge(Star):
     # ---------- 生命周期 ----------
 
     async def initialize(self):
-        token = _s(self.config.get("token", ""))
+        token = self._ensure_token()
         logger.info(
             "Cortico Bridge: 启动 —— enabled=%s, 监听=%s:%s, token=%s, "
             "B模式=%s, 群=%s, 称呼=%r"
@@ -1314,6 +1346,7 @@ class CorticoBridge(Star):
                 "originRefused": self.server.origin_refused,
                 "queryTokenRefused": self.server.query_token_refused,
                 "tokenSet": bool(_s(self.config.get("token", ""))),
+                "token": _s(self.config.get("token", "")),
                 "maxSends": self._max_sends(),
                 "admins": self._admin_ids(),
                 "imageMode": self._image_mode(),
@@ -1379,6 +1412,7 @@ class CorticoBridge(Star):
             "listenError": self.server.listen_error,
             "originRefused": self.server.origin_refused,
             "queryTokenRefused": self.server.query_token_refused,
+            "token": _s(self.config.get("token", "")),
             "stats": dict(self.stats),
             "recent": list(self._recent),
             "toolLog": list(self._tool_log),
@@ -1421,6 +1455,7 @@ class CorticoBridge(Star):
                 value = _s(item).strip()
                 if value and value not in picked:
                     picked.append(value)
+            picked = self._normalize_scope_items(picked, "group")
             if scope == "allowlist" and not picked:
                 return error_response("指定群模式至少要有一个群。", status_code=400)
             mode = _s(payload.get("mode", self._group_mode())).strip().lower()
@@ -1429,8 +1464,10 @@ class CorticoBridge(Star):
             self.config["group_scope"] = scope
             self.config["group_allow"] = picked
             self.config["group_mode"] = mode
-            # 镜像旧键，方便回滚到旧版插件。
-            self.config["observe_groups"] = picked if scope == "allowlist" else []
+            # 镜像旧键，方便回滚到旧版插件；旧版只认裸群号。
+            self.config["observe_groups"] = (
+                [value.rsplit(":", 1)[-1] for value in picked] if scope == "allowlist" else []
+            )
             self.config["observe_all"] = mode == "all"
             if not self._persist_plugin_config():
                 return error_response("当前 AstrBot 不支持保存配置。", status_code=500)
@@ -1467,6 +1504,7 @@ class CorticoBridge(Star):
                 value = _s(item).strip()
                 if value and value not in allow:
                     allow.append(value)
+            allow = self._normalize_scope_items(allow, "private")
             self.config["private_mode"] = mode
             self.config["private_allow"] = allow
             self.config["private_admin_bypass"] = bool(payload.get("adminBypass", self._private_admin_bypass()))
@@ -1654,12 +1692,11 @@ class CorticoBridge(Star):
         convs = self.delivery.known_conversations()
         if not convs:
             return error_response("还没有收到过 QQ 消息，先让群里说一句再试。", status_code=400)
-        parts = _s(convs[0].get("key")).split("|")
-        if len(parts) != 3:
+        umo = _s(convs[0].get("umo") or convs[0].get("key"))
+        if not umo:
             return error_response("最近的会话标识不完整。", status_code=400)
-        platform, kind, conv_id = parts
         ok, note, used_voice, _uncertain = await self.delivery.send(
-            platform, kind, conv_id, text, "", None, True
+            "", "", "", text, "", None, True, umo
         )
         if not ok:
             return error_response(note or "发送失败", status_code=500)
@@ -1681,7 +1718,7 @@ class CorticoBridge(Star):
         # 让「重开监听」真的按当前配置重新绑定，而不是继续用 init 时的旧值。
         self.server.host = _s(self.config.get("listen_host", "0.0.0.0")) or "0.0.0.0"
         self.server.port = self._port()
-        self.server.token = _s(self.config.get("token", ""))
+        self.server.token = self._ensure_token()
         try:
             await self.server.stop()
             ok = await self.server.start()

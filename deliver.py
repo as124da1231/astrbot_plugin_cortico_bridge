@@ -8,8 +8,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import shutil
 import time
 from typing import Any, Callable
 
@@ -20,7 +22,7 @@ CONV_KINDS = ("group", "private")
 # 落盘间隔：群消息密集时别每来一条就写一次盘。
 UMO_SAVE_INTERVAL = 10.0
 # 最多记住多少个会话；和内存表一致。
-UMO_MAX = 200
+UMO_MAX = 500
 # 超过这个时间没再出现的会话，不能再作为发送目标。
 UMO_TTL_SECONDS = 30 * 24 * 60 * 60
 # 单次平台发送的上限；超时后结果就是「未知」，不能当成功，也不能当没发。
@@ -35,8 +37,9 @@ class Delivery:
     def __init__(self, context, config: Callable[[], dict], data_dir: str = ""):
         self._context = context
         self._config = config
-        # key: "平台|类型|会话" -> (umo, 时间戳)
-        self._umos: dict[str, tuple[str, float]] = {}
+        # UMO 是主键；旧键 "平台|类型|会话" 只做迁移索引。
+        self._umos: dict[str, dict] = {}
+        self._legacy: dict[str, str] = {}
         self._send_stamps: list[float] = []
         # 重启后会话表为空会发不出去；把 umo 落到插件数据目录。
         self._umos_file = os.path.join(data_dir, "umos.json") if data_dir else ""
@@ -47,6 +50,23 @@ class Delivery:
         self._load_umos()
 
     # ---------- umo 登记 ----------
+
+    @staticmethod
+    def _parse_umo(value: str):
+        """platform:MsgType:session；session 里允许冒号。"""
+        text = _s(value).strip()
+        if not text or len(text) > 512:
+            return None
+        parts = text.split(":", 2)
+        if len(parts) != 3:
+            return None
+        platform, msg_type, session = parts
+        if not platform or not msg_type or not session:
+            return None
+        if msg_type not in ("GroupMessage", "FriendMessage"):
+            return None
+        kind = "group" if msg_type == "GroupMessage" else "private"
+        return platform, kind, session
 
     def _load_umos(self) -> None:
         if not self._umos_file or not os.path.isfile(self._umos_file):
@@ -59,119 +79,230 @@ class Delivery:
             return
         if not isinstance(raw, dict):
             return
-        loaded = 0
-        for key, value in raw.items():
-            umo = ""
-            ts = 0.0
-            if isinstance(value, dict):
-                umo = _s(value.get("umo")).strip()
+
+        migrated = False
+        version = raw.get("version")
+        umos = raw.get("umos") if isinstance(raw.get("umos"), dict) else {}
+        legacy = raw.get("legacy") if isinstance(raw.get("legacy"), dict) else {}
+
+        if version == 2 and umos:
+            for key, item in umos.items():
+                if not isinstance(item, dict):
+                    continue
+                umo = _s(item.get("umo") or key).strip()
+                parsed = self._parse_umo(umo)
+                if parsed is None:
+                    continue
+                platform, kind, conv_id = parsed
                 try:
-                    ts = float(value.get("ts") or 0)
+                    ts = float(item.get("lastSeen") or 0)
                 except (TypeError, ValueError):
                     ts = 0.0
-            elif isinstance(value, (list, tuple)) and len(value) >= 1:
-                umo = _s(value[0]).strip()
-                if len(value) > 1:
+                self._umos[umo] = {
+                    "umo": umo,
+                    "platform": _s(item.get("platform") or platform),
+                    "kind": _s(item.get("kind") or kind),
+                    "id": _s(item.get("id") or conv_id),
+                    "name": _s(item.get("name")),
+                    "firstSeen": float(item.get("firstSeen") or ts or 0),
+                    "lastSeen": ts,
+                    "lastMessageId": _s(item.get("lastMessageId")),
+                    "lastSender": _s(item.get("lastSender")),
+                }
+            for key, value in legacy.items():
+                target = _s(value).strip()
+                if target:
+                    self._legacy[_s(key)] = target
+        else:
+            # v1：键是「平台|类型|会话」，值是 {umo, ts} 或 [umo, ts]。
+            for key, value in raw.items():
+                if key in ("version", "umos", "legacy"):
+                    continue
+                umo = ""
+                ts = 0.0
+                if isinstance(value, dict):
+                    umo = _s(value.get("umo")).strip()
                     try:
-                        ts = float(value[1])
+                        ts = float(value.get("ts") or 0)
                     except (TypeError, ValueError):
                         ts = 0.0
-            if umo and "|" in str(key):
-                self._umos[str(key)] = (umo, ts or 0.0)
-                loaded += 1
+                elif isinstance(value, (list, tuple)) and value:
+                    umo = _s(value[0]).strip()
+                    if len(value) > 1:
+                        try:
+                            ts = float(value[1])
+                        except (TypeError, ValueError):
+                            ts = 0.0
+                if self._parse_umo(umo) is None or "|" not in _s(key):
+                    continue
+                parts = _s(key).split("|", 2)
+                if len(parts) != 3:
+                    continue
+                platform, kind, conv_id = parts
+                self._umos[umo] = {
+                    "umo": umo,
+                    "platform": platform,
+                    "kind": kind,
+                    "id": conv_id,
+                    "name": "",
+                    "firstSeen": ts,
+                    "lastSeen": ts,
+                    "lastMessageId": "",
+                    "lastSender": "",
+                }
+                self._legacy[_s(key)] = umo
+                migrated = True
+
+        if version != 2 and migrated:
+            backup = os.path.join(os.path.dirname(self._umos_file), "umos.v1.json")
+            if not os.path.exists(backup):
+                try:
+                    shutil.copy2(self._umos_file, backup)
+                    with contextlib.suppress(OSError):
+                        os.chmod(backup, 0o600)
+                    logger.info("Cortico Bridge: 已备份旧会话表到 %s", backup)
+                except OSError as exc:  # noqa: BLE001
+                    logger.warning("Cortico Bridge: 备份旧会话表失败 —— %s", exc)
+
+        self._prune()
+        if migrated:
+            self._save_umos(force=True)
+            logger.info(f"Cortico Bridge: 会话表已迁移到 UMO v2，共 {len(self._umos)} 条")
+        elif self._umos:
+            logger.info(f"Cortico Bridge: 从磁盘恢复 {len(self._umos)} 个 UMO")
+
+    def _fresh(self, ts: float) -> bool:
+        return bool(ts) and time.time() - ts <= UMO_TTL_SECONDS
+
+    def _prune(self) -> None:
         if len(self._umos) > UMO_MAX:
-            keep = sorted(self._umos.items(), key=lambda kv: kv[1][1], reverse=True)[:UMO_MAX]
+            keep = sorted(
+                self._umos.items(),
+                key=lambda kv: float(kv[1].get("lastSeen") or 0),
+                reverse=True,
+            )[:UMO_MAX]
             self._umos = dict(keep)
-        if loaded:
-            logger.info(f"Cortico Bridge: 从磁盘恢复 {len(self._umos)} 个会话标识")
+        alive = set(self._umos)
+        self._legacy = {k: v for k, v in self._legacy.items() if v in alive}
 
     def _save_umos(self, force: bool = False) -> None:
         if not self._umos_file:
             return
         now = time.time()
         if not force and now - self._last_save < UMO_SAVE_INTERVAL:
-            # 这次改动还在内存里；下次落盘或 terminate 时补上。
             self._dirty = True
             return
         try:
             os.makedirs(os.path.dirname(self._umos_file), exist_ok=True)
             payload = {
-                key: {"umo": umo, "ts": ts} for key, (umo, ts) in self._umos.items()
+                "version": 2,
+                "umos": {umo: dict(item) for umo, item in self._umos.items()},
+                "legacy": dict(self._legacy),
             }
             tmp = self._umos_file + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=0)
+            with contextlib.suppress(OSError):
+                os.chmod(tmp, 0o600)
             os.replace(tmp, self._umos_file)
             self._last_save = now
             self._dirty = False
-        except Exception as exc:  # noqa: BLE001 - 落盘失败不影响发送
+        except Exception as exc:  # noqa: BLE001
             self._dirty = True
             logger.debug(f"Cortico Bridge: 会话表落盘失败 —— {exc}")
 
     def flush(self) -> None:
-        """把内存里的会话表立刻写盘；插件卸载/重启前调用。"""
         if self._dirty or self._last_save == 0:
             self._save_umos(force=True)
 
-    def remember(self, platform_id: str, conv_kind: str, conv_id: str, umo: str) -> None:
-        if not umo:
+    def remember(
+        self,
+        platform_id: str,
+        conv_kind: str,
+        conv_id: str,
+        umo: str,
+        message_id: str = "",
+        sender: str = "",
+    ) -> None:
+        target = _s(umo).strip()
+        parsed = self._parse_umo(target)
+        if parsed is None:
             return
-        key = f"{platform_id}|{conv_kind}|{conv_id}"
-        changed = self._umos.get(key, ("", 0.0))[0] != umo
-        self._umos[key] = (umo, time.time())
-        # 防止长期运行后无限增长
-        if len(self._umos) > UMO_MAX:
-            oldest = sorted(self._umos.items(), key=lambda kv: kv[1][1])[:50]
-            for k, _ in oldest:
-                self._umos.pop(k, None)
-            changed = True
-        if changed:
-            self._save_umos()
-
-    def _fresh(self, ts: float) -> bool:
-        return bool(ts) and time.time() - ts <= UMO_TTL_SECONDS
+        platform, kind, session = parsed
+        now = time.time()
+        entry = self._umos.get(target)
+        if entry is None:
+            entry = {
+                "umo": target,
+                "platform": platform,
+                "kind": kind,
+                "id": session,
+                "name": "",
+                "firstSeen": now,
+                "lastSeen": now,
+                "lastMessageId": "",
+                "lastSender": "",
+            }
+            self._umos[target] = entry
+        else:
+            entry["platform"] = platform
+            entry["kind"] = kind
+            entry["id"] = session
+            entry["lastSeen"] = now
+        if message_id:
+            entry["lastMessageId"] = _s(message_id)
+        if sender:
+            entry["lastSender"] = _s(sender)
+        if platform_id and conv_kind and conv_id:
+            self._legacy[f"{platform_id}|{conv_kind}|{conv_id}"] = target
+        self._prune()
+        self._save_umos()
 
     def has_umo(self, umo: str) -> bool:
-        """桥是否见过这个 UMO；发送只允许回到见过的会话。"""
+        """桥最近见过的 UMO；只允许向这些会话发送。"""
         target = _s(umo).strip()
-        if not target:
-            return False
-        return any(known == target and self._fresh(ts) for known, ts in self._umos.values())
+        entry = self._umos.get(target)
+        return bool(entry and self._fresh(float(entry.get("lastSeen") or 0)))
 
     def umo_for(self, platform_id: str, conv_kind: str, conv_id: str) -> str | None:
-        """找这个会话的 umo。
+        """由旧会话键找 UMO；只在最近见过的条目里找。
 
-        优先精确匹配平台；没给平台（或平台已换）时退回到「最近见过的同会话」，
-        这样 Cortico 不传 platform 也能用。
+        精确命中也要检查 TTL；后缀匹配必须唯一，多个平台同时见过就返回 None，
+        不按「最近」猜，避免 default/default1 混发。
         """
         if platform_id:
-            hit = self._umos.get(f"{platform_id}|{conv_kind}|{conv_id}")
-            if hit:
-                return hit[0]
-
+            hit = self._legacy.get(f"{platform_id}|{conv_kind}|{conv_id}")
+            if hit and self.has_umo(hit):
+                return hit
         suffix = f"|{conv_kind}|{conv_id}"
-        candidates = [
-            (umo, ts)
-            for key, (umo, ts) in self._umos.items()
-            if key.endswith(suffix) and self._fresh(ts)
-        ]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda item: item[1])[0]
+        candidates = {
+            umo
+            for key, umo in self._legacy.items()
+            if key.endswith(suffix) and self.has_umo(umo)
+        }
+        if len(candidates) == 1:
+            return next(iter(candidates))
+        return None
 
     def known_conversations(self) -> list[dict]:
         now = time.time()
-        return [
-            {
-                "key": key,
-                "umo": umo,
-                "age_sec": round(now - ts),
-            }
-            for key, (umo, ts) in sorted(
-                self._umos.items(), key=lambda kv: kv[1][1], reverse=True
+        rows = []
+        for umo, item in self._umos.items():
+            ts = float(item.get("lastSeen") or 0)
+            if not self._fresh(ts):
+                continue
+            rows.append(
+                {
+                    "key": umo,
+                    "umo": umo,
+                    "platform": item.get("platform", ""),
+                    "kind": item.get("kind", ""),
+                    "id": item.get("id", ""),
+                    "name": item.get("name", ""),
+                    "age_sec": round(now - ts),
+                }
             )
-            if self._fresh(ts)
-        ]
+        return sorted(rows, key=lambda row: row["age_sec"])
 
     # ---------- 发送 ----------
 
@@ -258,19 +389,20 @@ class Delivery:
         并在备注里说明，不把整条消息吞掉。
         """
         self.last_error_code = ""
-        if conv_kind not in CONV_KINDS:
-            self.last_error_code = "invalid_conv"
-            return False, f"未知的会话类型 {conv_kind}", False, False
-        # UMO 是主键；只有桥见过的会话才允许发送，避免模型乱填 UMO。
-        if umo:
-            if not self.has_umo(umo):
-                self.last_error_code = "unknown_umo"
-                return False, f"未知会话 {umo}，桥没有见过这个会话", False, False
-        else:
-            umo = self.umo_for(platform_id, conv_kind, conv_id) or ""
-        if not umo:
-            self.last_error_code = "unknown_conv"
-            return False, "还没有收到过这个会话的消息，缺少可用的会话标识", False, False
+        # 单通道：只认 UMO。旧帧的 conv 在升级时已经迁移成 UMO，不再运行时猜。
+        target = _s(umo).strip()
+        if not target:
+            self.last_error_code = "missing_umo"
+            return False, "这一帧没有带 umo，桥只按 umo 发送", False, False
+        parsed = self._parse_umo(target)
+        if parsed is None:
+            self.last_error_code = "invalid_umo"
+            return False, f"UMO 格式不正确：{target}", False, False
+        platform_id, conv_kind, conv_id = parsed
+        umo = target
+        if not self.has_umo(umo):
+            self.last_error_code = "unknown_umo"
+            return False, f"未知会话 {umo}，桥没有见过这个会话", False, False
         if not self.allow():
             self.last_error_code = "rate_limited"
             return False, f"已达到每分钟 {self._limit()} 条的上限，本条没有发出", False, False
