@@ -57,6 +57,7 @@ from .bridge import (
     BridgeServer,
     is_loopback_host,
     looks_like_command,
+    matches_command,
 )
 from .deliver import Delivery
 from .tools import ToolRegistry
@@ -184,6 +185,9 @@ class CorticoBridge(Star):
         self._vision_logged = ""
         # QQ 号 → 昵称；通知事件只给号码，靠这里补上人名。
         self._names: OrderedDict[str, str] = OrderedDict()
+        # AstrBot 已注册的指令名；用于识别「不带唤醒前缀」的指令。
+        self._cmd_names: set[str] = set()
+        self._cmd_names_at = 0.0
         # SSE 订阅者（每个打开面板的浏览器一个队列）
         self._subscribers: set[asyncio.Queue] = set()
         self.started_at = time.time()
@@ -351,8 +355,52 @@ class CorticoBridge(Star):
         out = [p.strip() for p in items if p.strip()]
         return out or ["/"]
 
+    def _raw_message_text(self, event: AstrMessageEvent) -> str:
+        """唤醒检查会把 message_str 的前缀剥掉；原始组件里还留着 /。"""
+        parts: list[str] = []
+        try:
+            for comp in event.get_messages():
+                text = getattr(comp, "text", "")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+        except Exception:  # noqa: BLE001
+            return ""
+        return "".join(parts)
+
+    def _command_names(self) -> set[str]:
+        """已注册的 AstrBot 指令名；30 秒缓存，读不到就退化成空前缀判断。"""
+        now = time.time()
+        if self._cmd_names and now - self._cmd_names_at < 30:
+            return self._cmd_names
+        names: set[str] = set()
+        try:
+            from astrbot.core.star.star_handler import star_handlers_registry
+
+            for handler in star_handlers_registry:
+                for event_filter in getattr(handler, "event_filters", []) or []:
+                    getter = getattr(event_filter, "get_complete_command_names", None)
+                    if not callable(getter):
+                        continue
+                    try:
+                        names.update(getter() or [])
+                    except Exception:  # noqa: BLE001
+                        continue
+        except Exception:  # noqa: BLE001
+            names = set()
+        self._cmd_names = names
+        self._cmd_names_at = now
+        return names
+
     def _looks_like_command(self, event: AstrMessageEvent) -> bool:
-        return looks_like_command(event.get_message_str(), self._wake_prefixes())
+        prefixes = self._wake_prefixes()
+        if looks_like_command(event.get_message_str(), prefixes):
+            return True
+        if looks_like_command(self._raw_message_text(event), prefixes):
+            return True
+        # 私聊默认不需要唤醒前缀；这时靠「首词命中已注册指令名」判断。
+        if not getattr(event, "is_at_or_wake_command", False):
+            return False
+        return matches_command(event.get_message_str(), self._command_names())
 
     def _matches_scope(self, event: AstrMessageEvent, items: list[str]) -> bool:
         """UMO 优先；旧配置里的群号/QQ 号继续兼容。"""

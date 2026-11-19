@@ -104,6 +104,14 @@ def looks_like_command(text: str, prefixes: list[str]) -> bool:
     return any(value.startswith(_s(p).strip()) for p in prefixes if _s(p).strip())
 
 
+def matches_command(text: str, names) -> bool:
+    """无前缀指令：首词或整句命中已注册的指令名。"""
+    value = " ".join(_s(text).split())
+    if not value or not names:
+        return False
+    return any(value == n or value.startswith(n + " ") for n in names if n)
+
+
 
 # 图片 base64 的上限；World 那边限制原始 6MB，编码后会更大一些。
 MAX_IMAGE_B64 = 8 * 1024 * 1024

@@ -280,6 +280,14 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bridge.looks_like_command("!help", ["!"]))
         self.assertFalse(bridge.looks_like_command("/help", []))
 
+    def test_prefixless_command_matches_registered_name(self):
+        self.assertTrue(bridge.matches_command("help", {"help"}))
+        self.assertTrue(bridge.matches_command("help me", {"help"}))
+        self.assertTrue(bridge.matches_command("  帮助   菜单 ", {"帮助 菜单"}))
+        self.assertFalse(bridge.matches_command("hello", {"help"}))
+        self.assertFalse(bridge.matches_command("", {"help"}))
+        self.assertFalse(bridge.matches_command("help", set()))
+
 
 if __name__ == "__main__":
     unittest.main()
