@@ -639,7 +639,7 @@ class CorticoBridge(Star):
 
     # ---------- 消息进 Cortico ----------
 
-    @filter.event_message_type(filter.EventMessageType.ALL)
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
     async def observe_all_messages(self, event: AstrMessageEvent):
         """B 模式：让没有 @ 的群消息也通过唤醒检查。
 
@@ -693,7 +693,7 @@ class CorticoBridge(Star):
         # 也不要掉回 AstrBot 的模型。
         event.set_extra("_cortico_forced_wake", True)
 
-    @filter.on_llm_request()
+    @filter.on_llm_request(priority=10)
     async def on_llm_request(self, event: AstrMessageEvent, req):
         """把这一轮交给 Cortico，然后让 AstrBot 自己的模型退出。"""
         if not self.config.get("enabled", False):
