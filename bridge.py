@@ -501,6 +501,7 @@ class BridgeServer:
         image, image_err = _parse_image(frame.get("image"))
         used_voice = False
         uncertain = False
+        code = ""
 
         if image_err:
             ok, err = False, image_err
