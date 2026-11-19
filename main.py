@@ -639,7 +639,7 @@ class CorticoBridge(Star):
 
     # ---------- 消息进 Cortico ----------
 
-    @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
     async def observe_all_messages(self, event: AstrMessageEvent):
         """B 模式：让没有 @ 的群消息也通过唤醒检查。
 
@@ -655,6 +655,11 @@ class CorticoBridge(Star):
             return
 
         self._remember_self(event)
+        if event.is_private_chat() or self._group_allowed(event):
+            logger.info(
+                "Cortico Bridge: 事件进入 private=%s text=%r"
+                % (event.is_private_chat(), event.get_message_str()[:60])
+            )
 
         # 通知类事件先处理：撤回、入群、退群、戳一戳、上传文件。
         notice, ref = self._notice_text(event)
@@ -690,7 +695,7 @@ class CorticoBridge(Star):
         await self.on_llm_request(event, None)
         event.stop_event()
 
-    @filter.on_llm_request(priority=10)
+    @filter.on_llm_request(priority=100)
     async def on_llm_request(self, event: AstrMessageEvent, req):
         """把这一轮交给 Cortico，然后让 AstrBot 自己的模型退出。"""
         if not self.config.get("enabled", False):
