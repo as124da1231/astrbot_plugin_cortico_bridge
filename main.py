@@ -666,15 +666,24 @@ class CorticoBridge(Star):
                 event.stop_event()
             return
 
-        if self._group_mode() != "all":
-            return
-
         # 桥没连上时不要强制唤醒：否则 AstrBot 自己的模型会接管整个群，
         # Cortico 一断就开始刷屏。
         if not self.server.connected:
             return
 
+        # 私聊没有「群里没人 @」的问题，但 AstrBot 的唤醒检查不一定放行。
+        # 允许的私聊主动置 wake，确保一定走到 on_llm_request；被拒绝的私聊
+        # 按 private_deny 处理，避免 AstrBot 模型抢答。
         if event.is_private_chat():
+            if not self._private_allowed(event):
+                if self._private_deny() == "ignore":
+                    event.stop_event()
+                return
+            event.is_at_or_wake_command = True
+            event.set_extra("_cortico_forced_wake", True)
+            return
+
+        if self._group_mode() != "all":
             return
         if not self._group_allowed(event):
             return
