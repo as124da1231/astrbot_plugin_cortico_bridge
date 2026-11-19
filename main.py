@@ -760,17 +760,13 @@ class CorticoBridge(Star):
 
     # ---------- 消息进 Cortico ----------
 
-    @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=-sys.maxsize)
     async def observe_all_messages(self, event: AstrMessageEvent):
-        """B 模式：让没有 @ 的群消息也通过唤醒检查。
+        """最后一个跑：只标记这一轮归 Coo，不抢在其他插件前面 stop。
 
-        WakingCheckStage 在消息没被唤醒时会直接 stop_event()，那样永远到不了
-        on_llm_request。这里注册一个总是通过 filter 的 handler：它通过就置
-        is_wake=True；还要补 is_at_or_wake_command，ProcessStage 认的是后者。
-
-        本函数只放行，不推送——推送统一在 on_llm_request，避免两处逻辑分叉。
-        唯一例外是通知类事件（撤回/入群/戳一戳）：它们没有正文，进不了 LLM 阶段，
-        所以在这里直接翻译并推走。
+        指令、自己轮询的插件先执行；它们 stop 了，就不会走到 LLM 层。
+        没人认领的消息由 on_llm_request 推给 Coo。
+        通知类没有正文、进不了 LLM 阶段，所以仍然在这里直接推走。
         """
         if not self.config.get("enabled", False):
             return
@@ -810,24 +806,24 @@ class CorticoBridge(Star):
         if not self.server.connected:
             return
 
-        # 私聊和 B 模式群消息不再走唤醒/LLM 管线：那条路会被其他插件
-        # 或唤醒检查截断。这里直接调用同一套推送逻辑，推完就 stop，
-        # 保证文字一定先到桥，不会被 AstrBot 或其他插件抢走。
+        # 私聊和 B 模式群消息只做标记；真正推送留到 LLM 层。
+        # 这样指令和「自己轮询」的插件可以先执行并 stop，Coo 不会抢在它们前面。
         if event.is_private_chat():
             if not self._private_allowed(event):
                 if self._private_deny() == "ignore":
                     event.stop_event()
                 return
-            await self._push_event(event)
-            event.stop_event()
+            event.set_extra("_cortico_llm_owned", "private")
             return
 
         if self._group_mode() != "all":
             return
         if not self._group_allowed(event):
             return
-        await self._push_event(event)
-        event.stop_event()
+        event.is_at_or_wake_command = True
+        event.is_wake = True
+        event.set_extra("_cortico_forced_wake", True)
+        event.set_extra("_cortico_llm_owned", "group")
 
     @filter.on_llm_request(priority=sys.maxsize)
     async def on_llm_request(self, event: AstrMessageEvent, req):
@@ -838,6 +834,8 @@ class CorticoBridge(Star):
             return
         if not self.server.connected:
             logger.info("Cortico Bridge: Cortico 没连上，本轮交给 AstrBot")
+            return
+        if not _s(event.get_extra("_cortico_llm_owned", "")).strip():
             return
         if self._looks_like_command(event):
             logger.info(
