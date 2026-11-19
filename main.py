@@ -670,6 +670,12 @@ class CorticoBridge(Star):
         if not self.config.get("enabled", False):
             return
         if not self._platform_allowed(event):
+            umo = self._umo_of(event)
+            platform = umo.split(":", 1)[0] if ":" in umo else _s(event.get_platform_id())
+            logger.info(
+                "Cortico Bridge: 跳过非接管平台 %s（bridge_platforms=%s）"
+                % (platform, ",".join(self._bridge_platforms()))
+            )
             return
 
         self._remember_self(event)
