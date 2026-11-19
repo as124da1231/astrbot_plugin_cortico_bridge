@@ -671,27 +671,24 @@ class CorticoBridge(Star):
         if not self.server.connected:
             return
 
-        # 私聊没有「群里没人 @」的问题，但 AstrBot 的唤醒检查不一定放行。
-        # 允许的私聊主动置 wake，确保一定走到 on_llm_request；被拒绝的私聊
-        # 按 private_deny 处理，避免 AstrBot 模型抢答。
+        # 私聊和 B 模式群消息不再走唤醒/LLM 管线：那条路会被其他插件
+        # 或唤醒检查截断。这里直接调用同一套推送逻辑，推完就 stop，
+        # 保证文字一定先到桥，不会被 AstrBot 或其他插件抢走。
         if event.is_private_chat():
             if not self._private_allowed(event):
                 if self._private_deny() == "ignore":
                     event.stop_event()
                 return
-            event.is_at_or_wake_command = True
-            event.set_extra("_cortico_forced_wake", True)
+            await self.on_llm_request(event, None)
+            event.stop_event()
             return
 
         if self._group_mode() != "all":
             return
         if not self._group_allowed(event):
             return
-
-        event.is_at_or_wake_command = True
-        # 标记「这轮是我们硬唤醒的」：推送失败时宁可这一轮不说话，
-        # 也不要掉回 AstrBot 的模型。
-        event.set_extra("_cortico_forced_wake", True)
+        await self.on_llm_request(event, None)
+        event.stop_event()
 
     @filter.on_llm_request(priority=10)
     async def on_llm_request(self, event: AstrMessageEvent, req):
