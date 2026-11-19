@@ -54,8 +54,8 @@
   "listen_host": {
     "description": "桥的监听地址",
     "type": "string",
-    "default": "0.0.0.0",
-    "hint": "填 0.0.0.0 表示所有网卡；只允许本机连时填 127.0.0.1。"
+    "default": "127.0.0.1",
+    "hint": "默认只允许本机连。同机 Coo 填 127.0.0.1；Coo 在另一台机器上才需要填 0.0.0.0，并且必须同时设置 token。"
   },
   "token": {
     "description": "校验 token",
@@ -63,7 +63,7 @@
     "default": "",
     "secret": true,
     "obvious_hint": true,
-    "hint": "必须与 Cortico 部署里 worlds.astrbot.token 完全一致。留空表示不校验——端口暴露在公网时不要留空。"
+    "hint": "必须与 Cortico 部署里 worlds.astrbot.token 完全一致。只监听 127.0.0.1 时可以留空；监听 0.0.0.0 或任何非回环地址时必填，否则桥拒绝启动。"
   },
   "max_sends_per_minute": {
     "description": "每分钟发送上限",

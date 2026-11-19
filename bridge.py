@@ -62,6 +62,40 @@ def parse_umo(raw: str):
     return platform, kind, session, value
 
 
+# 连进来之后才判的来源问题；空字符串表示放行。
+# 浏览器发起的 WebSocket 一定会带 Origin，正常的 Coo 客户端（Node ws）不带。
+# URL 里带凭据会进代理日志和错误串，和 DSH 桥的判据一致：见即拒。
+def _header(headers, name: str) -> str:
+    if headers is None:
+        return ""
+    try:
+        value = headers.get(name)
+        if value:
+            return _s(value)
+    except Exception:  # noqa: BLE001 - 头部形状不对按没有处理
+        pass
+    try:
+        for key, value in headers.items():
+            if _s(key).lower() == name:
+                return _s(value)
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def connection_refusal(headers, path: str) -> str:
+    if _header(headers, "origin").strip():
+        return "origin"
+    target = _s(path)
+    if "token=" in target or "access_token=" in target:
+        return "query_token"
+    return ""
+
+
+def is_loopback_host(host: str) -> bool:
+    return str(host).strip().lower() in ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
 
 # 图片 base64 的上限；World 那边限制原始 6MB，编码后会更大一些。
 MAX_IMAGE_B64 = 8 * 1024 * 1024
@@ -138,6 +172,9 @@ class BridgeServer:
         self.listening = False
         # 监听失败的原因；面板直接显示，免得只看到「监听未开启」。
         self.listen_error = ""
+        # 来源门计数：带 Origin 的浏览器连接、URL 里带 token 的连接，各自记一笔。
+        self.origin_refused = 0
+        self.query_token_refused = 0
         # 对端在 hello 里自报的能力；目前只有「能不能收图」。
         self.capabilities: dict = {}
         # 桥自报的身份；第一条 QQ 事件到达后由上层补上。
@@ -159,17 +196,22 @@ class BridgeServer:
         if self.listening and self._server is not None:
             # 同一个实例被重复 initialize / 重开时，不要再去绑一次。
             return True
+        # 非回环地址等于把 QQ 消息和发送能力放到网络上。没有 token 就不开这扇门，
+        # 不再只打一行警告：警告挡不住扫描器。
+        if not is_loopback_host(self.host) and not self.token:
+            self.listening = False
+            self.listen_error = "非回环监听必须设置 token"
+            logger.error(
+                "Cortico Bridge: 监听在 %s 但没有设置 token，拒绝启动。"
+                "只给本机用请填 127.0.0.1；需要跨机时先设置 token。" % self.host
+            )
+            return False
         if not HAS_WS:
             logger.error(
                 "Cortico Bridge: 缺少 websockets 依赖，桥没有启动。请给 AstrBot 安装 websockets。"
             )
             self.listen_error = "缺少 websockets 依赖"
             return False
-        if not self.token and str(self.host).strip().lower() not in ("127.0.0.1", "localhost", "::1"):
-            logger.warning(
-                "Cortico Bridge: 没有设置 token，且监听在 %s；任何能连到这个端口的人都能接管桥。"
-                % self.host
-            )
         try:
             self._server = await ws_serve(
                 self._handle_client,
@@ -310,12 +352,38 @@ class BridgeServer:
         if self._client is not None:
             await self.push_ready()
 
+    def _refuse_connection(self, reason: str, address: str) -> None:
+        if reason == "origin":
+            self.origin_refused += 1
+            logger.warning(
+                f"Cortico Bridge: {address} 带了 Origin 头，按浏览器页面拒绝（桥没有网页客户端）"
+            )
+        else:
+            self.query_token_refused += 1
+            logger.warning(
+                f"Cortico Bridge: {address} 把 token 放在 URL 查询里，已拒绝（凭据不能进 URL）"
+            )
+
     async def _handle_client(self, websocket) -> None:
         remote = getattr(websocket, "remote_address", None)
         if isinstance(remote, (tuple, list)) and remote:
             address = f"{remote[0]}:{remote[1]}" if len(remote) > 1 else _s(remote[0])
         else:
             address = _s(remote)
+
+        request = getattr(websocket, "request", None)
+        refusal = connection_refusal(
+            getattr(request, "headers", None),
+            _s(getattr(request, "path", "")),
+        )
+        if refusal:
+            self._refuse_connection(refusal, address)
+            with contextlib.suppress(Exception):
+                await websocket.close(
+                    code=4403 if refusal == "origin" else 4401,
+                    reason="origin refused" if refusal == "origin" else "query token refused",
+                )
+            return
 
         registered = False
         tasks: set[asyncio.Task] = set()

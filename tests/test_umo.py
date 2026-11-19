@@ -77,5 +77,50 @@ class UmoContractTests(unittest.TestCase):
             self.assertEqual(restored.umo_for("default", "group", "123456789"), umo)
 
 
+class SecurityTests(unittest.IsolatedAsyncioTestCase):
+    async def _server(self, host: str):
+        async def on_send(*_args, **_kwargs):
+            return True, "", False, False
+
+        return bridge.BridgeServer(host=host, port=0, token="", on_send=on_send)
+
+    async def test_non_loopback_without_token_refuses_to_bind(self):
+        server = await self._server("0.0.0.0")
+        started = await server.start()
+        self.assertFalse(started)
+        self.assertFalse(server.listening)
+        self.assertIn("token", server.listen_error)
+
+    async def test_loopback_without_token_is_not_refused_for_token(self):
+        server = await self._server("127.0.0.1")
+        try:
+            await server.start()
+            self.assertNotIn("token", server.listen_error)
+        finally:
+            await server.stop()
+
+    def test_browser_origin_is_refused(self):
+        self.assertEqual(
+            bridge.connection_refusal({"origin": "http://127.0.0.1:3000"}, "/"),
+            "origin",
+        )
+        self.assertEqual(
+            bridge.connection_refusal({"Origin": "https://evil.example"}, "/"),
+            "origin",
+        )
+
+    def test_query_token_is_refused(self):
+        self.assertEqual(
+            bridge.connection_refusal({}, "/?token=abc"), "query_token"
+        )
+        self.assertEqual(
+            bridge.connection_refusal({}, "/?access_token=abc"), "query_token"
+        )
+
+    def test_native_client_passes(self):
+        self.assertEqual(bridge.connection_refusal({}, "/"), "")
+        self.assertEqual(bridge.connection_refusal(None, "/ws"), "")
+
+
 if __name__ == "__main__":
     unittest.main()

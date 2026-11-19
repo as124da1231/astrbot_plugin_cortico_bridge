@@ -509,6 +509,12 @@ class CorticoBridge(Star):
                 await old.stop()
         setattr(builtins, _ACTIVE_SERVER_ATTR, self.server)
 
+        if not self.config.get("enabled", False):
+            # 没启用就不开端口：插件可以装着，但不接客。
+            self.server.listening = False
+            logger.info("Cortico Bridge: 未启用，不开放监听口")
+            return
+
         await self.server.start()
 
     async def terminate(self):
@@ -537,6 +543,8 @@ class CorticoBridge(Star):
 
     async def _on_tool_call(self, name: str, args: dict, turn: str) -> tuple[bool, str]:
         """用「触发这一轮的那条消息」的身份执行工具。"""
+        if not self.config.get("enabled", False):
+            return False, "桥未启用，工具调用被拒绝"
         if not turn:
             return False, "缺少触发消息 id，无法确认身份"
         hit = self._turns.get(turn)
@@ -584,6 +592,8 @@ class CorticoBridge(Star):
         voice: bool = False,
         umo: str = "",
     ) -> tuple[bool, str, bool, bool, str]:
+        if not self.config.get("enabled", False):
+            return False, "桥未启用，发送门是关的", False, False, "door_closed"
         ok, note, used_voice, uncertain = await self.delivery.send(
             platform, conv_kind, conv_id, text, reply_to, image, voice, umo
         )
@@ -1299,6 +1309,10 @@ class CorticoBridge(Star):
                 "aliases": self._aliases(),
                 "host": self.server.host,
                 "port": self.server.port,
+                "listening": self.server.listening,
+                "listenError": self.server.listen_error,
+                "originRefused": self.server.origin_refused,
+                "queryTokenRefused": self.server.query_token_refused,
                 "tokenSet": bool(_s(self.config.get("token", ""))),
                 "maxSends": self._max_sends(),
                 "admins": self._admin_ids(),
@@ -1361,6 +1375,10 @@ class CorticoBridge(Star):
             "listening": self.server.listening,
             "client": self.server.client_address,
             "connectedFor": int(now - connected_at) if connected_at else 0,
+            "listening": self.server.listening,
+            "listenError": self.server.listen_error,
+            "originRefused": self.server.origin_refused,
+            "queryTokenRefused": self.server.query_token_refused,
             "stats": dict(self.stats),
             "recent": list(self._recent),
             "toolLog": list(self._tool_log),
@@ -1656,6 +1674,10 @@ class CorticoBridge(Star):
 
     async def page_restart(self):
         """重开监听：改完端口、token，或怀疑卡住时用。"""
+        if not self.config.get("enabled", False):
+            return error_response(
+                "桥未启用，先打开「接管对话」再重开监听。", status_code=400
+            )
         # 让「重开监听」真的按当前配置重新绑定，而不是继续用 init 时的旧值。
         self.server.host = _s(self.config.get("listen_host", "0.0.0.0")) or "0.0.0.0"
         self.server.port = self._port()
