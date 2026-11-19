@@ -5,6 +5,14 @@
     "default": false,
     "hint": "打开后，QQ 消息交给 Cortico 想，AstrBot 自己的模型不再参与这一轮。Cortico 没连上时自动退回 AstrBot 原有行为。"
   },
+  "bridge_platforms": {
+    "description": "接管的 AstrBot 平台",
+    "type": "list",
+    "default": [
+      "default"
+    ],
+    "hint": "只接管这里的平台 ID（UMO 第一段）。webchat/console、default1 等不在列表里的平台永远不会被桥拦截或 stop。默认只接管 default。"
+  },
   "group_scope": {
     "description": "群范围：全部群 / 指定群",
     "type": "string",

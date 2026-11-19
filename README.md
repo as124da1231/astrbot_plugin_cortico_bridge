@@ -69,6 +69,7 @@ AstrBot 自己的模型不参与这些轮次；桥没连上时插件什么都不
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | 关 | 接管开关。关着时插件完全不介入 |
+| `bridge_platforms` | `default` | 只接管这些 AstrBot 平台；`webchat`/`console`/`default1` 等平台不会被拦截或推送 |
 | `group_scope` | `all` | 群范围：`all` 全部群 / `allowlist` 指定群 |
 | `group_allow` | 空 | 指定群名单，一行一个 UMO 或旧群号；只在 `group_scope=allowlist` 时生效，空名单不能保存 |
 | `group_mode` | `mention` | 群消息范围：`mention` 只交 @ 或叫到称呼的；`all` 每条群消息都交 |

@@ -267,6 +267,22 @@ class CorticoBridge(Star):
             return "all" if bool(self.config.get("observe_all", False)) else "mention"
         return "all" if _s(raw).strip().lower() == "all" else "mention"
 
+    def _bridge_platforms(self) -> list[str]:
+        """只接管这些 AstrBot 平台；其他平台（webchat/console/default1 等）完全不碰。"""
+        raw = self.config.get("bridge_platforms", ["default"])
+        if isinstance(raw, str):
+            items = [x.strip() for x in raw.replace("，", ",").split(",") if x.strip()]
+        elif isinstance(raw, list):
+            items = [str(x).strip() for x in raw if str(x).strip()]
+        else:
+            items = []
+        return items or ["default"]
+
+    def _platform_allowed(self, event: AstrMessageEvent) -> bool:
+        umo = self._umo_of(event)
+        platform = umo.split(":", 1)[0] if ":" in umo else _s(event.get_platform_id())
+        return platform in self._bridge_platforms()
+
     def _private_mode(self) -> str:
         raw = self.config.get("private_mode")
         # 旧配置没有这个键：保持原来“私聊全收”的行为，避免升级后突然断私聊。
@@ -653,6 +669,8 @@ class CorticoBridge(Star):
         """
         if not self.config.get("enabled", False):
             return
+        if not self._platform_allowed(event):
+            return
 
         self._remember_self(event)
         if event.is_private_chat() or self._group_allowed(event):
@@ -700,6 +718,8 @@ class CorticoBridge(Star):
         """把这一轮交给 Cortico，然后让 AstrBot 自己的模型退出。"""
         if not self.config.get("enabled", False):
             return
+        if not self._platform_allowed(event):
+            return
         if not self.server.connected:
             logger.info("Cortico Bridge: Cortico 没连上，本轮交给 AstrBot")
             return
@@ -710,6 +730,8 @@ class CorticoBridge(Star):
     ) -> bool:
         """统一推送入口：策略、去重、图片、统计和会话记录只在这里做一次。"""
         if not self.server.connected:
+            return False
+        if not self._platform_allowed(event):
             return False
 
         if text is None:
@@ -1263,6 +1285,7 @@ class CorticoBridge(Star):
                 "groupScope": self._group_scope(),
                 "groupAllow": self._group_allow(),
                 "groupMode": self._group_mode(),
+                "bridgePlatforms": self._bridge_platforms(),
                 "privateMode": self._private_mode(),
                 "privateAllow": self._private_allow(),
                 "privateAdminBypass": self._private_admin_bypass(),
