@@ -567,7 +567,7 @@ class CorticoBridge(Star):
         image: dict | None = None,
         voice: bool = False,
         umo: str = "",
-    ) -> tuple[bool, str, bool, bool]:
+    ) -> tuple[bool, str, bool, bool, str]:
         ok, note, used_voice, uncertain = await self.delivery.send(
             platform, conv_kind, conv_id, text, reply_to, image, voice, umo
         )
@@ -602,7 +602,7 @@ class CorticoBridge(Star):
                     "text": f"{prefix} {conv_kind}:{conv_id} —— {note}",
                 }
             )
-        return ok, note, used_voice, uncertain
+        return ok, note, used_voice, uncertain, ("" if ok else self.delivery.last_error_code)
 
     def _remember_out(
         self,
@@ -684,7 +684,7 @@ class CorticoBridge(Star):
                 if self._private_deny() == "ignore":
                     event.stop_event()
                 return
-            await self.on_llm_request(event, None)
+            await self._push_event(event)
             event.stop_event()
             return
 
@@ -692,7 +692,7 @@ class CorticoBridge(Star):
             return
         if not self._group_allowed(event):
             return
-        await self.on_llm_request(event, None)
+        await self._push_event(event)
         event.stop_event()
 
     @filter.on_llm_request(priority=100)
@@ -700,22 +700,22 @@ class CorticoBridge(Star):
         """把这一轮交给 Cortico，然后让 AstrBot 自己的模型退出。"""
         if not self.config.get("enabled", False):
             return
-
-        # 这一轮是不是 B 模式硬唤醒的（群里没点名也被我们叫起来）。
-        forced = bool(event.get_extra("_cortico_forced_wake", False))
-
         if not self.server.connected:
-            if forced:
-                # 硬唤醒的消息不能掉回 AstrBot 自己的模型，否则桥一断就刷屏。
-                logger.info("Cortico Bridge: Cortico 没连上，本条不回复")
-                event.stop_event()
-            else:
-                logger.info("Cortico Bridge: Cortico 没连上，本轮交给 AstrBot")
+            logger.info("Cortico Bridge: Cortico 没连上，本轮交给 AstrBot")
             return
+        await self._push_event(event)
 
-        text = await self._message_text(event)
+    async def _push_event(
+        self, event: AstrMessageEvent, text: str | None = None
+    ) -> bool:
+        """统一推送入口：策略、去重、图片、统计和会话记录只在这里做一次。"""
+        if not self.server.connected:
+            return False
+
+        if text is None:
+            text = await self._message_text(event)
         if not text:
-            return
+            return False
 
         conv_kind = "private" if event.is_private_chat() else "group"
         conv_id = (
@@ -724,22 +724,19 @@ class CorticoBridge(Star):
             else _s(event.get_sender_id() or event.get_session_id())
         )
         if not conv_id:
-            return
+            return False
 
-        # 顺手把「号 → 昵称」记下来，通知事件只有号码时用来补人名。
         self._remember_name(_s(event.get_sender_id()), _s(event.get_sender_name()))
 
-        # 群名单对 A/B 两种模式都生效：名单外的群完全不接管，交回 AstrBot。
-        # 否则 B 模式只认名单、A 模式却谁 @ 都接，行为会不一致。
         if conv_kind == "group":
             if not self._group_allowed(event):
                 logger.debug(f"Cortico Bridge: 群 {conv_id} 不在接管名单里，本轮交给 AstrBot")
-                return
+                return False
         elif not self._private_allowed(event):
             logger.debug(f"Cortico Bridge: 私聊 {conv_id} 不在允许名单里")
             if self._private_deny() == "ignore":
                 event.stop_event()
-            return
+            return False
 
         platform_id = _s(event.get_platform_id())
         is_admin = self._is_admin(event)
@@ -749,9 +746,8 @@ class CorticoBridge(Star):
         if self._is_duplicate(msg_id):
             self.stats["skipped"] += 1
             logger.debug(f"Cortico Bridge: 重复消息已跳过 id={msg_id}")
-            # 仍然要拦住 AstrBot，避免它对同一条消息回两次
             event.stop_event()
-            return
+            return False
 
         conv_name = ""
         if conv_kind == "group":
@@ -770,31 +766,24 @@ class CorticoBridge(Star):
             "text": text,
             "mentioned": self._is_called(event, text),
             "platform": platform_id,
-            # role 只是 AstrBot 的工具权限；owner 才是「主人」。
-            # 目前按约定沿用 AstrBot 管理员作为主人，两者值相同，但字段分开。
             "role": "admin" if is_admin else "member",
             "owner": is_admin,
             "can": {"screenshot": is_admin},
         }
 
-        # 对端模型能读图时，原图随帧一起过去（否则只传上面那句描述）。
         images, image_errors, image_marks = await self._image_payloads(event)
         if images:
             frame["images"] = images
         if image_errors:
             frame["image_errors"] = image_errors
         if image_marks:
-            # 让正文里的占位与真正传过去的图一一对应；没取到的写清原因。
             frame["text"] = _apply_image_marks(text, image_marks)
 
         if not await self.server.push(frame):
             logger.warning("Cortico Bridge: 推送失败，本轮交给 AstrBot")
-            # 没推成功就别把它记成「已见过」，否则管线重试时会被当成重复丢掉。
             if msg_id:
                 self._seen.pop(msg_id, None)
-            if forced:
-                event.stop_event()
-            return
+            return False
 
         self.stats["pushed"] += 1
         preview = _apply_image_marks(text, image_marks) if image_marks else text
@@ -827,15 +816,13 @@ class CorticoBridge(Star):
             )
         )
 
-        # call_event_hook 只看 is_stopped()，不看返回值，必须显式 stop。
         event.stop_event()
-
-        # 记下「这一轮是谁说的」：之后 Cortico 调工具时要用这条消息的身份。
         if msg_id:
             self._turns[msg_id] = (time.time(), event)
             self._turns.move_to_end(msg_id)
             while len(self._turns) > 100:
                 self._turns.popitem(last=False)
+        return True
 
     # ---------- 小工具 ----------
 

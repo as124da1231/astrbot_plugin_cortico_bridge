@@ -1,0 +1,36 @@
+[
+  {
+    "in": "default:GroupMessage:123:456",
+    "ok": true,
+    "platform": "default",
+    "kind": "group",
+    "id": "123:456"
+  },
+  {
+    "in": "default:FriendMessage:100000001",
+    "ok": true,
+    "platform": "default",
+    "kind": "private",
+    "id": "100000001"
+  },
+  {
+    "in": "default:GroupMessage",
+    "ok": false
+  },
+  {
+    "in": ":GroupMessage:1",
+    "ok": false
+  },
+  {
+    "in": "default:OtherMessage:1",
+    "ok": false
+  },
+  {
+    "in": "default:GroupMessage:",
+    "ok": false
+  },
+  {
+    "in": "",
+    "ok": false
+  }
+]

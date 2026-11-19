@@ -21,6 +21,8 @@ CONV_KINDS = ("group", "private")
 UMO_SAVE_INTERVAL = 10.0
 # 最多记住多少个会话；和内存表一致。
 UMO_MAX = 200
+# 超过这个时间没再出现的会话，不能再作为发送目标。
+UMO_TTL_SECONDS = 30 * 24 * 60 * 60
 # 单次平台发送的上限；超时后结果就是「未知」，不能当成功，也不能当没发。
 SEND_TIMEOUT = 20.0
 
@@ -40,6 +42,8 @@ class Delivery:
         self._umos_file = os.path.join(data_dir, "umos.json") if data_dir else ""
         self._last_save = 0.0
         self._dirty = False
+        # 最近一次发送失败的结构化错误码；bridge 用它写 ack.error。
+        self.last_error_code = ""
         self._load_umos()
 
     # ---------- umo 登记 ----------
@@ -124,12 +128,15 @@ class Delivery:
         if changed:
             self._save_umos()
 
+    def _fresh(self, ts: float) -> bool:
+        return bool(ts) and time.time() - ts <= UMO_TTL_SECONDS
+
     def has_umo(self, umo: str) -> bool:
         """桥是否见过这个 UMO；发送只允许回到见过的会话。"""
         target = _s(umo).strip()
         if not target:
             return False
-        return any(known == target for known, _ in self._umos.values())
+        return any(known == target and self._fresh(ts) for known, ts in self._umos.values())
 
     def umo_for(self, platform_id: str, conv_kind: str, conv_id: str) -> str | None:
         """找这个会话的 umo。
@@ -144,7 +151,9 @@ class Delivery:
 
         suffix = f"|{conv_kind}|{conv_id}"
         candidates = [
-            (umo, ts) for key, (umo, ts) in self._umos.items() if key.endswith(suffix)
+            (umo, ts)
+            for key, (umo, ts) in self._umos.items()
+            if key.endswith(suffix) and self._fresh(ts)
         ]
         if not candidates:
             return None
@@ -161,6 +170,7 @@ class Delivery:
             for key, (umo, ts) in sorted(
                 self._umos.items(), key=lambda kv: kv[1][1], reverse=True
             )
+            if self._fresh(ts)
         ]
 
     # ---------- 发送 ----------
@@ -247,17 +257,22 @@ class Delivery:
         语音是「尽量」：没开 TTS、没 Provider、太长或合成失败，都会退回文字，
         并在备注里说明，不把整条消息吞掉。
         """
+        self.last_error_code = ""
         if conv_kind not in CONV_KINDS:
+            self.last_error_code = "invalid_conv"
             return False, f"未知的会话类型 {conv_kind}", False, False
         # UMO 是主键；只有桥见过的会话才允许发送，避免模型乱填 UMO。
         if umo:
             if not self.has_umo(umo):
+                self.last_error_code = "unknown_umo"
                 return False, f"未知会话 {umo}，桥没有见过这个会话", False, False
         else:
             umo = self.umo_for(platform_id, conv_kind, conv_id) or ""
         if not umo:
+            self.last_error_code = "unknown_conv"
             return False, "还没有收到过这个会话的消息，缺少可用的会话标识", False, False
         if not self.allow():
+            self.last_error_code = "rate_limited"
             return False, f"已达到每分钟 {self._limit()} 条的上限，本条没有发出", False, False
 
         used_voice = False

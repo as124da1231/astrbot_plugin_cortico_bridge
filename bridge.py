@@ -527,12 +527,12 @@ class BridgeServer:
                 ok, err = False, f"发送排队超过 {SEND_QUEUE_TIMEOUT:.0f} 秒，本条没有发出"
             else:
                 try:
-                    ok, err, used_voice, uncertain = await self._on_send(
+                    ok, err, used_voice, uncertain, code = await self._on_send(
                         conv_kind, conv_id, text, reply_to, platform, image, voice, umo
                     )
                 except Exception as exc:  # noqa: BLE001 - 发送层异常也要回执
                     logger.warning(f"Cortico Bridge: 发送异常 —— {exc}")
-                    ok, err, used_voice, uncertain = False, str(exc).strip() or "发送异常", False, True
+                    ok, err, used_voice, uncertain, code = False, str(exc).strip() or "发送异常", False, True, ""
                 finally:
                     lock.release()
 
@@ -543,7 +543,9 @@ class BridgeServer:
             "voice": used_voice,
         }
         if not ok:
-            ack["error"] = err
+            ack["error"] = code or err
+            if code and err and err != code:
+                ack["note"] = err
         elif err:
             ack["note"] = err
         if uncertain:
