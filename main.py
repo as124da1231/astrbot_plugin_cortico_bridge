@@ -28,6 +28,7 @@ import json
 import mimetypes
 import os
 import secrets
+import sys
 import time
 from collections import OrderedDict, deque
 from typing import Any
@@ -50,7 +51,13 @@ except Exception:  # pragma: no cover - 只在旧版本上走到
     request = None  # type: ignore[assignment]
     HAS_WEB_API = False
 
-from .bridge import MAX_IMAGE_B64, MAX_IMAGE_TOTAL_B64, BridgeServer, is_loopback_host
+from .bridge import (
+    MAX_IMAGE_B64,
+    MAX_IMAGE_TOTAL_B64,
+    BridgeServer,
+    is_loopback_host,
+    looks_like_command,
+)
 from .deliver import Delivery
 from .tools import ToolRegistry
 
@@ -327,6 +334,25 @@ class CorticoBridge(Star):
     def _token_value(self) -> str:
         """当前 token；空表示本机免密（只允许回环监听）。"""
         return _s(self.config.get("token", "")).strip()
+
+    def _wake_prefixes(self) -> list[str]:
+        """AstrBot 的指令前缀；读不到就按默认的 / 处理。"""
+        try:
+            cfg = self.context.get_config() or {}
+            raw = cfg.get("wake_prefix")
+        except Exception:  # noqa: BLE001
+            raw = None
+        if isinstance(raw, str):
+            items = [raw]
+        elif isinstance(raw, list):
+            items = [str(x) for x in raw]
+        else:
+            items = ["/"]
+        out = [p.strip() for p in items if p.strip()]
+        return out or ["/"]
+
+    def _looks_like_command(self, event: AstrMessageEvent) -> bool:
+        return looks_like_command(event.get_message_str(), self._wake_prefixes())
 
     def _matches_scope(self, event: AstrMessageEvent, items: list[str]) -> bool:
         """UMO 优先；旧配置里的群号/QQ 号继续兼容。"""
@@ -710,6 +736,11 @@ class CorticoBridge(Star):
             return
 
         self._remember_self(event)
+        if self._looks_like_command(event):
+            logger.info(
+                "Cortico Bridge: 指令交给 AstrBot —— %r", event.get_message_str()[:40]
+            )
+            return
         if event.is_private_chat() or self._group_allowed(event):
             logger.info(
                 "Cortico Bridge: 事件进入 private=%s text=%r"
@@ -750,7 +781,7 @@ class CorticoBridge(Star):
         await self._push_event(event)
         event.stop_event()
 
-    @filter.on_llm_request(priority=100)
+    @filter.on_llm_request(priority=sys.maxsize)
     async def on_llm_request(self, event: AstrMessageEvent, req):
         """把这一轮交给 Cortico，然后让 AstrBot 自己的模型退出。"""
         if not self.config.get("enabled", False):
@@ -759,6 +790,11 @@ class CorticoBridge(Star):
             return
         if not self.server.connected:
             logger.info("Cortico Bridge: Cortico 没连上，本轮交给 AstrBot")
+            return
+        if self._looks_like_command(event):
+            logger.info(
+                "Cortico Bridge: 指令交给 AstrBot —— %r", event.get_message_str()[:40]
+            )
             return
         await self._push_event(event)
 

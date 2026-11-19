@@ -96,6 +96,14 @@ def is_loopback_host(host: str) -> bool:
     return str(host).strip().lower() in ("127.0.0.1", "localhost", "::1", "[::1]")
 
 
+def looks_like_command(text: str, prefixes: list[str]) -> bool:
+    """消息是不是 AstrBot 指令；命中 wake_prefix 就交给宿主，不进桥。"""
+    value = _s(text).lstrip()
+    if not value:
+        return False
+    return any(value.startswith(_s(p).strip()) for p in prefixes if _s(p).strip())
+
+
 
 # 图片 base64 的上限；World 那边限制原始 6MB，编码后会更大一些。
 MAX_IMAGE_B64 = 8 * 1024 * 1024

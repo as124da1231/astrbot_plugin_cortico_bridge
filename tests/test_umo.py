@@ -272,6 +272,14 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.connection_refusal({}, "/"), "")
         self.assertEqual(bridge.connection_refusal(None, "/ws"), "")
 
+    def test_command_prefix_is_detected(self):
+        self.assertTrue(bridge.looks_like_command("/help", ["/"]))
+        self.assertTrue(bridge.looks_like_command("  /help", ["/"]))
+        self.assertFalse(bridge.looks_like_command("你好", ["/"]))
+        self.assertFalse(bridge.looks_like_command("", ["/"]))
+        self.assertTrue(bridge.looks_like_command("!help", ["!"]))
+        self.assertFalse(bridge.looks_like_command("/help", []))
+
 
 if __name__ == "__main__":
     unittest.main()
