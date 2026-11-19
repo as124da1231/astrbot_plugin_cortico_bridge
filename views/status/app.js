@@ -46,7 +46,8 @@ const state = {
   panel: 'status',
   status: null,
   groups: [],
-  groupAll: true,
+  groupScope: 'all',
+  groupMode: 'mention',
   groupsDirty: false,
   private: { mode: 'all', allow: [], adminBypass: true, deny: 'ignore' },
   privateDirty: false,
@@ -933,6 +934,7 @@ function removableChip(value, disabled, onRemove) {
 function renderGroups() {
   const list = $('groupList');
   if (!list) return;
+  const scopeAll = state.groupScope === 'all';
   list.textContent = '';
   state.groups.forEach((value) => {
     list.appendChild(
@@ -944,29 +946,34 @@ function renderGroups() {
     );
   });
   if (!state.groups.length) {
-    list.appendChild(el('span', 'muted', state.groupAll ? '全部群' : '还没有群'));
+    list.appendChild(el('span', 'muted', scopeAll ? '全部群' : '还没有群'));
   }
 
   renderRecent('groupRecent', 'GroupMessage', state.groups, (umo) => {
     if (!state.groups.includes(umo)) state.groups.push(umo);
-    state.groupAll = false;
+    state.groupScope = 'allowlist';
     state.groupsDirty = true;
     renderGroups();
   });
-  if (state.groupAll) $('groupRecent').hidden = true;
+  if (scopeAll) $('groupRecent').hidden = true;
 
   document.querySelectorAll('#groupScope .segbtn').forEach((btn) => {
-    const on = (btn.dataset.scope === 'all') === state.groupAll;
+    const on = btn.dataset.scope === state.groupScope;
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  document.querySelectorAll('#groupMode .segbtn').forEach((btn) => {
+    const on = btn.dataset.mode === state.groupMode;
     btn.classList.toggle('on', on);
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
   });
 
   const hint = $('groupHint');
-  if (state.groupAll) {
+  if (scopeAll) {
     hint.textContent = '所有群都交给 Coo；指定群名单不生效。';
     hint.classList.remove('warn');
   } else if (!state.groups.length) {
-    hint.textContent = '至少添加一个群，否则保存会变成接管全部群。';
+    hint.textContent = '至少添加一个群，否则不能保存。';
     hint.classList.add('warn');
   } else {
     hint.textContent = '';
@@ -974,11 +981,11 @@ function renderGroups() {
   }
   hint.hidden = !hint.textContent;
 
-  $('groupAddRow').hidden = state.groupAll;
-  $('groupList').hidden = state.groupAll;
-  $('groupInput').disabled = state.groupAll;
-  $('btnGroupAdd').disabled = state.groupAll;
-  $('btnGroupSave').disabled = !state.groupAll && state.groups.length === 0;
+  $('groupAddRow').hidden = scopeAll;
+  $('groupList').hidden = scopeAll;
+  $('groupInput').disabled = scopeAll;
+  $('btnGroupAdd').disabled = scopeAll;
+  $('btnGroupSave').disabled = !scopeAll && state.groups.length === 0;
   $('groupSavebar').hidden = !state.groupsDirty;
 }
 
@@ -986,7 +993,16 @@ async function loadGroups() {
   try {
     const data = unwrap(await bridge.apiGet('groups'));
     state.groups = Array.isArray(data.groups) ? data.groups.slice() : [];
-    state.groupAll = state.groups.length === 0;
+    if (data.scope === 'all' || data.scope === 'allowlist') {
+      state.groupScope = data.scope;
+    } else {
+      state.groupScope = state.groups.length ? 'allowlist' : 'all';
+    }
+    if (data.mode === 'all' || data.mode === 'mention') {
+      state.groupMode = data.mode;
+    } else {
+      state.groupMode = data.observeAll ? 'all' : 'mention';
+    }
     state.groupsDirty = false;
     $('groupError').hidden = true;
     renderGroups();
@@ -998,20 +1014,29 @@ async function loadGroups() {
 }
 
 async function saveGroups() {
-  if (!state.groupAll && !state.groups.length) {
+  if (state.groupScope === 'allowlist' && !state.groups.length) {
     toast('至少添加一个群，或选择「全部群」', true);
     return;
   }
-  const groups = state.groupAll ? [] : state.groups.slice();
+  const payload = {
+    scope: state.groupScope,
+    groups: state.groupScope === 'allowlist' ? state.groups.slice() : [],
+    mode: state.groupMode,
+  };
   const btn = $('btnGroupSave');
   btn.disabled = true;
   try {
-    await bridge.apiPost('groups', { groups });
-    state.groups = groups;
-    state.groupAll = groups.length === 0;
+    await bridge.apiPost('groups', payload);
+    state.groups = payload.groups;
+    state.groupScope = payload.scope;
+    state.groupMode = payload.mode;
     state.groupsDirty = false;
     renderGroups();
-    toast(groups.length ? `已保存 ${groups.length} 个群` : '已设为接管全部群');
+    toast(
+      payload.scope === 'all'
+        ? '已设为全部群'
+        : `已保存 ${payload.groups.length} 个群 · ${payload.mode === 'all' ? '全部消息' : '仅被叫'}`,
+    );
   } catch (e) {
     toast('保存失败：' + (e.message || e), true);
   } finally {
@@ -1135,7 +1160,7 @@ function initScope() {
     if (!value) return;
     if (!state.groups.includes(value)) state.groups.push(value);
     $('groupInput').value = '';
-    state.groupAll = false;
+    state.groupScope = 'allowlist';
     state.groupsDirty = true;
     renderGroups();
   });
@@ -1148,9 +1173,18 @@ function initScope() {
   $('groupScope').addEventListener('click', (e) => {
     const btn = e.target.closest('.segbtn');
     if (!btn) return;
-    const all = btn.dataset.scope === 'all';
-    if (state.groupAll === all) return;
-    state.groupAll = all;
+    const scope = btn.dataset.scope === 'allowlist' ? 'allowlist' : 'all';
+    if (state.groupScope === scope) return;
+    state.groupScope = scope;
+    state.groupsDirty = true;
+    renderGroups();
+  });
+  $('groupMode').addEventListener('click', (e) => {
+    const btn = e.target.closest('.segbtn');
+    if (!btn) return;
+    const mode = btn.dataset.mode === 'all' ? 'all' : 'mention';
+    if (state.groupMode === mode) return;
+    state.groupMode = mode;
     state.groupsDirty = true;
     renderGroups();
   });

@@ -238,11 +238,34 @@ class CorticoBridge(Star):
             return 17999
 
     def _observe_groups(self) -> list[str]:
-        """B 模式群列表。兼容三种存法：list、逗号字符串、空。"""
+        """旧版群列表；只用于迁移，新代码用 group_allow。"""
         raw = self.config.get("observe_groups", [])
         if isinstance(raw, list):
             return [str(x).strip() for x in raw if str(x).strip()]
         return [x.strip() for x in _s(raw).replace("，", ",").split(",") if x.strip()]
+
+    def _group_scope(self) -> str:
+        """群范围：all / allowlist。旧配置按 observe_groups 是否为空推导。"""
+        raw = self.config.get("group_scope")
+        if raw in (None, ""):
+            return "allowlist" if self._observe_groups() else "all"
+        return "allowlist" if _s(raw).strip().lower() == "allowlist" else "all"
+
+    def _group_allow(self) -> list[str]:
+        """指定群列表；旧配置回退到 observe_groups。"""
+        raw = self.config.get("group_allow")
+        if raw is None:
+            return self._observe_groups()
+        if isinstance(raw, list):
+            return [str(x).strip() for x in raw if str(x).strip()]
+        return [x.strip() for x in _s(raw).replace("，", ",").split(",") if x.strip()]
+
+    def _group_mode(self) -> str:
+        """群消息范围：mention / all。旧配置按 observe_all 推导。"""
+        raw = self.config.get("group_mode")
+        if raw in (None, ""):
+            return "all" if bool(self.config.get("observe_all", False)) else "mention"
+        return "all" if _s(raw).strip().lower() == "all" else "mention"
 
     def _private_mode(self) -> str:
         raw = self.config.get("private_mode")
@@ -284,8 +307,9 @@ class CorticoBridge(Star):
     def _group_allowed(self, event: AstrMessageEvent) -> bool:
         if event.is_private_chat():
             return True
-        groups = self._observe_groups()
-        return not groups or self._matches_scope(event, groups)
+        if self._group_scope() == "all":
+            return True
+        return self._matches_scope(event, self._group_allow())
 
     def _private_allowed(self, event: AstrMessageEvent) -> bool:
         if not event.is_private_chat():
@@ -449,8 +473,8 @@ class CorticoBridge(Star):
                 self.server.host,
                 self.server.port,
                 f"<{len(token)} chars>" if token else "<empty>",
-                self.config.get("observe_all", False),
-                self._observe_groups() or "（全部群）",
+                self._group_mode(),
+                self._group_scope() + ":" + ",".join(self._group_allow()),
                 self.config.get("name_aliases", ""),
             )
         )
@@ -642,7 +666,7 @@ class CorticoBridge(Star):
                 event.stop_event()
             return
 
-        if not self.config.get("observe_all", False):
+        if self._group_mode() != "all":
             return
 
         # 桥没连上时不要强制唤醒：否则 AstrBot 自己的模型会接管整个群，
@@ -1236,8 +1260,11 @@ class CorticoBridge(Star):
                 ),
                 "uptime": self._uptime(),
                 "enabled": bool(self.config.get("enabled", False)),
-                "observeAll": bool(self.config.get("observe_all", False)),
-                "groups": self._observe_groups(),
+                "observeAll": self._group_mode() == "all",
+                "groups": self._group_allow() if self._group_scope() == "allowlist" else [],
+                "groupScope": self._group_scope(),
+                "groupAllow": self._group_allow(),
+                "groupMode": self._group_mode(),
                 "privateMode": self._private_mode(),
                 "privateAllow": self._private_allow(),
                 "privateAdminBypass": self._private_admin_bypass(),
@@ -1328,22 +1355,52 @@ class CorticoBridge(Star):
             return False
 
     async def page_groups(self):
-        """群聊设置：observe_groups，支持 UMO 或旧群号。"""
+        """群聊设置：范围、名单和消息范围。"""
         if request is not None and _s(request.method).upper() == "POST":
             payload = await request.json(default={})
-            groups = payload.get("groups") if isinstance(payload, dict) else None
+            if not isinstance(payload, dict):
+                return error_response("请求格式不正确。", status_code=400)
+            groups = payload.get("groups", self._group_allow())
             if not isinstance(groups, list):
                 return error_response("groups 必须是列表。", status_code=400)
+            raw_scope = payload.get("scope")
+            scope = (
+                _s(raw_scope).strip().lower()
+                if raw_scope is not None
+                else ("allowlist" if groups else "all")
+            )
+            if scope not in ("all", "allowlist"):
+                return error_response("scope 必须是 all / allowlist。", status_code=400)
             picked = []
             for item in groups:
                 value = _s(item).strip()
                 if value and value not in picked:
                     picked.append(value)
-            self.config["observe_groups"] = picked
+            if scope == "allowlist" and not picked:
+                return error_response("指定群模式至少要有一个群。", status_code=400)
+            mode = _s(payload.get("mode", self._group_mode())).strip().lower()
+            if mode not in ("mention", "all"):
+                return error_response("mode 必须是 mention / all。", status_code=400)
+            self.config["group_scope"] = scope
+            self.config["group_allow"] = picked
+            self.config["group_mode"] = mode
+            # 镜像旧键，方便回滚到旧版插件。
+            self.config["observe_groups"] = picked if scope == "allowlist" else []
+            self.config["observe_all"] = mode == "all"
             if not self._persist_plugin_config():
                 return error_response("当前 AstrBot 不支持保存配置。", status_code=500)
-            return json_response({"saved": True, "groups": picked})
-        return json_response({"groups": self._observe_groups()})
+            return json_response(
+                {"saved": True, "scope": scope, "groups": picked, "mode": mode}
+            )
+        return json_response(
+            {
+                "scope": self._group_scope(),
+                "groups": self._group_allow(),
+                "mode": self._group_mode(),
+                # 旧字段保留给旧版 UI / 脚本。
+                "observeAll": self._group_mode() == "all",
+            }
+        )
 
     async def page_private(self):
         """私聊设置：模式、UMO 白名单、管理员豁免、拒绝策略。"""

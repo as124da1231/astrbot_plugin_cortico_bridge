@@ -237,6 +237,11 @@
               <button class="segbtn" type="button" data-scope="list" aria-pressed="true">指定群</button>
             </div>
             <p class="policy-hint" id="groupHint" aria-live="polite"></p>
+            <div class="policy-label" id="groupModeLabel">消息范围</div>
+            <div class="seg" id="groupMode" role="group" aria-labelledby="groupModeLabel">
+              <button class="segbtn" type="button" data-mode="mention" aria-pressed="true">仅被叫</button>
+              <button class="segbtn" type="button" data-mode="all" aria-pressed="false">全部消息</button>
+            </div>
             <div class="policy-row" id="groupAddRow">
               <label class="sr-only" for="groupInput">群 UMO 或群号</label>
               <input class="kvselect grow" id="groupInput" placeholder="default:GroupMessage:123456789 或群号" autocomplete="off" spellcheck="false" />

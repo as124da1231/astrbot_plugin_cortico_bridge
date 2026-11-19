@@ -25,7 +25,8 @@ Cortico 侧还有一个配套扩展 [`cortico-world-astrbot`](https://github.com
 私聊：default:FriendMessage:100000001
 ```
 
-- 群聊：`observe_groups` 接受 UMO 或旧群号；空列表表示接管全部群。
+- 群聊范围：`group_scope` 为 `all` / `allowlist`；`group_allow` 接受 UMO 或旧群号，指定群模式下列表为空不能保存。
+- 群消息范围：`group_mode` 为 `mention` / `all`；`mention` 只投递 @ 或命中称呼的消息。
 - 私聊：`private_mode` 为 `off` / `allowlist` / `all`；`private_allow` 接受 UMO 或旧 QQ 号。
 - 私聊仍受 QQ 好友关系限制：bot 和对方不是好友时，QQ 会拒绝私聊回复。
 
@@ -68,8 +69,9 @@ AstrBot 自己的模型不参与这些轮次；桥没连上时插件什么都不
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | 关 | 接管开关。关着时插件完全不介入 |
-| `observe_all` | 关 | B 模式：群里每条消息都交给 Cortico；关着是 A 模式，只交 @ 或叫到称呼的 |
-| `observe_groups` | 空 | 接管的群号，一行一个。留空表示所有群。**A/B 模式都生效**，名单外的群仍归 AstrBot |
+| `group_scope` | `all` | 群范围：`all` 全部群 / `allowlist` 指定群 |
+| `group_allow` | 空 | 指定群名单，一行一个 UMO 或旧群号；只在 `group_scope=allowlist` 时生效，空名单不能保存 |
+| `group_mode` | `mention` | 群消息范围：`mention` 只交 @ 或叫到称呼的；`all` 每条群消息都交 |
 | `name_aliases` | 空 | 除 @ 之外算「叫到我」的称呼，例如 `Coo`、`库` |
 | `listen_port` | `17999` | 桥监听的端口，需要在防火墙/安全组放行 |
 | `listen_host` | `0.0.0.0` | 只允许本机连时填 `127.0.0.1` |
@@ -78,12 +80,12 @@ AstrBot 自己的模型不参与这些轮次；桥没连上时插件什么都不
 | `image_mode` | `auto` | 群图片怎么给 Cortico：`auto` 能读图就传原图、否则转述；`image` 始终原图；`describe` 始终转述；`off` 只留占位 |
 | `image_vision_provider` | 空 | 「转述」这条路用哪个视觉模型；留空自动挑一个带 vision / VL 的 |
 
-### 两种消息范围
+### 群消息范围
 
-- **A 模式（默认）**：只把被 @ 或叫到 `name_aliases` 的消息交给 Cortico。群里闲聊不进上下文。
-- **B 模式**：每条群消息都交过去，由 Cortico 自己决定要不要开口。更适合「住在这个群里」的用法，token 消耗也明显更高。
+- `mention`（默认）：只把被 @ 或叫到 `name_aliases` 的消息交给 Cortico。群里闲聊不进上下文。
+- `all`：每条群消息都交过去，由 Cortico 自己决定要不要开口。更适合「住在这个群里」的用法，token 消耗也明显更高。
 
-私聊不受模式影响，一律交给 Cortico。
+群范围由 `group_scope` 控制：`all` 是所有群，`allowlist` 只处理 `group_allow` 里的群。私聊不受群范围和群消息范围影响，由 `private_mode` 单独控制。
 
 ## 主人是谁
 

@@ -45,6 +45,23 @@ TtsInfoProvider = Callable[[], Any]
 def _s(value: Any) -> str:
     return "" if value is None else str(value)
 
+def parse_umo(raw: str):
+    """解析 platform:type:session；session 里允许有冒号。"""
+    value = _s(raw).strip()
+    if not value or len(value) > 512:
+        return None
+    parts = value.split(":", 2)
+    if len(parts) != 3:
+        return None
+    platform, msg_type, session = parts
+    if not platform or not session:
+        return None
+    if msg_type not in ("GroupMessage", "FriendMessage"):
+        return None
+    kind = "group" if msg_type == "GroupMessage" else "private"
+    return platform, kind, session, value
+
+
 
 # 图片 base64 的上限；World 那边限制原始 6MB，编码后会更大一些。
 MAX_IMAGE_B64 = 8 * 1024 * 1024
@@ -467,12 +484,28 @@ class BridgeServer:
         conv_kind = _s(conv.get("kind"))
         conv_id = _s(conv.get("id"))
         voice = frame.get("voice") is True
+
+        # UMO 是权威键；有 UMO 时从它派生 kind/id，并拒绝与 conv 冲突。
+        umo_err = ""
+        if umo:
+            parsed = parse_umo(umo)
+            if parsed is None:
+                umo_err = "invalid_umo"
+            else:
+                p_platform, p_kind, p_id, p_umo = parsed
+                if conv_kind and conv_id and (conv_kind != p_kind or conv_id != p_id):
+                    umo_err = "umo_conv_mismatch"
+                else:
+                    platform = p_platform or platform
+                    conv_kind, conv_id, umo = p_kind, p_id, p_umo
         image, image_err = _parse_image(frame.get("image"))
         used_voice = False
         uncertain = False
 
         if image_err:
             ok, err = False, image_err
+        elif umo_err:
+            ok, err = False, umo_err
         elif not text and image is None:
             ok, err = False, "正文和图片都是空的"
         elif voice and not text.strip():

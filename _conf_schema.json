@@ -5,17 +5,31 @@
     "default": false,
     "hint": "打开后，QQ 消息交给 Cortico 想，AstrBot 自己的模型不再参与这一轮。Cortico 没连上时自动退回 AstrBot 原有行为。"
   },
-  "observe_all": {
-    "description": "B 模式：群里每条消息都交给 Cortico",
-    "type": "bool",
-    "default": false,
-    "hint": "关着时只有 @ 或叫到称呼的消息才会进来（A 模式）。打开后没有 @ 的普通闲聊也会交给 Cortico，由它自己决定要不要开口。注意 token 消耗会明显上升。"
+  "group_scope": {
+    "description": "群范围：全部群 / 指定群",
+    "type": "string",
+    "options": [
+      "all",
+      "allowlist"
+    ],
+    "default": "all",
+    "hint": "all=所有群都可以进来；allowlist=只处理 group_allow 里的群。旧 observe_groups 会自动迁移。"
   },
-  "observe_groups": {
-    "description": "接管的群（A/B 模式都生效）",
+  "group_allow": {
+    "description": "指定群名单",
     "type": "list",
     "default": [],
-    "hint": "一行一个群号。名单里的群才会交给 Cortico：B 模式全量推送，A 模式只推点名的。留空表示所有群都接管。不在名单里的群由 AstrBot 自己处理。"
+    "hint": "仅在 group_scope=allowlist 时生效。一项一个 UMO 或旧群号；列表为空时不能保存。"
+  },
+  "group_mode": {
+    "description": "群消息范围：仅被叫 / 全部消息",
+    "type": "string",
+    "options": [
+      "mention",
+      "all"
+    ],
+    "default": "mention",
+    "hint": "mention=只有 @ 或命中称呼时才交给 Cortico；all=群里每条消息都交给 Cortico。旧 observe_all 会自动迁移。"
   },
   "name_aliases": {
     "description": "算作叫到自己的称呼",
@@ -136,5 +150,17 @@
     ],
     "default": "ignore",
     "hint": "ignore=静默忽略；astrbot=不推给 Cortico，交回 AstrBot 自己的模型。"
+  },
+  "observe_all": {
+    "description": "旧版 B 模式（自动迁移，勿改）",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "observe_groups": {
+    "description": "旧版群列表（自动迁移，勿改）",
+    "type": "list",
+    "default": [],
+    "invisible": true
   }
 }
