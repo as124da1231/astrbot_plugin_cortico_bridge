@@ -50,7 +50,7 @@ except Exception:  # pragma: no cover - 只在旧版本上走到
     request = None  # type: ignore[assignment]
     HAS_WEB_API = False
 
-from .bridge import MAX_IMAGE_B64, MAX_IMAGE_TOTAL_B64, BridgeServer
+from .bridge import MAX_IMAGE_B64, MAX_IMAGE_TOTAL_B64, BridgeServer, is_loopback_host
 from .deliver import Delivery
 from .tools import ToolRegistry
 
@@ -192,6 +192,7 @@ class CorticoBridge(Star):
                 ("voice/test", self.page_voice_test, ["POST"], "把试听语音发到最近的会话"),
                 ("events", self.page_events, ["GET"], "实时事件流（SSE）"),
                 ("restart", self.page_restart, ["POST"], "重开监听"),
+                ("token", self.page_token, ["GET", "POST"], "桥的访问 token"),
                 ("reset", self.page_reset, ["POST"], "清空统计与最近消息"),
             ):
                 context.register_web_api(
@@ -323,21 +324,9 @@ class CorticoBridge(Star):
                 out.append(value)
         return out
 
-    def _ensure_token(self) -> str:
-        """token 为空时生成一个随机值并写回配置；已有的自定义值不覆盖。"""
-        token = _s(self.config.get("token", "")).strip()
-        if token:
-            return token
-        token = secrets.token_urlsafe(32)
-        self.config["token"] = token
-        if self._persist_plugin_config():
-            logger.info(
-                "Cortico Bridge: 已自动生成 token（%d 位），请复制到 Coo 的 worlds.astrbot.token"
-                % len(token)
-            )
-        else:
-            logger.warning("Cortico Bridge: 已生成 token，但保存配置失败；本次运行有效，重启会变")
-        return token
+    def _token_value(self) -> str:
+        """当前 token；空表示本机免密（只允许回环监听）。"""
+        return _s(self.config.get("token", "")).strip()
 
     def _matches_scope(self, event: AstrMessageEvent, items: list[str]) -> bool:
         """UMO 优先；旧配置里的群号/QQ 号继续兼容。"""
@@ -512,7 +501,7 @@ class CorticoBridge(Star):
     # ---------- 生命周期 ----------
 
     async def initialize(self):
-        token = self._ensure_token()
+        token = self._token_value()
         logger.info(
             "Cortico Bridge: 启动 —— enabled=%s, 监听=%s:%s, token=%s, "
             "B模式=%s, 群=%s, 称呼=%r"
@@ -1341,6 +1330,7 @@ class CorticoBridge(Star):
                 "aliases": self._aliases(),
                 "host": self.server.host,
                 "port": self.server.port,
+                "loopback": is_loopback_host(self.server.host),
                 "listening": self.server.listening,
                 "listenError": self.server.listen_error,
                 "originRefused": self.server.origin_refused,
@@ -1412,7 +1402,6 @@ class CorticoBridge(Star):
             "listenError": self.server.listen_error,
             "originRefused": self.server.origin_refused,
             "queryTokenRefused": self.server.query_token_refused,
-            "token": _s(self.config.get("token", "")),
             "stats": dict(self.stats),
             "recent": list(self._recent),
             "toolLog": list(self._tool_log),
@@ -1709,6 +1698,47 @@ class CorticoBridge(Star):
             }
         )
 
+    async def page_token(self):
+        """查看 / 生成 / 清除桥的访问 token。"""
+        if request is not None and _s(request.method).upper() == "POST":
+            payload = await request.json(default={})
+            action = _s(
+                payload.get("action") if isinstance(payload, dict) else ""
+            ).strip().lower()
+            if action not in ("generate", "clear"):
+                return error_response(
+                    "action 必须是 generate / clear。", status_code=400
+                )
+            token = secrets.token_urlsafe(32) if action == "generate" else ""
+            self.config["token"] = token
+            if not self._persist_plugin_config():
+                return error_response("当前 AstrBot 不支持保存配置。", status_code=500)
+            self.server.token = token
+            restarted = False
+            if self.server.listening:
+                await self.server.stop()
+                restarted = await self.server.start()
+            logger.info(
+                "Cortico Bridge: 已%s访问 token"
+                % ("生成新的" if action == "generate" else "清除")
+            )
+            return json_response(
+                {
+                    "token": token,
+                    "tokenSet": bool(token),
+                    "restarted": restarted,
+                    "listening": self.server.listening,
+                    "listenError": self.server.listen_error,
+                }
+            )
+        return json_response(
+            {
+                "token": self._token_value(),
+                "tokenSet": bool(self._token_value()),
+                "loopback": is_loopback_host(self.server.host),
+            }
+        )
+
     async def page_restart(self):
         """重开监听：改完端口、token，或怀疑卡住时用。"""
         if not self.config.get("enabled", False):
@@ -1718,7 +1748,7 @@ class CorticoBridge(Star):
         # 让「重开监听」真的按当前配置重新绑定，而不是继续用 init 时的旧值。
         self.server.host = _s(self.config.get("listen_host", "0.0.0.0")) or "0.0.0.0"
         self.server.port = self._port()
-        self.server.token = self._ensure_token()
+        self.server.token = self._token_value()
         try:
             await self.server.stop()
             ok = await self.server.start()

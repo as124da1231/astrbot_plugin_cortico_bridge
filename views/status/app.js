@@ -353,10 +353,29 @@ function applyStatus(s) {
       : 'TTS Provider 已就绪，但插件里的「允许语音」还关着'
     : '去 AstrBot 的模型提供商页添加一个 TTS Provider（Edge TTS / OpenAI TTS 等）';
 
-  setPill($('kToken'), s.tokenSet ? '已设置' : '未设置', !!s.tokenSet);
-  $('kToken').title = s.tokenSet
-    ? '桥只接受带这个 token 的握手'
-    : '没有 token：任何能连到监听端口的人都能接管桥，建议设置';
+  const token = s.token || '';
+  const loopback = !!s.loopback;
+  setPill($('kToken'), token ? '已设置' : loopback ? '本机免密' : '未设置', !!token);
+  $('kToken').title = token
+    ? '点击复制 token'
+    : loopback
+      ? '本机免密：只有本机能连；点击生成 token'
+      : '非回环监听必须设置 token；点击生成';
+  $('kToken').onclick = async () => {
+    try {
+      if (token) {
+        await copyText(token);
+        return;
+      }
+      const data = unwrap(await bridge.apiPost('token', { action: 'generate' }));
+      if (data && data.token) {
+        await copyText(data.token);
+        await refresh();
+      }
+    } catch (err) {
+      console.warn('token 操作失败', err);
+    }
+  };
 
   const admins = s.admins || [];
   $('kOwner').textContent = admins.length ? admins.join('、') : '未配置';
