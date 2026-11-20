@@ -636,20 +636,43 @@ class CorticoBridge(Star):
 
     # ---------- 从 Cortico 来的工具调用 ----------
 
-    async def _on_tool_call(self, name: str, args: dict, turn: str) -> tuple[bool, str]:
-        """用「触发这一轮的那条消息」的身份执行工具。"""
+    async def _on_tool_call(
+        self, name: str, args: dict, turn: str, actor: dict | None = None
+    ) -> tuple[bool, str]:
+        """执行一个 AstrBot 工具。
+
+        QQ 轮次用触发消息的身份；Coo 对话轮次用连接页里指定的主人 QQ。
+        """
         if not self.config.get("enabled", False):
             return False, "桥未启用，工具调用被拒绝"
-        if not turn:
-            return False, "缺少触发消息 id，无法确认身份"
-        hit = self._turns.get(turn)
-        if hit is None:
-            return False, "这一轮的消息已经过期，请重新说一次"
-        stamp, event = hit
-        if time.time() - stamp > 600:
-            self._turns.pop(turn, None)
-            return False, "这一轮的消息已经过期，请重新说一次"
-        logger.info("Cortico Bridge: 执行工具 %s（来自消息 %s）" % (name, turn))
+        if turn:
+            hit = self._turns.get(turn)
+            if hit is None:
+                return False, "这一轮的消息已经过期，请重新说一次"
+            stamp, event = hit
+            if time.time() - stamp > 600:
+                self._turns.pop(turn, None)
+                return False, "这一轮的消息已经过期，请重新说一次"
+            who = f"消息 {turn}"
+        else:
+            owner_id = ""
+            if isinstance(actor, dict) and _s(actor.get("kind")) == "owner":
+                owner_id = _s(actor.get("id")).strip()
+            if not owner_id:
+                return False, "这一轮没有 QQ 消息身份；要在这里调工具，先在 Coo 的连接设置里填主人 QQ"
+            if owner_id not in self._admin_ids():
+                return False, f"{owner_id} 不在 AstrBot 的管理员名单里"
+            platform = (self._bridge_platforms() or ["default"])[0]
+            try:
+                from .owner_event import build_owner_event
+
+                event = build_owner_event(
+                    self.context, platform, owner_id, self.server.self_id
+                )
+            except Exception as exc:  # noqa: BLE001
+                return False, f"当前 AstrBot 版本不能为 Coo 轮次构造工具身份：{exc}"
+            who = f"主人 {owner_id}"
+        logger.info("Cortico Bridge: 执行工具 %s（来自 %s）" % (name, who))
         ok, text = await self.tools.execute(name, args, event)
         try:
             sender = _s(event.get_sender_name() or event.get_sender_id())

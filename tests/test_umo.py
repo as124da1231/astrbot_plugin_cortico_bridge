@@ -356,6 +356,45 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.assertEqual(ws.closed, [])
 
+    async def test_tool_frame_passes_owner_actor(self):
+        calls = []
+
+        async def on_tool(name, args, turn, actor):
+            calls.append((name, args, turn, actor))
+            return True, "ok"
+
+        async def on_send(*_args, **_kwargs):
+            return True, "", False, False
+
+        server = bridge.BridgeServer(
+            host="127.0.0.1", port=0, token="", on_send=on_send, on_tool=on_tool
+        )
+        ws = self._FakeWs([])
+        await server._handle_tool(
+            ws,
+            {
+                "t": "tool",
+                "rid": "t-1",
+                "name": "query_lyrics_by_name",
+                "args": {"song": "晴天"},
+                "actor": {"kind": "owner", "id": "100000001"},
+            },
+        )
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "query_lyrics_by_name",
+                    {"song": "晴天"},
+                    "",
+                    {"kind": "owner", "id": "100000001"},
+                )
+            ],
+        )
+        payload = json.loads(ws.sent[0])
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["result"], "ok")
+
     async def test_authorize_rejects_wrong_token(self):
         server = await self._server("127.0.0.1", token="s3cret")
         ws = self._Ws()

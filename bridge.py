@@ -34,8 +34,8 @@ SendCallback = Callable[
     Awaitable[tuple[bool, str, bool, bool]],
 ]
 EventCallback = Callable[[str, dict], None]
-# (工具名, 参数, 触发这一轮的消息 id) -> (成功, 文本)
-ToolCallback = Callable[[str, dict, str], Awaitable[tuple[bool, str]]]
+# (工具名, 参数, 触发这一轮的消息 id, Coo 轮次的主人身份) -> (成功, 文本)
+ToolCallback = Callable[[str, dict, str, "dict | None"], Awaitable[tuple[bool, str]]]
 # 握手后随 ready 一起下发的工具清单
 ToolsProvider = Callable[[], dict]
 # 语音能力：同步返回 bool，或返回 {ready, provider}（也可以 async）
@@ -717,13 +717,15 @@ class BridgeServer:
         turn = _s(frame.get("turn"))
         raw_args = frame.get("args")
         args = raw_args if isinstance(raw_args, dict) else {}
+        raw_actor = frame.get("actor")
+        actor = raw_actor if isinstance(raw_actor, dict) else None
         if not name:
             ok, text = False, "缺少工具名"
         elif self._on_tool is None:
             ok, text = False, "桥没有配置工具执行"
         else:
             try:
-                ok, text = await self._on_tool(name, args, turn)
+                ok, text = await self._on_tool(name, args, turn, actor)
             except Exception as exc:  # noqa: BLE001
                 ok, text = False, str(exc).strip() or type(exc).__name__
         payload: dict[str, Any] = {"t": "tool-ack", "rid": rid, "ok": ok}

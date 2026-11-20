@@ -237,12 +237,17 @@ token 生成：
 ```text
 模型调 astrbot_call_tool(name, args)
   → World driver.callTool(name, args, turn, actor)
-  → 帧 {t:'tool', rid, name, args, turn}
+  → 帧 {t:'tool', rid, name, args, turn, actor?}
   → 插件 _on_tool_call
-      1. enabled
-      2. turn 在 _turns 里，且不超过 600 秒
-      3. tools_allow
-      4. tool.call(ContextWrapper(触发消息的 event))
+       QQ 轮次: turn → _turns 里的 event
+       Coo 轮次: turn 空 + actor {kind:'owner', id}
+         → id 必须在 admins_id
+         → 合成主人私聊事件（role=admin）
+         → event.send 落到主人私聊
+       1. enabled
+       2. 身份有效
+       3. tools_allow
+       4. tool.call(ContextWrapper(event))
   → tool-ack
   → 模型
 ```
@@ -250,10 +255,12 @@ token 生成：
 边界：
 
 ```text
-桌宠/控制台轮次没有 turnMsgId → 不发
-turn 过期 → unknown_session
+QQ turn 过期 → 拒绝
+Coo 没有 actor → 拒绝，让 Coo 去连接页填主人 QQ
+actor 不在 admins_id → 拒绝
 工具不在白名单 → 拒绝
 管理员工具仍受 AstrBot 权限层约束
+Coo 轮次不借上一条 QQ 消息，也不伪造群上下文
 ```
 
 ---
