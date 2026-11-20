@@ -451,6 +451,22 @@ class ToolErrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("SECRET", blob)
         self.assertNotIn("example.com", blob)
 
+    async def test_business_failure_uses_code_and_note(self):
+        """业务失败（权限/白名单）也走 error=code + note=中文。"""
+
+        async def on_tool(_name, _args, _turn, _actor):
+            return False, "工具 x 是执行类，需要显式加入 tools_allow"
+
+        server = _server(on_tool=on_tool)
+        ws = _Ws()
+        await server._handle_tool(
+            ws, {"t": "tool", "rid": "t-9", "name": "x", "turn": "m-1"}
+        )
+        ack = ws.last()
+        self.assertFalse(ack["ok"])
+        self.assertEqual(ack["error"], "tool_failed")
+        self.assertIn("需要显式加入", ack["note"])
+
 
 class SendErrorTests(unittest.IsolatedAsyncioTestCase):
     """T-004：发送校验失败给稳定 code + 中文 note；异常原文不回执。"""

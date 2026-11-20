@@ -901,9 +901,11 @@ class BridgeServer:
         if ok:
             payload["result"] = text[:MAX_TOOL_RESULT]
         else:
-            payload["error"] = code or text[:MAX_TOOL_RESULT]
-            if note:
-                payload["note"] = note
+            # ack.error 只放稳定 code；业务原因（权限/白名单/超时）放 note。
+            payload["error"] = code or codes.TOOL_FAILED
+            detail = note or text.strip()
+            if detail:
+                payload["note"] = detail[:MAX_TOOL_RESULT]
         await self._send_to(websocket, payload)
 
     async def _on_frame(self, websocket, frame: dict, headers=None) -> None:
