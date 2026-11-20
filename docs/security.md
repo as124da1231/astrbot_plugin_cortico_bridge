@@ -1,7 +1,5 @@
 # 桥的接入安全模型
 
-状态：安全升级已部署到测试服（2026-11-20）；Header 凭据与协议版本门已本地完成，待测试服 SSH 恢复后部署。
-
 ## 目标
 
 ```text
@@ -15,7 +13,7 @@
 
 | 场景 | 行为 |
 |---|---|
-| 默认监听 | `127.0.0.1` |
+| 默认监听 | `127.0.0.1`（未配置时也按回环启动） |
 | 回环 + 空 token | 允许启动，不校验 token（本机免密） |
 | 回环 + 有 token | 校验 token |
 | 非回环 + 空 token | 拒绝绑定 |
@@ -36,8 +34,8 @@ hello.token                       兼容保留，升级期继续接受
 两者同时出现时必须一致；只给帧内 token 会记一条提示日志。  
 等 World 都升级完，可以把帧内 token 去掉。
 
-token 建议用 ASCII（状态页生成的 `token_urlsafe` 就是）。HTTP 头放不了非 ASCII，
-自定义的中文 token 会自动退回帧内路径。
+token 建议用 ASCII（控制台生成的 `token_urlsafe` 就是）。HTTP 头放不了非 ASCII，
+自定义的中文 token 会自动退回帧内路径；比较按 UTF-8 字节，不会抛 `TypeError`。
 
 ## 协议版本
 
@@ -45,6 +43,7 @@ token 建议用 ASCII（状态页生成的 `token_urlsafe` 就是）。HTTP 头�
 World 在 hello 里发 v: 1
 插件只接受 1
 缺省按 1 处理；其他值 close 4004
+同一连接重复 hello 也会重新校验 token 和版本
 ```
 
 版本不匹配时宁可断开，也不让「能连上但行为不对」的错配继续跑。  
@@ -68,18 +67,30 @@ World 在 hello 里发 v: 1
   → 回环：本机免密
   → 非回环：拒绝启动
 
+查看 / 复制
+  → 控制台「概览」的「复制」按钮
+  → GET /token（AstrBot 管理后台鉴权）
+  → GET /status 只回 tokenSet，不回明文
+
 生成
-  → 状态页 token 徽标点击生成
+  → 控制台点「生成（轮换）」
   → secrets.token_urlsafe(32)，43 字符
   → 写回插件配置并重启监听
-  → 复制到 Coo 的 worlds.astrbot.token
+  → 新 token 一次性显示，复制到 Coo 的 worlds.astrbot.token
 
 清除
-  → 状态页生成入口可清除
+  → 控制台点「清除」
   → 非回环会因缺 token 停止监听
 ```
 
-日志只记录 token 位数，不打印全文。状态页读取 token 需要经过 AstrBot 管理后台。
+日志只记录 token 位数，不打印全文。复制接口需要经过 AstrBot 管理后台。
+
+## 工具与主人
+
+- 工具身份只有两条：QQ 发言者，或 Coo 连接设置里填的主人 QQ。
+- 主人 QQ 必须在 AstrBot 的 `admins_id` 里；World 帧里的 `role` / `owner` 不被信任。
+- `tools_allow=["*"]` 只含 read / write；exec 必须显式点名，且调用者必须是管理员/主人。
+- 权限拒绝会如实失败，不会包装成成功。
 
 ## 为什么回环可以免密
 
@@ -98,5 +109,4 @@ World 在 hello 里发 v: 1
 ?token=              → close 4401
 Header + 帧内 token 不一致 → close 4003
 hello.v=2            → close 4004
-测试服（0.0.0.0 + 48 位 token） → connected=True
 ```

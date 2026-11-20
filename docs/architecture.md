@@ -24,7 +24,8 @@ QQ 消息
   → 插件事件层（最后执行）
       指令 / 自轮询插件先跑
       通知类直接推
-      普通消息只做标记
+      mention 命中：直接推 + stop
+      普通消息只做标记（all 模式）
   → LLM 阶段
       插件钩子（第一个执行）
       推帧 + stop
@@ -40,6 +41,8 @@ QQ 消息
   → QQ
 ```
 
+`mention` 的主路径是**事件层直接推送**，不依赖 LLM 管线顺序；推送成功后置 `_cortico_pushed` 并 `stop_event()`，LLM 层不会二次推送。
+
 ---
 
 ## 3. 三个钩子
@@ -53,16 +56,32 @@ QQ 消息
 ### 事件层
 
 ```text
-不是指令、不是通知、私聊或群 all 模式
-  → event.set_extra("_cortico_llm_owned", "private" / "group")
+指令（wake_prefix 或已注册指令名）
+  → 交给 AstrBot
+通知（撤回 / 戳一戳 / 入群…）
+  → 桥已连接且范围允许：推送并 stop
+  → 桥断开或范围外：不拦，其他插件仍能看到
+桥断开
+  → 不唤醒、不标记
+群范围 allowlist 且不在名单
+  → 不进入
+group_mode=mention
+  → @ 自己 / 回复自己 / 命中 name_aliases：直接推 + stop
+  → @全体不算点名
+  → 普通闲聊不进入
+group_mode=all / 私聊
+  → set_extra("_cortico_llm_owned", "group" / "private")
   → 不推、不 stop
 ```
+
+`mention` 命中时同时设置 `is_at_or_wake_command = True`，让 AstrBot 4.29.1 的后续阶段也把这一轮当作已唤醒；真正起作用的是这个字段，不是 `is_wake`。
 
 ### LLM 层
 
 ```text
 没有 _cortico_llm_owned → 不是 Coo 的轮次，放行
 是指令                   → 交给 AstrBot
+已经直接推过 / 已 stop   → 不重复推
 有标记                   → 推帧 + stop
 ```
 
@@ -155,12 +174,37 @@ default:FriendMessage:100000001
 发送只认 `umo`：
 
 ```text
-missing_umo    这一帧没有 umo
-invalid_umo    格式不对
-unknown_umo    桥没见过或已过期
+missing_umo        这一帧没有 umo
+invalid_umo        格式不对
+unknown_umo        桥没见过或已过期
+umo_conv_mismatch  umo 和 conv 不一致
 ```
 
 没有「按 conv 猜」的回退。旧 World 必须一起升级。
+
+### 5.1 图片
+
+```text
+image_plan()
+  off                          → 只留 [图片]
+  对端 capabilities.images=true
+    auto / image               → 传原图
+    describe                   → 转述
+  对端不能收图
+    describe / auto / image    → 有视觉模型就转述
+                                 没有就写明确原因，不静默丢图
+```
+
+上限：
+
+```text
+单张原图（World 侧）  6MB
+单张 base64          8MB
+单帧合计             10MB
+WebSocket 单帧       16MB
+```
+
+视觉调用 25 秒超时；超时、异常、空描述都只记日志并写 `[图片|转述失败：原因]`，不影响这一轮的文字回复。
 
 ---
 
@@ -221,12 +265,14 @@ enabled=false
 token 生成：
 
 ```text
-状态页点「生成 token」
+控制台点「生成（轮换）」
 → secrets.token_urlsafe(32)
 → 写回配置
 → 重开监听
 → 复制给 Coo
 ```
+
+`GET /status` 只回 `tokenSet`，不回明文；复制 / 轮换 / 清除都走 `/token`。
 
 日志只记录 token 位数，不打印全文。
 
@@ -238,6 +284,10 @@ token 生成：
 模型调 astrbot_call_tool(name, args)
   → World driver.callTool(name, args, turn, actor)
   → 帧 {t:'tool', rid, name, args, turn, actor?}
+  → 桥层身份校验
+       turn 和 actor 都没有   → missing_identity
+       turn 和 actor 同时有   → ambiguous_identity
+       actor 不是 owner+id    → bad_actor
   → 插件 _on_tool_call
        QQ 轮次: turn → _turns 里的 event
        Coo 轮次: turn 空 + actor {kind:'owner', id}
@@ -247,7 +297,8 @@ token 生成：
        1. enabled
        2. 身份有效
        3. tools_allow
-       4. tool.call(ContextWrapper(event))
+       4. exec 需显式点名且 trusted
+       5. tool.call(ContextWrapper(event))
   → tool-ack
   → 模型
 ```
@@ -255,13 +306,18 @@ token 生成：
 边界：
 
 ```text
-QQ turn 过期 → 拒绝
-Coo 没有 actor → 拒绝，让 Coo 去连接页填主人 QQ
-actor 不在 admins_id → 拒绝
-工具不在白名单 → 拒绝
+QQ turn 不存在 / 超过 600 秒 → 拒绝
+Coo 没有 actor               → 拒绝，让 Coo 去连接页填主人 QQ
+actor 不在 admins_id         → 拒绝
+工具不在白名单               → 拒绝
+exec 只被 * 覆盖             → 拒绝，要求显式点名
+exec 调用者不是管理员/主人   → 拒绝
+权限拒绝 / 工具停用          → 如实失败，不回“成功”
 管理员工具仍受 AstrBot 权限层约束
 Coo 轮次不借上一条 QQ 消息，也不伪造群上下文
 ```
+
+`trusted` 只由插件按 `admins_id` 计算；World 帧里的 `role` / `owner` 不参与判定。
 
 ---
 
@@ -281,12 +337,13 @@ turnMsgId        当前人话消息 id
 
 ```text
 只有 QQ 消息         → QQ 出口开
-只有桌宠/控制台      → QQ 出口关
-QQ + 桌宠混合        → QQ 出口关
+只有桌宠/控制台      → QQ 出口关，显式 conv_id 也不能发
+QQ + 桌宠混合        → QQ 出口关，显式 conv_id 也不能发
 多个人话 QQ 会话     → 隐式发送拒绝，要求 conv_id / reply_to
+QQ 轮次已过期        → 拒绝，不退回 owner / lastConv
 ```
 
-`pickConv` 顺序：
+`pickConv` 只在 QQ 轮次有效时执行：
 
 ```text
 conv_id → reply_to 查 knownMsgConv → 多会话拒绝 → turnConv
@@ -355,16 +412,22 @@ pnpm test
 当前：
 
 ```text
-插件 17/17
-World 92/92
+插件 unittest     全部通过
+World Vitest      全部通过
+World typecheck   通过
+前端 app.js       node --check 通过
 ```
+
+具体用例数量以实际输出为准，不在文档里写死。
 
 实机验证：
 
 ```text
 私聊来回
-群 @ 来回
-工具调用
+群 @ / 回复 / 称呼来回
+工具调用（QQ 发言者 / Coo 主人）
+exec 只被 * 覆盖时拒绝
+图片原图 / 转述 / 无视觉模型时的明确原因
 桌宠轮次不发 QQ
 多会话轮次显式指定
 ```

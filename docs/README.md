@@ -10,11 +10,11 @@
 
 - [架构：桥、World 与边界](architecture.md)
 
-消息链路、三个钩子、指令切分、UMO、安全、工具链、Coo 侧边界。
+消息链路、三个钩子、指令切分、UMO、图片、安全、工具链、Coo 侧边界。
 
 - [参考：配置、错误码、状态与接口](reference.md)
 
-配置默认值、错误码、状态字段、Web API、文件权限、日志关键字。
+配置默认值、错误码、状态字段、Web API、协议帧、文件权限、日志关键字。
 
 - [接入安全模型](security.md)
 
@@ -22,9 +22,9 @@
 
 ## 跨仓库契约
 
-- [UMO 桥协议契约](../../cortico-world-astrbot/docs/umo-bridge-contract.md)
-- [Coo World 边界](../../cortico-world-astrbot/docs/coo-world-boundary.md)
-- [Coo 侧实现细节](../../cortico-world-astrbot/docs/coo-side.md)
+- [UMO 桥协议契约](https://github.com/as124da1231/cortico-world-astrbot/blob/main/docs/umo-bridge-contract.md)
+- [Coo World 边界](https://github.com/as124da1231/cortico-world-astrbot/blob/main/docs/coo-world-boundary.md)
+- [Coo 侧实现细节](https://github.com/as124da1231/cortico-world-astrbot/blob/main/docs/coo-side.md)
 
 ## 按角色阅读
 
@@ -37,8 +37,10 @@
 ## 当前验证
 
 ```text
-插件 unittest    17/17
-World Vitest     92/92
-World typecheck  通过
-前端 app.js      node --check 通过
+插件 unittest     全部通过
+World Vitest      全部通过
+World typecheck   通过
+前端 app.js       node --check 通过
 ```
+
+具体用例数量以实际输出为准，不在文档里写死。

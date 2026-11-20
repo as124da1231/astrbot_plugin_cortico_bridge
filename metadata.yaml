@@ -2,8 +2,8 @@ name: astrbot_plugin_cortico_bridge
 display_name: Cortico 桥
 short_desc: 让 Cortico 的 Persona 在 QQ 群和私聊里说话，AstrBot 只当手脚 / Bridge QQ groups and private chats to a Cortico persona while AstrBot handles plugins
 desc: >-
-  把 QQ 会话接到 Cortico 的人格上。AstrBot 保留 QQ 连接、账号与全部已有插件，Cortico 负责说什么；支持群聊/私聊、@ 或全部消息、图片原图或转述、语音转写与 TTS 语音回复、撤回与戳一戳等通知；Coo 对话轮次可以按指定的主人 QQ 借用 AstrBot 工具，主人身份复用 AstrBot 管理员名单。
-  / Bridge QQ conversations to a Cortico persona. AstrBot maintains connections, accounts, and plugins while Cortico decides what to say; supports groups and private chats, mention/all scopes, images, speech-to-text and TTS replies, notices, and owner-scoped tool calls from the Coo chat.
+  把 QQ 会话接到 Cortico 的人格上。AstrBot 保留 QQ 连接、账号与全部已有插件，Cortico 负责说什么；支持群聊/私聊、@ 或全部消息（默认只接 @/回复/称呼）、图片原图或视觉转述、语音转写与 TTS 语音回复、撤回与戳一戳等通知；Coo 对话轮次可以按指定的主人 QQ 借用 AstrBot 工具，主人身份复用 AstrBot 管理员名单。
+  / Bridge QQ conversations to a Cortico persona. AstrBot maintains connections, accounts, and plugins while Cortico decides what to say; supports groups and private chats, mention/all scopes, images (native or vision-described), speech-to-text and TTS replies, notices, and owner-scoped tool calls from the Coo chat.
 version: 1.3.6
 author: as124da1231
 repo: https://github.com/as124da1231/astrbot_plugin_cortico_bridge
@@ -17,6 +17,6 @@ tags:
   - agent
   - cortico
 help: >-
-  先在本插件配置页填 token 并打开「接管对话」，再到 Cortico 侧装配套扩展
-  cortico-world-astrbot，填同一个 token 和 ws://<本机地址>:17999。
-  插件详情页的「控制台」分「概览 / 工具 / 语音」：看连接与流水、给 Coo 授权工具、开关语音并试听。
+  同机部署保持 listen_host=127.0.0.1、token 留空即可；跨机再把 listen_host 改成 0.0.0.0 并设置 token。
+  再到 Cortico 侧装配套扩展 cortico-world-astrbot，填同一个 ws://<地址>:17999 和 token。
+  插件详情页的「控制台」分「概览 / 群聊 / 私聊 / 工具 / 语音」：看连接与流水、管理群聊和私聊范围、给 Coo 授权工具、开关语音并试听。

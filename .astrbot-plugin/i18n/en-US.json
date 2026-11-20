@@ -2,7 +2,7 @@
   "views": {
     "status": {
       "title": "Console",
-      "description": "Connection, message stream, recent tool calls, tool permissions, and voice settings."
+      "description": "Connection, message stream, group and private scopes, tool permissions, and voice settings."
     }
   }
 }

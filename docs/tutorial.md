@@ -61,8 +61,8 @@ listen_host      0.0.0.0
 token            必填
 ```
 
-在插件状态页点「生成 token」，复制到 Coo 的 `worlds.astrbot.token`。  
-也可以自己填一串，两边保持一致。
+在插件控制台「概览」的设置表里点「生成（轮换）」，新 token 会一次性显示，复制后填到 Coo 的 `worlds.astrbot.token`。
+也可以自己填一串，两边保持一致。`GET /status` 不会回 token 明文，复制 / 轮换 / 清除都走 `/token`。
 
 ---
 
@@ -79,6 +79,8 @@ token   和插件一致（同机可空）
 ```
 
 World 只负责连接和展示；群/私聊策略、工具白名单都在插件里。
+
+如果要在 Coo 对话里直接调 AstrBot 工具，先在 World 的连接设置里填「主人 QQ」；这个 QQ 必须出现在 AstrBot 的 `admins_id` 里，否则工具调用会被拒绝。
 
 ---
 
@@ -122,7 +124,7 @@ QQ 私聊：Coo 的回复
 
 ### 群聊
 
-在群里 @ 一下 Coo，或者叫配置里的称呼。
+在群里 @ 一下 Coo、回复 Coo 的消息，或者叫配置里的称呼。
 
 期望：
 
@@ -131,7 +133,16 @@ QQ 私聊：Coo 的回复
 QQ 群：Coo 的回复
 ```
 
-群没 @ 时，默认不交给 Coo；`group_mode=all` 才会每条都进。
+默认 `group_mode=mention`：只有 @ / 回复 / 命中 `name_aliases` 才会唤醒并直接交给 Coo；普通闲聊不进上下文。`@全体` 不算点名；`group_scope=allowlist` 时名单外的群不进；桥断开时也不唤醒，消息留给 AstrBot。`group_mode=all` 才会每条都进。
+
+### 图片
+
+图片按 `image_mode` 处理：
+
+- 对端能收图时传原图（单张原图 6MB、base64 8MB、单帧合计 10MB）；
+- 对端不能收图时，`auto` / `image` 会尝试视觉转述；没有视觉模型就在正文里写明原因；
+- `describe` 始终转述，`off` 只留 `[图片]`；
+- 视觉模型超时或报错只影响这一张图，不会中断整轮消息。
 
 ### 工具
 
@@ -149,6 +160,8 @@ QQ 群：Coo 的回复
 插件日志：执行工具 query_lyrics_by_name
 QQ：歌词或失败原因
 ```
+
+`tools_allow=["*"]` 只自动包含 read / write，不含 exec。exec 类工具（shell、python、browser 等）必须显式点名，且调用者必须是 AstrBot 管理员/主人。权限拒绝会如实失败，不会回“成功”。
 
 ---
 
@@ -181,12 +194,15 @@ Coo 也收不到这一轮
 |---|---|
 | 一直等待连接 | 地址、端口、安全组、token、Docker 网络 |
 | 私聊没反应 | `private_mode` 是否 `off`；是否被 `/llm off` |
-| 群里不回 | 是否 @；`group_scope` / `group_allow`；`group_mode` |
+| 群里不回 | 是否 @ / 回复 / 叫到称呼；`@全体` 不算；`group_scope` / `group_allow`；`group_mode`；桥是否连接 |
+| 图片看不到 | 对端是否声明支持图片；`image_mode`；是否配了视觉模型（看 `[图片|...]` 后的原因） |
 | 回复出现在别的群 | 是否同一批里有多个 QQ 会话；让 Coo 用 `conv_id`/`reply_to` |
-| 桌宠说的话跑到 QQ | Coo 是否完整重启，加载了最新 World |
+| 桌宠说的话跑到 QQ | 非 QQ 轮次不能发 QQ；Coo 是否完整重启，加载了最新 World |
 | 一直重连、提示「token 不匹配」 | 两边 token 是否一致；Header 与帧内 token 是否相同 |
 | 一直重连、提示「协议版本不匹配」 | 升级较旧的一边；插件只接受 `v: 1` |
 | 工具失败 | `tools_allow`、工具是否停用、这一轮消息是否超过 600 秒 |
+| exec 工具调不了 | 是否显式点名；调用者是否 AstrBot 管理员/主人 |
+| Coo 对话里调工具失败 | 连接设置里是否填了主人 QQ；该 QQ 是否在 `admins_id` |
 | 指令被 Coo 接走 | 是否装了会 stop 事件的唤醒插件；看它是否先拦 |
 | 面板显示旧样式 | 刷新页面；确认插件三个前端文件已更新 |
 
