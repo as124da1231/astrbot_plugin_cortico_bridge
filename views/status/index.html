@@ -166,16 +166,10 @@
               <div class="v" id="kToken">—</div>
               <small id="kTokenNote">—</small>
             </div>
-            <div class="secitem">
-              <div class="k">浏览器来源拒绝</div>
-              <div class="v mono" id="kOriginRefused">0</div>
-              <small>带 Origin 的 WebSocket</small>
-            </div>
-            <div class="secitem">
-              <div class="k">URL token 拒绝</div>
-              <div class="v mono" id="kQueryTokenRefused">0</div>
-              <small>凭据不能进 URL</small>
-            </div>
+          </div>
+          <div class="secfoot">
+            <span class="secfoot-k">本次运行已拒绝</span>
+            <span class="secfoot-v" id="kRefused">—</span>
           </div>
         </section>
 
@@ -187,11 +181,11 @@
                 <h2>会话流水</h2>
                 <div class="sh-desc">消息从 QQ 进来、从 Coo 出去，都在这里。</div>
               </div>
-              <div class="chips filterchips" id="msgFilters">
-                <button class="chip on" type="button" data-msg="all">全部</button>
-                <button class="chip" type="button" data-msg="in">收到</button>
-                <button class="chip" type="button" data-msg="out">发出</button>
-                <button class="chip" type="button" data-msg="at">叫到</button>
+              <div class="chips filterchips" id="msgFilters" role="group" aria-label="按方向筛选消息">
+                <button class="chip on" type="button" data-msg="all" aria-pressed="true">全部</button>
+                <button class="chip" type="button" data-msg="in" aria-pressed="false">收到</button>
+                <button class="chip" type="button" data-msg="out" aria-pressed="false">发出</button>
+                <button class="chip" type="button" data-msg="at" aria-pressed="false">叫到</button>
               </div>
             </div>
             <div class="liveband">
@@ -221,6 +215,18 @@
               </div>
               <div class="tlog" id="toolLog"></div>
               <div class="compare placeholder left" id="toolLogEmpty">还没用过工具。</div>
+            </section>
+
+            <section class="sheet">
+              <div class="sheethead">
+                <div class="sheethead-text">
+                  <div class="sh-kicker">会话表</div>
+                  <h2>最近会话</h2>
+                  <div class="sh-desc">桥登记过的 UMO，Coo 只往这里发。</div>
+                </div>
+              </div>
+              <div class="clog" id="convLog"></div>
+              <div class="compare placeholder left" id="convLogEmpty">还没有登记的会话。</div>
             </section>
           </div>
         </div>

@@ -54,6 +54,8 @@ const state = {
   rows: [],
   msgFilter: 'all',
   toolLog: [],
+  convs: [],
+  refusals: { origin: 0, query: 0, token: 0, version: 0 },
   tools: [],
   picked: new Set(),
   saved: new Set(),
@@ -409,10 +411,13 @@ function applyStatus(s) {
         ? '等待连接'
         : s.listenError || '未监听';
   }
-  const origin = $('kOriginRefused');
-  if (origin) origin.textContent = String(s.originRefused || 0);
-  const query = $('kQueryTokenRefused');
-  if (query) query.textContent = String(s.queryTokenRefused || 0);
+  state.refusals = {
+    origin: s.originRefused || 0,
+    query: s.queryTokenRefused || 0,
+    token: s.badTokenRefused || 0,
+    version: s.versionRefused || 0,
+  };
+  renderRefusals();
 
   const settings = document.querySelector('.settings');
   if (settings && !settings.__bound) {
@@ -430,11 +435,13 @@ function applyStatus(s) {
     : '去 AstrBot 的配置里填管理员 ID';
 
   const convs = s.conversations || [];
+  state.convs = convs;
   $('kConvs').textContent = convs.length ? `${convs.length} 个` : '还没有';
   $('kConvs').title = convs
     .map((c) => `${c.umo || c.key} · ${ago(c.age_sec)}`)
     .join('\n');
 
+  renderConvs();
   renderToolLog();
 }
 
@@ -450,7 +457,7 @@ function renderRows() {
   });
 
   for (const row of shown) {
-    const item = el('div', 'msg' + (row.dir === 'out' ? ' out' : ''));
+    const item = el('div', 'msg' + (row.dir === 'out' ? ' out' : '') + (row.notice ? ' notice' : ''));
 
     const time = el('span', 'mtime', clock(row.ts));
     time.title = row.ts || '';
@@ -542,6 +549,40 @@ function renderToolLog() {
   }
 }
 
+function renderRefusals() {
+  const node = $('kRefused');
+  if (!node) return;
+  const r = state.refusals;
+  const parts = [];
+  const add = (label, n) => { if (n) parts.push(`${label} ${n}`); };
+  add('浏览器', r.origin);
+  add('URL', r.query);
+  add('token', r.token);
+  add('版本', r.version);
+  node.textContent = parts.length ? parts.join(' · ') : '没有';
+  node.classList.toggle('bad', !!(r.token || r.version));
+}
+
+function renderConvs() {
+  const host = $('convLog');
+  if (!host) return;
+  host.textContent = '';
+  const list = state.convs || [];
+  $('convLogEmpty').hidden = list.length > 0;
+
+  for (const c of list.slice(0, 5)) {
+    const row = el('div', 'clogrow');
+    row.title = c.umo || c.key || '';
+    row.appendChild(el('span', 'clogkind', c.kind === 'group' ? '群' : c.kind === 'private' ? '私聊' : '—'));
+    const main = el('div', 'clogmain');
+    main.appendChild(el('div', 'clogname', c.name || c.id || c.umo || '—'));
+    main.appendChild(el('div', 'clogid', c.umo || ''));
+    row.appendChild(main);
+    row.appendChild(el('span', 'clogtime', ago(c.age_sec)));
+    host.appendChild(row);
+  }
+}
+
 async function refresh() {
   const s = unwrap(await bridge.apiGet('status'));
   applyStatus(s);
@@ -594,13 +635,17 @@ function applySnapshot(snap) {
     $('mSent').textContent = st.sent || 0;
     $('mFailed').textContent = st.failed || 0;
   }
-  if (typeof snap.originRefused === 'number') {
-    const node = $('kOriginRefused');
-    if (node) node.textContent = String(snap.originRefused);
+  if (typeof snap.originRefused === 'number') state.refusals.origin = snap.originRefused;
+  if (typeof snap.queryTokenRefused === 'number') state.refusals.query = snap.queryTokenRefused;
+  if (typeof snap.badTokenRefused === 'number') state.refusals.token = snap.badTokenRefused;
+  if (typeof snap.versionRefused === 'number') state.refusals.version = snap.versionRefused;
+  if (['originRefused', 'queryTokenRefused', 'badTokenRefused', 'versionRefused']
+    .some((k) => typeof snap[k] === 'number')) {
+    renderRefusals();
   }
-  if (typeof snap.queryTokenRefused === 'number') {
-    const node = $('kQueryTokenRefused');
-    if (node) node.textContent = String(snap.queryTokenRefused);
+  if (Array.isArray(snap.conversations)) {
+    state.convs = snap.conversations;
+    renderConvs();
   }
   if (typeof snap.listening === 'boolean') {
     const note = $('kListenNote');
@@ -636,7 +681,10 @@ function initMessages() {
     const chip = e.target.closest('.chip');
     if (!chip) return;
     state.msgFilter = chip.dataset.msg;
-    document.querySelectorAll('#msgFilters .chip').forEach((c) => c.classList.toggle('on', c === chip));
+    document.querySelectorAll('#msgFilters .chip').forEach((c) => {
+      c.classList.toggle('on', c === chip);
+      c.setAttribute('aria-pressed', c === chip ? 'true' : 'false');
+    });
     renderRows();
   });
 }
