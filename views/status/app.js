@@ -67,6 +67,10 @@ const state = {
   collapsed: new Set(),
   used: new Set(),
   saving: false,
+  toolsSaveGen: 0,
+  groupsSaving: false,
+  groupSaveGen: 0,
+  tokenBusy: false,
   loaded: false,
   armClear: false,
   armTimer: 0,
@@ -269,6 +273,8 @@ function setPanel(name) {
   $('actionsStatus').hidden = name !== 'status';
   $('actionsTools').hidden = name !== 'tools';
 
+  if (name !== 'status') clearOnceToken();
+
   $('eyebrow').textContent = meta.eyebrow;
   $('pageTitle').textContent = meta.title;
   $('pageDesc').textContent = meta.desc;
@@ -290,7 +296,7 @@ function setPanel(name) {
   }
 
   // 有未保存改动时保留内存状态，切页回来不会被重新加载覆盖。
-  if (name === 'groups' && !state.groupsDirty) {
+  if (name === 'groups' && !state.groupsDirty && !state.groupsSaving) {
     loadGroups().catch((e) => toast('读取群聊设置失败：' + (e.message || e), true));
   }
   if (name === 'private' && !state.privateDirty) {
@@ -349,17 +355,44 @@ function showOnceToken(token, hint) {
   const box = $('tokenOnceBox');
   const input = $('tokenOnce');
   if (!box || !input) return;
-  input.value = token || '';
+  if (!token) {
+    clearOnceToken();
+    return;
+  }
+  input.value = token;
   const line = $('tokenOnceHint');
   if (line) line.textContent = hint || '替换 Coo 里保存的旧 token，否则它会一直重连失败。';
-  box.hidden = !token;
-  if (token) {
-    input.focus();
-    input.select();
+  box.hidden = false;
+  input.focus();
+  input.select();
+}
+
+/** 一次性 token 用完就抹掉，别让它一直躺在 DOM 里。 */
+function clearOnceToken() {
+  const box = $('tokenOnceBox');
+  const input = $('tokenOnce');
+  if (input) {
+    input.value = '';
+    // 某些浏览器会把 value 属性留在属性表里，一并清掉。
+    input.removeAttribute('value');
+    input.blur();
+  }
+  if (box) box.hidden = true;
+  const line = $('tokenOnceHint');
+  if (line) line.textContent = '';
+}
+
+function setTokenBusy(busy) {
+  state.tokenBusy = !!busy;
+  for (const id of ['btnTokenRotate', 'btnTokenClear']) {
+    const btn = $(id);
+    if (btn) btn.disabled = !!busy;
   }
 }
 
 async function copyToken() {
+  if (state.tokenBusy) return;
+  clearOnceToken();
   let data;
   try {
     data = unwrap(await bridge.apiGet('token')) || {};
@@ -382,8 +415,12 @@ async function copyToken() {
 }
 
 async function rotateToken() {
+  if (state.tokenBusy) return;
+  disarmToken();
   const btn = $('btnTokenRotate');
-  if (btn) btn.disabled = true;
+  state.tokenBusy = true;
+  setTokenBusy(true);
+  if (btn) btn.textContent = '生成中…';
   try {
     const data = unwrap(await bridge.apiPost('token', { action: 'generate' })) || {};
     const plain = data.token || '';
@@ -403,13 +440,19 @@ async function rotateToken() {
   } catch (err) {
     toast('生成 token 失败：' + (err && err.message ? err.message : err), true);
   } finally {
-    if (btn) btn.disabled = false;
+    state.tokenBusy = false;
+    setTokenBusy(false);
+    if (btn) btn.textContent = TOKEN_LABEL.rotate;
   }
 }
 
 async function clearToken() {
+  if (state.tokenBusy) return;
+  disarmToken();
   const btn = $('btnTokenClear');
-  if (btn) btn.disabled = true;
+  state.tokenBusy = true;
+  setTokenBusy(true);
+  if (btn) btn.textContent = '清除中…';
   try {
     await bridge.apiPost('token', { action: 'clear' });
     showOnceToken('', '');
@@ -418,7 +461,9 @@ async function clearToken() {
   } catch (err) {
     toast('清除 token 失败：' + (err && err.message ? err.message : err), true);
   } finally {
-    if (btn) btn.disabled = false;
+    state.tokenBusy = false;
+    setTokenBusy(false);
+    if (btn) btn.textContent = TOKEN_LABEL.clear;
   }
 }
 
@@ -430,30 +475,39 @@ function initToken() {
   $('btnTokenCopy').addEventListener('click', onCopy);
   $('kToken').addEventListener('click', onCopy);
   $('btnTokenOnceCopy').addEventListener('click', async () => {
-    const token = $('tokenOnce').value;
+    const input = $('tokenOnce');
+    const token = input ? input.value : '';
     if (!token) return;
     const ok = await copyText(token);
     toast(ok ? 'token 已复制' : '复制失败，请手动选中', !ok);
   });
 
   $('btnTokenRotate').addEventListener('click', () => {
+    if (state.tokenBusy) return;
     if (state.tokenArm.action === 'rotate') {
       disarmToken();
       rotateToken();
       return;
     }
+    clearOnceToken();
     armToken('rotate');
     toast('生成新 token 会让当前 Coo 断开，需要用新 token 重连；再点一次确认', true);
   });
   $('btnTokenClear').addEventListener('click', () => {
+    if (state.tokenBusy) return;
     if (state.tokenArm.action === 'clear') {
       disarmToken();
       clearToken();
       return;
     }
+    clearOnceToken();
     armToken('clear');
     toast('清除后跨机连接会失效，Coo 需要重连；再点一次确认', true);
   });
+
+  // 关页面/切走时把明文清掉，别留在 DOM 里。
+  window.addEventListener('pagehide', clearOnceToken);
+  window.addEventListener('beforeunload', clearOnceToken);
 }
 
 function applyStatus(s) {
@@ -839,9 +893,7 @@ function markStreamLive() {
   if (stream.state !== 'live') setLive('live');
 }
 
-function closeStreamHandle() {
-  const handle = stream.handle;
-  stream.handle = null;
+function closeHandle(handle) {
   if (!handle) return;
   try {
     if (typeof handle.abort === 'function') handle.abort();
@@ -850,6 +902,22 @@ function closeStreamHandle() {
   } catch (e) {
     // 关不掉也没关系：重连前只求别在原对象上再挂监听。
   }
+}
+
+function closeStreamHandle() {
+  const handle = stream.handle;
+  stream.handle = null;
+  closeHandle(handle);
+}
+
+/** 只有能 abort/close 的返回值才算句柄；其余靠 gen 忽略旧回调。 */
+function abortable(handle) {
+  return (
+    !!handle &&
+    (typeof handle.abort === 'function' ||
+      typeof handle.close === 'function' ||
+      typeof handle === 'function')
+  );
 }
 
 function streamDown(detail) {
@@ -921,11 +989,22 @@ function connectStream() {
     return;
   }
 
-  stream.handle = handle && typeof handle.then === 'function' ? handle : handle || null;
-  if (handle && typeof handle.catch === 'function') {
-    handle.catch(() => {
-      if (gen === stream.gen) streamDown('实时流已断开，5 秒后重连；期间靠 20 秒轮询兜底');
-    });
+  // 只有真的能 abort/close 的返回值才保存成句柄；拿到的不是句柄时
+  // 不保存（避免误以为是可关闭对象），旧流的回调由 gen 计数忽略。
+  if (abortable(handle)) {
+    stream.handle = handle;
+  } else if (handle && typeof handle.then === 'function') {
+    handle
+      .then((resolved) => {
+        if (gen !== stream.gen) {
+          closeHandle(resolved);
+          return;
+        }
+        if (abortable(resolved)) stream.handle = resolved;
+      })
+      .catch(() => {
+        if (gen === stream.gen) streamDown('实时流已断开，5 秒后重连；期间靠 20 秒轮询兜底');
+      });
   }
   // 没等到 onOpen 也没收到帧时，别一直显示“实时”。
   stream.watch = setTimeout(() => {
@@ -1010,6 +1089,15 @@ function dirty() {
   if (state.picked.size !== state.saved.size) return true;
   for (const name of state.picked) if (!state.saved.has(name)) return true;
   return false;
+}
+
+/** 保存期间用快照对比，判断用户有没有在等响应时继续勾选。 */
+function toolsSnapshot() {
+  return JSON.stringify({
+    picked: [...state.picked].sort(),
+    wildcard: state.wildcard,
+    touched: state.toolsTouched,
+  });
 }
 
 function activeTools() {
@@ -1320,6 +1408,8 @@ async function loadTools() {
 async function saveTools() {
   if (state.saving || !dirty()) return;
   state.saving = true;
+  const gen = ++state.toolsSaveGen;
+  const snapshot = toolsSnapshot();
   const btn = $('btnSave');
   btn.disabled = true;
   btn.textContent = '保存中…';
@@ -1329,6 +1419,12 @@ async function saveTools() {
   const payload = useWildcard ? ['*'] : [...state.picked];
   try {
     const data = unwrap(await bridge.apiPost('tools', { tools: payload })) || {};
+    if (gen !== state.toolsSaveGen) return;
+    // 保存期间又勾过：以用户当前选择为准，不拿响应覆盖，也不清 dirty。
+    if (toolsSnapshot() !== snapshot) {
+      toast('保存期间有改动，请再保存一次', true);
+      return;
+    }
     const selected = Array.isArray(data.selected) ? data.selected : payload;
     const granted = Array.isArray(data.granted) ? data.granted : [...state.picked];
     const activeNames = new Set(activeTools().map((t) => t.name));
@@ -1347,11 +1443,13 @@ async function saveTools() {
       $('mTools').textContent = state.picked.size;
     }
   } catch (e) {
-    toast('保存失败：' + (e.message || e), true);
+    if (gen === state.toolsSaveGen) toast('保存失败：' + (e.message || e), true);
   } finally {
-    state.saving = false;
-    btn.disabled = false;
-    btn.textContent = '保存并同步';
+    if (gen === state.toolsSaveGen) {
+      state.saving = false;
+      btn.disabled = false;
+      btn.textContent = '保存并同步';
+    }
   }
 }
 
@@ -1467,10 +1565,21 @@ function renderGroups() {
 
   $('groupAddRow').hidden = scopeAll;
   $('groupList').hidden = scopeAll;
+  const saving = !!state.groupsSaving;
   $('groupInput').disabled = scopeAll;
   $('btnGroupAdd').disabled = scopeAll;
-  $('btnGroupSave').disabled = !scopeAll && state.groups.length === 0;
-  $('groupSavebar').hidden = !state.groupsDirty;
+  $('btnGroupSave').disabled = saving || (!scopeAll && state.groups.length === 0);
+  $('btnGroupRevert').disabled = saving;
+  $('groupSavebar').hidden = !state.groupsDirty && !saving;
+}
+
+/** 保存期间用快照对比：期间有编辑就不能拿响应覆盖当前名单。 */
+function groupSnapshot() {
+  return JSON.stringify({
+    scope: state.groupScope,
+    mode: state.groupMode,
+    groups: state.groups.slice(),
+  });
 }
 
 async function loadGroups() {
@@ -1498,6 +1607,7 @@ async function loadGroups() {
 }
 
 async function saveGroups() {
+  if (state.groupsSaving) return;
   if (state.groupScope === 'allowlist' && !state.groups.length) {
     toast('至少添加一个群，或选择「全部群」', true);
     return;
@@ -1506,9 +1616,20 @@ async function saveGroups() {
   const payload = { scope: state.groupScope, mode: state.groupMode };
   if (state.groupScope === 'allowlist') payload.groups = state.groups.slice();
   const btn = $('btnGroupSave');
-  btn.disabled = true;
+  const gen = ++state.groupSaveGen;
+  const snapshot = groupSnapshot();
+  state.groupsSaving = true;
+  btn.textContent = '保存中…';
+  renderGroups();
   try {
     const data = unwrap(await bridge.apiPost('groups', payload)) || {};
+    if (gen !== state.groupSaveGen) return;
+    // 等待响应时用户又改了范围/名单：保留当前编辑，别被响应回填盖掉。
+    if (groupSnapshot() !== snapshot) {
+      state.groupsDirty = true;
+      toast('保存期间有改动，请再保存一次', true);
+      return;
+    }
     state.groupScope = data.scope === 'all' || data.scope === 'allowlist' ? data.scope : payload.scope;
     state.groups = Array.isArray(data.groups) ? data.groups.slice() : state.groups.slice();
     state.groupMode = data.mode === 'all' || data.mode === 'mention' ? data.mode : payload.mode;
@@ -1520,9 +1641,13 @@ async function saveGroups() {
         : `已保存 ${state.groups.length} 个群 · ${state.groupMode === 'all' ? '全部消息' : '仅被叫'}`,
     );
   } catch (e) {
-    toast('保存失败：' + (e.message || e), true);
+    if (gen === state.groupSaveGen) toast('保存失败：' + (e.message || e), true);
   } finally {
-    btn.disabled = false;
+    if (gen === state.groupSaveGen) {
+      state.groupsSaving = false;
+      btn.textContent = '保存';
+      renderGroups();
+    }
   }
 }
 
