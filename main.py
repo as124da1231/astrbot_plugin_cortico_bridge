@@ -79,6 +79,11 @@ COMPONENT_LABELS = {
     "Poke": "戳一戳",
 }
 
+# 单条消息最多转述/打包几张图；正文与帧必须用同一个上限。
+MAX_IMAGES = 2
+# 对端不能读图、又没有视觉模型时，正文里要给出的明确原因。
+_IMAGE_NO_VISION = "对端模型不能读图，且没有可用的视觉模型转述"
+
 
 def _s(value: Any) -> str:
     return "" if value is None else str(value)
@@ -993,15 +998,16 @@ class CorticoBridge(Star):
     async def _message_text(self, event: AstrMessageEvent) -> str:
         """取消息正文。
 
-        文字直接用；语音交给 AstrBot 的 STT provider 转写；图片交给 AstrBot 的
-        视觉模型描述成文字——因为 Cortico 那边的语言模型不一定能读图。
+        文字直接用；语音交给 AstrBot 的 STT provider 转写；图片按 `image_plan()`
+        决定：native 只留占位，describe 换成视觉描述，不能做时给出明确原因。
         """
         parts: list[str] = []
         text = event.get_message_str().strip()
         if text:
             parts.append(text)
 
-        described = 0
+        plan = self.image_plan()
+        image_index = 0
         for comp in event.get_messages():
             name = type(comp).__name__
             if name == "Record":
@@ -1011,11 +1017,26 @@ class CorticoBridge(Star):
                 parts.append(f"[语音] {spoken}" if spoken else "[语音]")
                 continue
             if name == "Image":
-                # 只有转述模式才花视觉调用；传原图时正文只留占位。
-                if described < 2 and self._should_describe():
-                    parts.append(await self._describe_image(comp))
-                    described += 1
+                slot = image_index
+                image_index += 1
+                if plan["native"]:
+                    # 原图会随帧发过去，正文只留占位；取图失败由 image_marks 改写。
+                    parts.append("[图片]")
+                elif plan["describe"]:
+                    if slot < MAX_IMAGES:
+                        desc, reason = await self._describe_image(comp)
+                        if desc:
+                            parts.append(f"[图片：{desc}]")
+                        elif reason:
+                            parts.append(f"[图片|转述失败：{reason}]")
+                        else:
+                            parts.append(f"[图片|{_IMAGE_NO_VISION}]")
+                    else:
+                        parts.append("[图片|超出单次上限，未转述]")
+                elif plan["reason"] == "peer_text_only":
+                    parts.append(f"[图片|{_IMAGE_NO_VISION}]")
                 else:
+                    # off：不转述、不传原图，只保留占位。
                     parts.append("[图片]")
                 continue
             label = COMPONENT_LABELS.get(name)
@@ -1035,12 +1056,35 @@ class CorticoBridge(Star):
         """对端模型能不能直接读图（由 Cortico 在握手时自报）。"""
         return bool((self.server.capabilities or {}).get("images"))
 
+    def image_plan(self, event: AstrMessageEvent | None = None) -> dict:
+        """这一轮图片怎么处理：native（传原图）/ describe（转述）/ 都不做。
+
+        返回 `{native, describe, reason}`。`_message_text` 与 `_image_payloads`
+        共用同一份计划，避免一处丢图、一处又塞原图。`event` 预留，当前不读取。
+        """
+        mode = self._image_mode()
+        if mode == "off":
+            return {"native": False, "describe": False, "reason": "off"}
+
+        if self._peer_images():
+            if mode in ("auto", "image"):
+                return {"native": True, "describe": False, "reason": ""}
+            return {"native": False, "describe": True, "reason": "describe"}
+
+        # 对端不能收图：auto/image 都不得传原图；有视觉模型就转述。
+        if mode == "describe":
+            return {"native": False, "describe": True, "reason": "describe"}
+        if self._vision_provider_id():
+            return {
+                "native": False,
+                "describe": True,
+                "reason": "peer_text_only_describe",
+            }
+        return {"native": False, "describe": False, "reason": "peer_text_only"}
+
     def _should_describe(self) -> bool:
         """这一轮要不要花一次视觉调用把图转述成文字。"""
-        mode = self._image_mode()
-        if mode == "describe":
-            return True
-        return mode == "auto" and not self._peer_images()
+        return bool(self.image_plan().get("describe"))
 
     def _vision_provider_id(self) -> str:
         """看图的模型：配置里指定优先，否则自动挑一个带 vision / VL 的。"""
@@ -1075,21 +1119,25 @@ class CorticoBridge(Star):
             return ""
         return f"data:{_sniff_image_mime(b64)};base64,{b64}"
 
-    async def _describe_image(self, comp) -> str:
-        """把一张图变成一句话。失败、没配视觉模型都退化成 [图片]。"""
+    async def _describe_image(self, comp) -> tuple[str, str]:
+        """把一张图变成一句话；返回 (描述, 失败原因)。
+
+        失败不再静默退化成 `[图片]`：调用方用 reason 写 `[图片|转述失败：...]`，
+        让模型知道这张图存在但没读到，而不是以为没有内容。
+        """
         provider_id = self._vision_provider_id()
         if not provider_id:
-            return "[图片]"
+            return "", "没有可用的视觉模型"
 
         source = await self._image_source(comp)
         if not source:
-            return "[图片]"
+            return "", "取不到图片内容"
 
         key = source if source.startswith("http") else "sha1:" + hashlib.sha1(source.encode("utf-8", "ignore")).hexdigest()
         cached = self._image_cache.get(key)
         if cached is not None:
             self._image_cache.move_to_end(key)
-            return f"[图片：{cached}]"
+            return cached, ""
 
         try:
             resp = await asyncio.wait_for(
@@ -1105,15 +1153,15 @@ class CorticoBridge(Star):
             )
             desc = _s(getattr(resp, "completion_text", "")).strip()
         except Exception as exc:  # noqa: BLE001
-            # 超时类的异常 str() 是空的，直接拼 exc 会得到「识图失败 —— 」。
+            # 超时类的异常 str() 是空的；异常原文只进日志，不进正文。
             reason = str(exc).strip() or type(exc).__name__
             logger.warning(
                 "Cortico Bridge: 识图失败 provider=%s —— %s" % (provider_id, reason)
             )
-            return "[图片]"
+            return "", "视觉模型调用失败"
 
         if not desc:
-            return "[图片]"
+            return "", "视觉模型返回了空描述"
 
         desc = " ".join(desc.split())[:200]
         self._image_cache[key] = desc
@@ -1123,7 +1171,7 @@ class CorticoBridge(Star):
         logger.info(
             "Cortico Bridge: 识图完成 provider=%s %d 字" % (provider_id, len(desc))
         )
-        return f"[图片：{desc}]"
+        return desc, ""
 
     # ---------- 入站图片（对端能收图时才传） ----------
 
@@ -1132,22 +1180,29 @@ class CorticoBridge(Star):
     ) -> tuple[list[dict], list[dict], list[str]]:
         """把消息里的图片打包进帧；返回 (图片, 失败清单, 每张图的占位标记)。
 
-        这一轮决定转述或忽略时返回空列表。取不到图不再静默跳过：
-        失败原因带回给调用方，正文也要如实说明，免得模型以为看见了图。
+        只有 `image_plan()` 的 native 才打包原图；转述/忽略时返回空帧字段，
+        并带上原因（`describe` / `peer_text_only`），不再静默丢掉。
         """
-        mode = self._image_mode()
-        if mode in ("describe", "off"):
-            return [], [], []
-        if mode == "auto" and not self._peer_images():
-            return [], [], []
+        plan = self.image_plan(event)
+        images = [
+            comp for comp in event.get_messages() if type(comp).__name__ == "Image"
+        ]
+        if not plan["native"]:
+            if plan["describe"]:
+                reason = "describe"
+            elif plan["reason"] == "peer_text_only":
+                reason = "peer_text_only"
+            else:
+                return [], [], []
+            errors = [{"index": i, "reason": reason} for i in range(len(images))]
+            return [], errors, []
+
         payloads: list[dict] = []
         errors: list[dict] = []
         marks: list[str] = []
         index = 0
         total_b64 = 0
-        for comp in event.get_messages():
-            if type(comp).__name__ != "Image":
-                continue
+        for comp in images:
             slot = index
             index += 1
             # QQ 图片 CDN 偶尔会断连；隔一会儿重试通常就好。每次最多等 10 秒，
@@ -1178,7 +1233,7 @@ class CorticoBridge(Star):
                     % (len(b64) // 1024, MAX_IMAGE_B64 // 1024)
                 )
                 continue
-            if len(payloads) >= 2:
+            if len(payloads) >= MAX_IMAGES:
                 errors.append({"index": slot, "reason": "超过单次上限"})
                 marks.append("[图片|超出单次上限，没传]")
                 continue

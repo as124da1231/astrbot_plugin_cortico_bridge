@@ -3,15 +3,21 @@
 三件事：
 - 从 AstrBot 的运行时工具表读出「有哪些工具」，按来源插件分组、打风险标签；
 - 白名单直接读插件配置里的 `tools_allow`（AstrBot 配置页），不另存一份；
-- 按名字执行工具，走 AstrBot 的 `_PermissionGuardedTool`，权限判断照旧用触发消息的事件。
+- 按名字执行工具，走 AstrBot 的 `_PermissionGuardedTool`。
 
-身份规则：工具用**触发这一轮的那条消息**的事件执行，不用主人顶替。
-群友点歌就是群友的身份，管理员工具会被 AstrBot 自己的权限层拦下。
+身份规则有两条路径：
+- QQ turn：用**触发这一轮的那条 QQ 消息**的事件执行，身份是发言者；群友点歌就是
+  群友自己的身份，管理员工具由 AstrBot 权限层拦。
+- Coo owner actor：Coo 对话轮次在「连接」里填了主人 QQ 时，允许以该 owner 身份执行；
+  `trusted` 由 main 按 `_admin_ids()` 计算，本模块不信任 World 传来的 role/owner 字段。
+
+`*` 只自动包含 read/write；exec 必须显式点名，且要求 `trusted=True`。
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any, Callable
 
@@ -21,6 +27,13 @@ from .bridge import MAX_TOOL_RESULT
 
 # 工具清单缓存时间：运行时工具表不会频繁变，没必要每轮都扫。
 CATALOG_TTL = 30.0
+
+# 只在执行结果里兜底识别「权限拒绝」。刻意不收 `not allowed`：帮助文本里
+# 也常有这句话，会误判成失败；优先看原始结果的 `success` 字段。
+_DENIED = re.compile(
+    r"(权限|无权|permission\s+denied|access\s+denied|forbidden|not\s+permitted)",
+    re.IGNORECASE,
+)
 
 
 def _s(value: Any) -> str:
@@ -174,8 +187,41 @@ class ToolRegistry:
         self._catalog_at = now
         return rows
 
+    def _catalog_row(self, name: str) -> dict | None:
+        """从完整 catalog（不是 enabled_catalog）按 name 取一行。"""
+        target = _s(name).strip()
+        if not target:
+            return None
+        for row in self.catalog():
+            if row.get("name") == target:
+                return row
+        return None
+
+    def risk_for(self, name: str) -> str:
+        """查一个工具的风险；catalog 读失败/查不到一律按 `exec`（fail-closed）。"""
+        row = self._catalog_row(name)
+        if row is None:
+            return "exec"
+        return _s(row.get("risk")) or "exec"
+
     def enabled_catalog(self, force: bool = False) -> list[dict]:
-        return [r for r in self.catalog(force=force) if self.allows(r["name"]) and r["active"]]
+        """已启用且可下发的工具。
+
+        优先级：显式点名永远包含（即使 risk=exec）；只写了 `*` 时排除 exec，
+        避免把执行类工具悄悄放给普通群友。
+        """
+        allow = self.allow_list()
+        star = "*" in allow
+        picked: list[dict] = []
+        for row in self.catalog(force=force):
+            if not row.get("active"):
+                continue
+            name = row.get("name", "")
+            if name in allow:
+                picked.append(row)
+            elif star and row.get("risk") != "exec":
+                picked.append(row)
+        return picked
 
     def frame(self) -> dict:
         """握手后发给 World 的工具清单（只发启用且可用的）。
@@ -211,10 +257,29 @@ class ToolRegistry:
         args: dict | None,
         event,
         timeout: float = 60.0,
+        trusted: bool = False,
     ) -> tuple[bool, str]:
-        """按名字执行一个工具。返回 (成功, 文本)。"""
-        if not self.allows(name):
-            return False, f"工具 {name} 没有在插件的 tools_allow 里"
+        """按名字执行一个工具。返回 (成功, 文本)。
+
+        `trusted` 只由 main 按 `_admin_ids()` 计算；本模块不信任 World 传来的
+        role/owner 字段。exec 工具必须在 `tools_allow` 里显式点名，且 trusted。
+        """
+        name = _s(name).strip()
+        allow = self.allow_list()
+        explicit = name in allow
+        if not name or not ("*" in allow or explicit):
+            return False, f"工具 {name or '（空名）'} 没有在插件的 tools_allow 里"
+
+        row = self._catalog_row(name)
+        risk = self.risk_for(name)
+        if risk == "exec":
+            if row is None:
+                return False, f"工具 {name} 不在可用清单里，不能执行"
+            if not explicit:
+                return False, f"工具 {name} 是执行类，需要显式加入 tools_allow"
+            if not trusted:
+                return False, f"工具 {name} 是执行类，当前身份没有执行权限"
+
         try:
             from astrbot.core.agent.run_context import ContextWrapper
             from astrbot.core.astr_agent_context import AstrAgentContext
@@ -232,10 +297,20 @@ class ToolRegistry:
         except asyncio.TimeoutError:
             return False, f"{name} 超过 {int(timeout)} 秒没有返回"
         except Exception as exc:  # noqa: BLE001
-            reason = str(exc).strip() or type(exc).__name__
-            logger.warning(f"Cortico Bridge: 工具 {name} 执行失败 —— {reason}")
-            return False, reason
-        return True, _render(result)
+            # D-005：异常原文可能带路径/凭据，只进日志；回执给短句。
+            logger.warning(
+                "Cortico Bridge: 工具 %s 执行失败 —— %s", name, exc, exc_info=True
+            )
+            return False, f"工具 {name} 执行失败，详情见插件日志"
+
+        # T-002：权限拒绝可能以对象字段或字符串返回，不能一律算成功。
+        if getattr(result, "success", None) is False:
+            text = _render(result).strip()
+            return False, text or f"工具 {name} 执行失败"
+        text = _render(result)
+        if _DENIED.search(text or ""):
+            return False, text
+        return True, text
 
 
 def _render(result: Any) -> str:
