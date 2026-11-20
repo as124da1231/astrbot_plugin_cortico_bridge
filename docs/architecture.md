@@ -1,4 +1,4 @@
-# 架构：桥、World 与边界
+﻿# 架构：桥、World 与边界
 
 这份文档说明「消息为什么这样走」，不重复安装步骤。
 
@@ -164,7 +164,20 @@ unknown_umo    桥没见过或已过期
 
 ---
 
-## 6. 安全
+## 6. 握手
+
+```text
+Authorization: Bearer <token>     首选
+hello.token                       兼容保留
+hello.v                           必须是 1
+```
+
+只给帧内 token 会记提示日志。token 建议 ASCII：HTTP 头放不了非 ASCII，
+自定义中文 token 时 World 只发帧内 token。
+
+---
+
+## 7. 安全
 
 ```text
 默认监听 127.0.0.1
@@ -219,7 +232,7 @@ token 生成：
 
 ---
 
-## 7. 工具链
+## 8. 工具链
 
 ```text
 模型调 astrbot_call_tool(name, args)
@@ -245,7 +258,7 @@ turn 过期 → unknown_session
 
 ---
 
-## 8. Coo 侧边界
+## 9. Coo 侧边界
 
 World 维护：
 
@@ -278,7 +291,7 @@ conv_id → reply_to 查 knownMsgConv → 多会话拒绝 → turnConv
 
 ---
 
-## 9. 和内置 qq 的对照
+## 10. 和内置 qq 的对照
 
 | 维度 | 内置 qq | 我们 |
 |---|---|---|
@@ -294,7 +307,7 @@ conv_id → reply_to 查 knownMsgConv → 多会话拒绝 → turnConv
 
 ---
 
-## 10. 已知交互
+## 11. 已知交互
 
 ### 唤醒插件（wakepro）
 
@@ -321,7 +334,7 @@ live_stream_companion 的直播上下文 / Live2D 标签
 
 ---
 
-## 11. 测试与验证
+## 12. 测试与验证
 
 ```bash
 # 插件

@@ -36,6 +36,9 @@ hello.token                       兼容保留，升级期继续接受
 两者同时出现时必须一致；只给帧内 token 会记一条提示日志。  
 等 World 都升级完，可以把帧内 token 去掉。
 
+token 建议用 ASCII（状态页生成的 `token_urlsafe` 就是）。HTTP 头放不了非 ASCII，
+自定义的中文 token 会自动退回帧内路径。
+
 ## 协议版本
 
 ```text
