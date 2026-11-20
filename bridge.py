@@ -115,6 +115,14 @@ def hello_version(frame: dict) -> int:
     return 0
 
 
+def token_equal(a: str, b: str) -> bool:
+    """定长比较 token；按 UTF-8 编码，非 ASCII 的自定义 token 也能比。"""
+    try:
+        return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+    except (AttributeError, TypeError):
+        return False
+
+
 def is_loopback_host(host: str) -> bool:
     return str(host).strip().lower() in ("127.0.0.1", "localhost", "::1", "[::1]")
 
@@ -417,9 +425,7 @@ class BridgeServer:
         """
         header_token = bearer_token(headers)
         frame_token = _s(frame.get("token")).strip()
-        if header_token and frame_token and not hmac.compare_digest(
-            header_token, frame_token
-        ):
+        if header_token and frame_token and not token_equal(header_token, frame_token):
             self.bad_token_refused += 1
             logger.warning(
                 f"Cortico Bridge: {address} Header 与握手帧里的 token 不一致，已断开"
@@ -428,7 +434,7 @@ class BridgeServer:
                 await websocket.close(code=4003, reason="bad token")
             return False
         presented = header_token or frame_token
-        if not presented or not hmac.compare_digest(presented, self.token):
+        if not presented or not token_equal(presented, self.token):
             self.bad_token_refused += 1
             logger.warning(f"Cortico Bridge: {address} token 不匹配，已断开")
             with contextlib.suppress(Exception):

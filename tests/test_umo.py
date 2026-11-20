@@ -321,6 +321,11 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.hello_version({"v": "x"}), 0)
         self.assertEqual(bridge.hello_version({"v": None}), 0)
 
+    def test_token_equal_handles_non_ascii(self):
+        self.assertTrue(bridge.token_equal("口令", "口令"))
+        self.assertFalse(bridge.token_equal("口令", "口令2"))
+        self.assertFalse(bridge.token_equal("", "口令"))
+
     async def test_authorize_prefers_header(self):
         server = await self._server("127.0.0.1", token="s3cret")
         ws = self._Ws()
