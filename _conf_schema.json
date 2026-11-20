@@ -27,7 +27,7 @@
     "description": "指定群名单",
     "type": "list",
     "default": [],
-    "hint": "仅在 group_scope=allowlist 时生效。一项一个 UMO 或旧群号；列表为空时不能保存。"
+    "hint": "仅在 group_scope=allowlist 时生效；指定群模式下不能为空。一项一个 UMO 或旧群号；多平台请提交完整 UMO（platform:GroupMessage:群号）。"
   },
   "group_mode": {
     "description": "群消息范围：仅被叫 / 全部消息",
@@ -43,7 +43,7 @@
     "description": "算作叫到自己的称呼",
     "type": "list",
     "default": [],
-    "hint": "除 @ 之外，正文里出现这些词也算点名，例如 Coo、库。A 模式下靠它判断「是不是在叫我」。"
+    "hint": "除 @ 之外，正文里出现这些词也算点名，例如 Coo、库。群消息范围=mention 时命中称呼会唤醒并交给 Coo；只写不容易误伤的称呼。"
   },
   "listen_port": {
     "description": "桥的监听端口",
@@ -55,7 +55,7 @@
     "description": "桥的监听地址",
     "type": "string",
     "default": "127.0.0.1",
-    "hint": "默认只允许本机连。同机 Coo 填 127.0.0.1；Coo 在另一台机器上才需要填 0.0.0.0，并且必须同时设置 token。"
+    "hint": "默认只允许本机连；未配置时也按 127.0.0.1 启动。同机 Coo 填 127.0.0.1；Coo 在另一台机器上才需要填 0.0.0.0，并且必须同时设置 token。"
   },
   "token": {
     "description": "校验 token",
@@ -88,7 +88,7 @@
       "off"
     ],
     "default": "auto",
-    "hint": "auto=能读图就传原图、不能就让视觉模型转述；image=始终传原图（要求 Cortico 端点勾了「支持图片输入」）；describe=始终转述成文字；off=只留 [图片] 占位，不花任何视觉调用。"
+    "hint": "auto=能读图就传原图；对端不能收图时尝试视觉转述，没有视觉模型会明确说明未转述。image=始终传原图（仅当 Cortico 端点勾了「支持图片输入」）；对端不能收图时会转述或明确说明，不会静默丢图。describe=始终转述成文字；off=只留 [图片] 占位，不花任何视觉调用。"
   },
   "tts_enabled": {
     "description": "允许 Coo 用语音说话",
@@ -124,7 +124,7 @@
     "description": "允许 Cortico 调用的 AstrBot 工具",
     "type": "list",
     "default": [],
-    "hint": "一行一个工具名，留空表示一个都不给，填 * 表示全部。工具执行时用「触发那条消息的人」的身份，管理员工具会被 AstrBot 自己的权限层拦下。可用工具名在插件启动日志里列出（搜「可调工具」）。"
+    "hint": "一行一个工具名，留空表示一个都不给，填 * 表示全部（* 只含 read/write，不含 exec）。exec 类工具必须显式点名，且只有 AstrBot 管理员/主人身份能执行；工具身份是发言者或 Coo 主人，不是 World 传来的 role/owner。可用工具名在插件启动日志里列出（搜「可调工具」）。"
   },
   "private_mode": {
     "description": "私聊策略",

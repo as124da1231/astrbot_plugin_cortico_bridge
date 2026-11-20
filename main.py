@@ -89,6 +89,20 @@ def _s(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """面板/配置里的布尔值：`"false"`、`"0"`、`"off"` 都算 False。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = _s(value).strip().lower()
+    if not text:
+        return default
+    return text not in ("0", "false", "no", "off", "none")
+
+
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime())
 
@@ -157,7 +171,7 @@ class CorticoBridge(Star):
         self.delivery = Delivery(context, lambda: self.config, data_dir=data_dir)
         self.tools = ToolRegistry(context, lambda: self.config)
         self.server = BridgeServer(
-            host=_s(self.config.get("listen_host", "0.0.0.0")) or "0.0.0.0",
+            host=self._listen_host(),
             port=self._port(),
             token=_s(self.config.get("token", "")),
             on_send=self._on_send_from_cortico,
@@ -175,6 +189,10 @@ class CorticoBridge(Star):
         self._turns: OrderedDict[str, tuple[float, Any]] = OrderedDict()
         # 去重：同一条消息被管线重复处理时只推一次
         self._seen: OrderedDict[str, float] = OrderedDict()
+        # 没有平台 message_id 的适配器：短窗口内防重复投递，不参与 120s 去重。
+        self._fallback_seen: OrderedDict[str, float] = OrderedDict()
+        # 退化消息 id 的进程内序号，保证同一纳秒也不撞。
+        self._msg_seq = 0
         self.stats = {
             "pushed": 0,
             "sent": 0,
@@ -235,6 +253,11 @@ class CorticoBridge(Star):
                 with contextlib.suppress(Exception):
                     queue.put_nowait(event)
 
+    def _remember_in(self, entry: dict) -> None:
+        """入站消息/通知只在这一个地方进流水并广播，避免两处漂移。"""
+        self._recent.append(entry)
+        self._broadcast({"type": "message", **entry})
+
     def _on_server_event(self, kind: str, payload: dict) -> None:
         event = {"type": kind, "ts": _now_iso(), **payload}
         if kind == "connected":
@@ -254,6 +277,18 @@ class CorticoBridge(Star):
             return int(self.config.get("listen_port", 17999) or 17999)
         except (TypeError, ValueError):
             return 17999
+
+    def _listen_host(self) -> str:
+        """监听地址缺省/留空一律回环；跨机必须显式写 0.0.0.0 并配 token。"""
+        raw = self.config.get("listen_host", None)
+        host = _s(raw).strip()
+        if not host:
+            logger.info(
+                "Cortico Bridge: listen_host 未配置，按 127.0.0.1 启动；"
+                "跨机请显式设 0.0.0.0 并配 token"
+            )
+            return "127.0.0.1"
+        return host
 
     def _observe_groups(self) -> list[str]:
         """旧版群列表；只用于迁移，新代码用 group_allow。"""
@@ -325,9 +360,16 @@ class CorticoBridge(Star):
     def _umo_of(self, event: AstrMessageEvent) -> str:
         return _s(getattr(event, "unified_msg_origin", "")).strip()
 
-    def _normalize_scope_items(self, items: list[str], kind: str) -> list[str]:
-        """把旧群号 / QQ 号归一化成 UMO；已经是 UMO 的原样保留。"""
-        platform = (self._bridge_platforms() or ["default"])[0]
+    def _normalize_scope_items(
+        self, items: list[str], kind: str, platform: str | None = None
+    ) -> list[str]:
+        """把旧群号 / QQ 号归一化成 UMO；已经是 UMO 的原样保留。
+
+        多平台时 page_* 可以传 payload 里的 `platform`（必须属于
+        bridge_platforms）；不传才回退到第一个平台。
+        """
+        platforms = self._bridge_platforms() or ["default"]
+        chosen = platform if platform in platforms else platforms[0]
         msg_type = "GroupMessage" if kind == "group" else "FriendMessage"
         out: list[str] = []
         for item in items:
@@ -335,7 +377,7 @@ class CorticoBridge(Star):
             if not value:
                 continue
             if ":" not in value:
-                value = f"{platform}:{msg_type}:{value}"
+                value = f"{chosen}:{msg_type}:{value}"
             if value not in out:
                 out.append(value)
         return out
@@ -650,6 +692,7 @@ class CorticoBridge(Star):
         """
         if not self.config.get("enabled", False):
             return False, "桥未启用，工具调用被拒绝"
+        trusted = False
         if turn:
             hit = self._turns.get(turn)
             if hit is None:
@@ -658,6 +701,8 @@ class CorticoBridge(Star):
             if time.time() - stamp > 600:
                 self._turns.pop(turn, None)
                 return False, "这一轮的消息已经过期，请重新说一次"
+            # T-001：只按 AstrBot 管理员名单判断；不信任 World 帧里的 role/owner。
+            trusted = _s(event.get_sender_id()) in self._admin_ids()
             who = f"消息 {turn}"
         else:
             owner_id = ""
@@ -667,6 +712,7 @@ class CorticoBridge(Star):
                 return False, "这一轮没有 QQ 消息身份；要在这里调工具，先在 Coo 的连接设置里填主人 QQ"
             if owner_id not in self._admin_ids():
                 return False, f"{owner_id} 不在 AstrBot 的管理员名单里"
+            trusted = True
             platform = (self._bridge_platforms() or ["default"])[0]
             try:
                 from .owner_event import build_owner_event
@@ -678,7 +724,7 @@ class CorticoBridge(Star):
                 return False, f"当前 AstrBot 版本不能为 Coo 轮次构造工具身份：{exc}"
             who = f"主人 {owner_id}"
         logger.info("Cortico Bridge: 执行工具 %s（来自 %s）" % (name, who))
-        ok, text = await self.tools.execute(name, args, event)
+        ok, text = await self.tools.execute(name, args, event, trusted=trusted)
         try:
             sender = _s(event.get_sender_name() or event.get_sender_id())
             kind = "private" if event.is_private_chat() else "group"
@@ -783,8 +829,7 @@ class CorticoBridge(Star):
             "image": image is not None,
             "voice": voice,
         }
-        self._recent.append(entry)
-        self._broadcast({"type": "message", **entry})
+        self._remember_in(entry)
 
     # ---------- 消息进 Cortico ----------
 
@@ -822,10 +867,10 @@ class CorticoBridge(Star):
         # 通知类事件先处理：撤回、入群、退群、戳一戳、上传文件。
         notice, ref = self._notice_text(event)
         if notice:
-            # 只有真的推给 Cortico 才拦下来；不在接管名单、或桥没连上时
-            # 放它继续走，别的插件还能看到撤回/入群。
+            # A-9/P-003：只有真的推给 Cortico 才拦下来；桥断开时放它继续走，
+            # 其他插件仍能看到撤回/入群。范围过滤保留在 _push_notice 内部。
             pushed = await self._push_notice(event, notice, ref)
-            if pushed or self._notice_in_scope(event):
+            if pushed:
                 event.stop_event()
             return
 
@@ -844,13 +889,27 @@ class CorticoBridge(Star):
             event.set_extra("_cortico_llm_owned", "private")
             return
 
-        if self._group_mode() != "all":
-            return
+        # A-1：先过群名单，再过 mention 门；别名与回复也算点名。
+        # AstrBot 4.29.1 的 ProcessStage 在 activated handlers 全部执行完后才
+        # 读 is_at_or_wake_command；本 handler priority=-sys.maxsize 最后执行，
+        # 所以这里晚设置有效。真正起作用的是 is_at_or_wake_command，不是 is_wake。
         if not self._group_allowed(event):
             return
+        if self._group_mode() == "mention":
+            text = self._raw_message_text(event) or event.get_message_str()
+            if not self._is_called_for_wake(event, text):
+                return
+            event.is_at_or_wake_command = True
+            event.set_extra("_cortico_llm_owned", "group")
+            # 事件层直接推送是主路径，不依赖管线顺序；成功的 _push_event 会
+            # 先置 _cortico_pushed 再 stop，on_llm_request 不会二次推送。
+            if event.is_stopped():
+                return
+            await self._push_event(event)
+            return
+
+        # all：仍走 LLM 路径，不在这里直接推。
         event.is_at_or_wake_command = True
-        event.is_wake = True
-        event.set_extra("_cortico_forced_wake", True)
         event.set_extra("_cortico_llm_owned", "group")
 
     @filter.on_llm_request(priority=sys.maxsize)
@@ -864,6 +923,9 @@ class CorticoBridge(Star):
             logger.info("Cortico Bridge: Cortico 没连上，本轮交给 AstrBot")
             return
         if not _s(event.get_extra("_cortico_llm_owned", "")).strip():
+            return
+        # 事件层已经直接推过（或已经停掉这一轮）就不再推第二次。
+        if event.is_stopped() or bool(event.get_extra("_cortico_pushed", False)):
             return
         if self._looks_like_command(event):
             logger.info(
@@ -912,6 +974,15 @@ class CorticoBridge(Star):
         self.delivery.remember(platform_id, conv_kind, conv_id, event.unified_msg_origin)
 
         msg_id = self._message_id(event)
+        has_platform_id = self._has_platform_id(event)
+        fallback_key = "" if has_platform_id else self._fallback_key(event)
+        # 无平台 id 的适配器：3 秒内同一事件重复投递只处理一次，同文新消息
+        # 因为时间/序号不同仍会进 Coo。
+        if fallback_key and self._is_fallback_duplicate(fallback_key):
+            self.stats["skipped"] += 1
+            logger.debug(f"Cortico Bridge: 重复投递已跳过 key={fallback_key}")
+            event.stop_event()
+            return False
         if self._is_duplicate(msg_id):
             self.stats["skipped"] += 1
             logger.debug(f"Cortico Bridge: 重复消息已跳过 id={msg_id}")
@@ -950,10 +1021,15 @@ class CorticoBridge(Star):
 
         if not await self.server.push(frame):
             logger.warning("Cortico Bridge: 推送失败，本轮交给 AstrBot")
-            if msg_id:
+            if has_platform_id and msg_id:
                 self._seen.pop(msg_id, None)
+            elif fallback_key:
+                self._fallback_seen.pop(fallback_key, None)
             return False
 
+        # R1：push 成功后立刻置位，再写 UI/广播/日志/stop。后面任何一步抛错，
+        # on_llm_request 都不会再推一次；push=False 时没有置位，允许它重试。
+        event.set_extra("_cortico_pushed", True)
         self.stats["pushed"] += 1
         preview = _apply_image_marks(text, image_marks) if image_marks else text
         entry = {
@@ -970,8 +1046,7 @@ class CorticoBridge(Star):
             "text": preview[:200],
             "mentioned": frame["mentioned"],
         }
-        self._recent.append(entry)
-        self._broadcast({"type": "message", **entry})
+        self._remember_in(entry)
         logger.info(
             "Cortico Bridge: 已推送 conv=%s:%s mentioned=%s role=%s owner=%s 图片=%d 没取到=%d"
             % (
@@ -1310,12 +1385,6 @@ class CorticoBridge(Star):
             return f"[上传] {user_label} 上传了文件 {name}".strip(), ""
         return "", ""
 
-    def _notice_in_scope(self, event: AstrMessageEvent) -> bool:
-        """这条通知是不是归我们接管；群聊看名单，私聊看 private 策略。"""
-        if event.is_private_chat():
-            return self._private_allowed(event)
-        return self._group_allowed(event)
-
     async def _push_notice(
         self, event: AstrMessageEvent, text: str, ref: str = ""
     ) -> bool:
@@ -1371,22 +1440,21 @@ class CorticoBridge(Star):
             return False
 
         self.stats["pushed"] += 1
-        self._recent.append(
-            {
-                "ts": frame["ts"],
-                "dir": "in",
-                "channel": "qq",
-                "role": frame["role"],
-                "owner": bool(frame.get("owner")),
-                "notice": True,
-                "conv": f"{conv_kind}:{conv_id}",
-                "convName": conv_name,
-                "umo": frame.get("umo", ""),
-                "sender": "通知",
-                "text": text[:200],
-                "mentioned": False,
-            }
-        )
+        entry = {
+            "ts": frame["ts"],
+            "dir": "in",
+            "channel": "qq",
+            "role": frame["role"],
+            "owner": bool(frame.get("owner")),
+            "notice": True,
+            "conv": f"{conv_kind}:{conv_id}",
+            "convName": conv_name,
+            "umo": frame.get("umo", ""),
+            "sender": "通知",
+            "text": text[:200],
+            "mentioned": False,
+        }
+        self._remember_in(entry)
         logger.info(
             "Cortico Bridge: 已推送通知 conv=%s:%s %s" % (conv_kind, conv_id, text[:30])
         )
@@ -1424,11 +1492,66 @@ class CorticoBridge(Star):
             self._seen.popitem(last=False)
         return False
 
-    def _is_called(self, event: AstrMessageEvent, text: str) -> bool:
-        """有没有真的叫到名字。
+    def _has_platform_id(self, event: AstrMessageEvent) -> bool:
+        for attr in ("message_id", "id"):
+            if getattr(event.message_obj, attr, None):
+                return True
+        return False
 
-        只认三种可确认的事实：@ 了自己、引用了自己的消息、正文里出现配置的称呼。
-        不能用 is_wake_up()——B 模式下它被我们强制成 True 了。
+    def _component_signature(self, event: AstrMessageEvent) -> str:
+        try:
+            names = [type(comp).__name__ for comp in event.get_messages()]
+        except Exception:  # noqa: BLE001
+            return ""
+        return ",".join(sorted(names))
+
+    def _event_timestamp(self, event: AstrMessageEvent) -> int:
+        """message_obj.time/timestamp 可能是 datetime、秒或毫秒；统一成 int。"""
+        obj = getattr(event, "message_obj", None)
+        for attr in ("time", "timestamp", "time_stamp"):
+            value = getattr(obj, attr, None)
+            if value is None:
+                continue
+            try:
+                stamp = getattr(value, "timestamp", None)
+                if callable(stamp):
+                    value = stamp()
+                return int(float(value))
+            except (TypeError, ValueError, OverflowError):
+                continue
+        return 0
+
+    def _fallback_key(self, event: AstrMessageEvent) -> str:
+        """退化投递的稳定指纹：同一条事件重复投递会命中，同文新消息不会。"""
+        raw = "|".join(
+            (
+                event.get_message_str(),
+                _s(event.get_sender_id()),
+                self._component_signature(event),
+                _s(self._event_timestamp(event)),
+            )
+        )
+        return "f" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+    def _is_fallback_duplicate(self, key: str) -> bool:
+        now = time.time()
+        seen_at = self._fallback_seen.get(key)
+        if seen_at is not None and now - seen_at < 3:
+            return True
+        self._fallback_seen[key] = now
+        # 顺手清掉过期项；容量也封顶，长期运行不无限增长。
+        while self._fallback_seen:
+            first_key, first_at = next(iter(self._fallback_seen.items()))
+            if now - first_at < 3 and len(self._fallback_seen) <= 500:
+                break
+            self._fallback_seen.pop(first_key, None)
+        return False
+
+    def _is_called_for_wake(self, event: AstrMessageEvent, text: str) -> bool:
+        """mention 模式是否点名：@ 自己 / 回复自己 / 正文命中别名。
+
+        `At(qq="all")`（@全体）不算点名，避免整群被唤醒；`_is_called` 写帧里的
+        `mentioned` 用同一口径。
         """
         self_id = _s(event.get_self_id())
         with contextlib.suppress(Exception):
@@ -1436,21 +1559,35 @@ class CorticoBridge(Star):
                 name = type(comp).__name__
                 if name == "At":
                     qq = _s(getattr(comp, "qq", ""))
-                    if qq and (qq == self_id or qq == "all"):
+                    if qq and qq != "all" and qq == self_id:
                         return True
                 elif name == "Reply" and self_id:
                     if _s(getattr(comp, "sender_id", "")) == self_id:
                         return True
         return any(a in text for a in self._aliases())
 
+    def _is_called(self, event: AstrMessageEvent, text: str) -> bool:
+        """有没有真的叫到名字；@ 自己、回复自己、正文里出现配置的称呼。"""
+        return self._is_called_for_wake(event, text)
+
     def _message_id(self, event: AstrMessageEvent) -> str:
+        # 真实平台 id 原样使用，按 120s 去重。
         for attr in ("message_id", "id"):
             value = getattr(event.message_obj, attr, None)
             if value:
                 return _s(value)
-        return "h" + hashlib.sha1(
-            (event.get_message_str() + event.get_sender_id()).encode("utf-8")
-        ).hexdigest()[:16]
+        # 没有平台 id：生成唯一 id，同秒两条纯图片/语音也不会撞，可安全写 _turns。
+        self._msg_seq += 1
+        raw = "|".join(
+            (
+                event.get_message_str(),
+                _s(event.get_sender_id()),
+                str(time.time_ns()),
+                str(self._msg_seq),
+                self._component_signature(event),
+            )
+        )
+        return "h" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
     # ---------- 面板接口 ----------
 
@@ -1491,14 +1628,11 @@ class CorticoBridge(Star):
                 "host": self.server.host,
                 "port": self.server.port,
                 "loopback": is_loopback_host(self.server.host),
-                "listening": self.server.listening,
-                "listenError": self.server.listen_error,
                 "originRefused": self.server.origin_refused,
                 "queryTokenRefused": self.server.query_token_refused,
                 "badTokenRefused": self.server.bad_token_refused,
                 "versionRefused": self.server.version_refused,
                 "tokenSet": bool(_s(self.config.get("token", ""))),
-                "token": _s(self.config.get("token", "")),
                 "maxSends": self._max_sends(),
                 "admins": self._admin_ids(),
                 "imageMode": self._image_mode(),
@@ -1560,7 +1694,6 @@ class CorticoBridge(Star):
             "listening": self.server.listening,
             "client": self.server.client_address,
             "connectedFor": int(now - connected_at) if connected_at else 0,
-            "listening": self.server.listening,
             "listenError": self.server.listen_error,
             "originRefused": self.server.origin_refused,
             "queryTokenRefused": self.server.query_token_refused,
@@ -1575,15 +1708,25 @@ class CorticoBridge(Star):
             "replyWith": "astrbot_send_message" if last else "",
         }
 
-    def _persist_plugin_config(self) -> bool:
+    def _commit_config(self, changes: dict) -> bool:
+        """先校验、写内存、save_config；失败逐键回滚，调用方无需再恢复。"""
         save = getattr(self.config, "save_config", None)
         if not callable(save):
+            logger.warning("Cortico Bridge: 当前 AstrBot 不支持保存插件配置")
             return False
+        missing = object()
+        old = {key: self.config.get(key, missing) for key in changes}
+        self.config.update(changes)
         try:
             save()
             return True
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"Cortico Bridge: 保存配置失败 —— {exc}")
+            for key, value in old.items():
+                if value is missing:
+                    self.config.pop(key, None)
+                else:
+                    self.config[key] = value
+            logger.warning(f"Cortico Bridge: 保存配置失败，已回滚 —— {exc}")
             return False
 
     async def page_groups(self):
@@ -1608,22 +1751,33 @@ class CorticoBridge(Star):
                 value = _s(item).strip()
                 if value and value not in picked:
                     picked.append(value)
-            picked = self._normalize_scope_items(picked, "group")
+            platform = _s(payload.get("platform", "")).strip() or None
+            picked = self._normalize_scope_items(picked, "group", platform)
             if scope == "allowlist" and not picked:
                 return error_response("指定群模式至少要有一个群。", status_code=400)
             mode = _s(payload.get("mode", self._group_mode())).strip().lower()
             if mode not in ("mention", "all"):
                 return error_response("mode 必须是 mention / all。", status_code=400)
-            self.config["group_scope"] = scope
-            self.config["group_allow"] = picked
-            self.config["group_mode"] = mode
-            # 镜像旧键，方便回滚到旧版插件；旧版只认裸群号。
-            self.config["observe_groups"] = (
-                [value.rsplit(":", 1)[-1] for value in picked] if scope == "allowlist" else []
+            # 旧键只认裸群号；完整 UMO 是 platform:type:session，session 里可能
+            # 还有冒号（如 123:456），不能用 rsplit 截最后一段。
+            mirror = (
+                [
+                    value.split(":", 2)[2] if value.count(":") >= 2 else value
+                    for value in picked
+                ]
+                if scope == "allowlist"
+                else []
             )
-            self.config["observe_all"] = mode == "all"
-            if not self._persist_plugin_config():
-                return error_response("当前 AstrBot 不支持保存配置。", status_code=500)
+            if not self._commit_config(
+                {
+                    "group_scope": scope,
+                    "group_allow": picked,
+                    "group_mode": mode,
+                    "observe_groups": mirror,
+                    "observe_all": mode == "all",
+                }
+            ):
+                return error_response("保存配置失败。", status_code=500)
             return json_response(
                 {"saved": True, "scope": scope, "groups": picked, "mode": mode}
             )
@@ -1657,19 +1811,26 @@ class CorticoBridge(Star):
                 value = _s(item).strip()
                 if value and value not in allow:
                     allow.append(value)
-            allow = self._normalize_scope_items(allow, "private")
-            self.config["private_mode"] = mode
-            self.config["private_allow"] = allow
-            self.config["private_admin_bypass"] = bool(payload.get("adminBypass", self._private_admin_bypass()))
-            self.config["private_deny"] = deny
-            if not self._persist_plugin_config():
-                return error_response("当前 AstrBot 不支持保存配置。", status_code=500)
+            platform = _s(payload.get("platform", "")).strip() or None
+            allow = self._normalize_scope_items(allow, "private", platform)
+            admin_bypass = _as_bool(
+                payload.get("adminBypass"), self._private_admin_bypass()
+            )
+            if not self._commit_config(
+                {
+                    "private_mode": mode,
+                    "private_allow": allow,
+                    "private_admin_bypass": admin_bypass,
+                    "private_deny": deny,
+                }
+            ):
+                return error_response("保存配置失败。", status_code=500)
             return json_response(
                 {
                     "saved": True,
                     "mode": mode,
                     "allow": allow,
-                    "adminBypass": self._private_admin_bypass(),
+                    "adminBypass": admin_bypass,
                     "deny": deny,
                 }
             )
@@ -1694,24 +1855,34 @@ class CorticoBridge(Star):
                 name = _s(item).strip()
                 if name and name not in picked:
                     picked.append(name)
-            self.config["tools_allow"] = picked
-            save = getattr(self.config, "save_config", None)
-            if not callable(save):
-                return error_response("当前 AstrBot 不支持保存插件配置。", status_code=500)
-            try:
-                save()
-            except Exception as exc:  # noqa: BLE001
-                return error_response(f"保存失败：{exc}", status_code=500)
+            if not self._commit_config({"tools_allow": picked}):
+                return error_response("保存配置失败。", status_code=500)
             # 立刻把新清单推给 World，不用等重连。
             self.tools.catalog(force=True)
             await self.server.push(self.tools.frame())
-            return json_response({"saved": True, "selected": self.tools.allow_list()})
+            return json_response(
+                {
+                    "saved": True,
+                    "selected": self.tools.allow_list(),
+                    "granted": [
+                        row.get("name", "")
+                        for row in self.tools.enabled_catalog()
+                        if row.get("name")
+                    ],
+                }
+            )
         allow = self.tools.allow_list()
         return json_response(
             {
                 "items": self.tools.catalog(force=True),
                 "selected": allow,
                 "all": "*" in allow,
+                # 实际会下发给 World 的名字：`*` 的 read/write + 显式 exec。
+                "granted": [
+                    row.get("name", "")
+                    for row in self.tools.enabled_catalog()
+                    if row.get("name")
+                ],
             }
         )
 
@@ -1737,25 +1908,20 @@ class CorticoBridge(Star):
                             status_code=400,
                         )
                 wanted_ids[key] = wanted
+            changes: dict[str, Any] = {}
             if "enabled" in payload:
-                self.config["tts_enabled"] = bool(payload.get("enabled"))
+                changes["tts_enabled"] = _as_bool(payload.get("enabled"))
             if "max_chars" in payload:
                 try:
                     limit = int(payload.get("max_chars"))
                 except (TypeError, ValueError):
                     return error_response("max_chars 必须是整数。", status_code=400)
-                self.config["tts_max_chars"] = max(0, min(limit, 1000))
+                changes["tts_max_chars"] = max(0, min(limit, 1000))
             if "stt_enabled" in payload:
-                self.config["stt_enabled"] = bool(payload.get("stt_enabled"))
-            for key, wanted in wanted_ids.items():
-                self.config[key] = wanted
-            save = getattr(self.config, "save_config", None)
-            if not callable(save):
-                return error_response("当前 AstrBot 不支持保存插件配置。", status_code=500)
-            try:
-                save()
-            except Exception as exc:  # noqa: BLE001
-                return error_response(f"保存失败：{exc}", status_code=500)
+                changes["stt_enabled"] = _as_bool(payload.get("stt_enabled"))
+            changes.update(wanted_ids)
+            if not self._commit_config(changes):
+                return error_response("保存配置失败。", status_code=500)
             # 语音配置变了，顺手刷新 World 那边的 tts 状态。
             with contextlib.suppress(Exception):
                 await self.server.push_ready()
@@ -1836,20 +2002,35 @@ class CorticoBridge(Star):
 
     async def page_voice_test(self):
         """把一段语音发到最近联系过的 QQ 会话，方便实机试听。"""
+        # A-2/P-002：试听也必须尊重总开关和 TTS 开关，不能绕过 door_closed。
+        if not self.config.get("enabled", False):
+            return error_response("桥未启用，试听被拒绝（door_closed）。", status_code=400)
+        if not self._tts_enabled():
+            return error_response(
+                "TTS 没有在插件配置里打开（tts_unavailable），已取消试听。",
+                status_code=400,
+            )
         payload = await request.json(default={})
         text = _s(payload.get("text") if isinstance(payload, dict) else "").strip()
         if not text:
             return error_response("先写一句要读的话。", status_code=400)
         if len(text) > 300:
             return error_response("试听最多 300 字。", status_code=400)
+        provider = await self._voice_provider("tts")
+        if provider is None:
+            return error_response(
+                "TTS Provider 现在不可用（tts_unavailable），已取消试听。",
+                status_code=400,
+            )
         convs = self.delivery.known_conversations()
         if not convs:
             return error_response("还没有收到过 QQ 消息，先让群里说一句再试。", status_code=400)
         umo = _s(convs[0].get("umo") or convs[0].get("key"))
         if not umo:
             return error_response("最近的会话标识不完整。", status_code=400)
+        # 试听失败只报错：allow_text_fallback=False 保证不会把文字发到最近会话。
         ok, note, used_voice, _uncertain = await self.delivery.send(
-            "", "", "", text, "", None, True, umo
+            "", "", "", text, "", None, True, umo, allow_text_fallback=False
         )
         if not ok:
             return error_response(note or "发送失败", status_code=500)
@@ -1874,9 +2055,9 @@ class CorticoBridge(Star):
                     "action 必须是 generate / clear。", status_code=400
                 )
             token = secrets.token_urlsafe(32) if action == "generate" else ""
-            self.config["token"] = token
-            if not self._persist_plugin_config():
-                return error_response("当前 AstrBot 不支持保存配置。", status_code=500)
+            # A-3：save 成功后才动 server；保存失败时 config 已回滚，server 不变。
+            if not self._commit_config({"token": token}):
+                return error_response("保存配置失败。", status_code=500)
             self.server.token = token
             restarted = False
             if self.server.listening:
@@ -1910,7 +2091,7 @@ class CorticoBridge(Star):
                 "桥未启用，先打开「接管对话」再重开监听。", status_code=400
             )
         # 让「重开监听」真的按当前配置重新绑定，而不是继续用 init 时的旧值。
-        self.server.host = _s(self.config.get("listen_host", "0.0.0.0")) or "0.0.0.0"
+        self.server.host = self._listen_host()
         self.server.port = self._port()
         self.server.token = self._token_value()
         try:
