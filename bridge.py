@@ -2,7 +2,9 @@
 
 这一层只管「连接」和「帧」，不懂 QQ、不懂 Cortico 的语义。
 上层通过两个回调把行为注入进来：
-- on_send(conv_kind, conv_id, text, reply_to, platform) -> (ok, error)
+- on_send(conv_kind, conv_id, text, reply_to, platform, image, voice, umo)
+  -> (ok, note, used_voice, uncertain, error_code)
+- on_tool(name, args, turn, actor) -> (ok, text)
 """
 
 from __future__ import annotations
@@ -18,6 +20,11 @@ from typing import Any, Awaitable, Callable
 
 from astrbot.api import logger
 
+try:  # AstrBot 以包方式加载插件；单元测试把插件目录直接放进 sys.path
+    from . import errors as codes
+except ImportError:  # pragma: no cover - 单文件加载（测试/脚本）
+    import errors as codes
+
 try:
     from websockets.asyncio.server import serve as ws_serve
     from websockets.exceptions import ConnectionClosed
@@ -28,10 +35,11 @@ except Exception:  # pragma: no cover - 缺依赖时插件仍要能加载
     ConnectionClosed = Exception  # type: ignore[misc,assignment]
     HAS_WS = False
 
-# (ok, 备注, 是否用了语音, 结果是否未知)
+# (ok, 备注/中文说明, 是否用了语音, 结果是否未知, 错误码)
+# 第 5 位只在失败时有值，取 errors.py 里的稳定 code；ack.error 只放它。
 SendCallback = Callable[
     [str, str, str, str, str, "dict | None", bool, str],
-    Awaitable[tuple[bool, str, bool, bool]],
+    Awaitable[tuple[bool, str, bool, bool, str]],
 ]
 EventCallback = Callable[[str, dict], None]
 # (工具名, 参数, 触发这一轮的消息 id, Coo 轮次的主人身份) -> (成功, 文本)
@@ -162,26 +170,42 @@ PROTOCOL_VERSION = 1
 # 同一个会话的发送排队上限：前面的语音/大图还没发完时，后面的别无限等。
 SEND_QUEUE_TIMEOUT = 5.0
 
+# 同时在跑的 send/tool 任务上限。每帧可能带 8MB 图片，异常客户端刷帧时
+# 不能让内存无限涨；超限直接回 busy，不新建任务。
+MAX_INFLIGHT = 32
+
+# per-conv 发送锁的上限：锁不随连接清空，所以需要回收空闲锁。
+# 只删没被持有的锁，正在排队/发送的锁跳过。
+SEND_LOCK_MAX = 256
+
 # 发送回执缓存：同一个 rid 重发时直接回上一次的结果，别把消息发两遍。
 ACK_CACHE_TTL = 300.0
 ACK_CACHE_MAX = 200
 
 
-def _parse_image(raw: Any) -> tuple[dict | None, str]:
-    """校验 send 帧里的图片。返回 (图片, 错误说明)；没有图片时返回 (None, "")。"""
+def _parse_image(raw: Any) -> tuple[dict | None, str, str]:
+    """校验 send 帧里的图片。
+
+    返回 (图片, 错误码, 中文说明)；没有图片时三个值分别是 (None, "", "")。
+    错误码来自 errors.py，调用方放进 ack.error，中文说明放进 ack.note。
+    """
     if not raw:
-        return None, ""
+        return None, "", ""
     if not isinstance(raw, dict):
-        return None, "图片字段格式不正确"
+        return None, codes.BAD_IMAGE, "图片字段格式不正确"
     mime = _s(raw.get("mime")) or "image/jpeg"
     b64 = _s(raw.get("base64")).strip()
     if not b64:
-        return None, "图片内容是空的"
+        return None, codes.BAD_IMAGE, "图片内容是空的"
     if len(b64) > MAX_IMAGE_B64:
-        return None, f"图片太大，超过 {MAX_IMAGE_B64 // (1024 * 1024)}MB"
+        return (
+            None,
+            codes.IMAGE_TOO_LARGE,
+            f"图片太大，超过 {MAX_IMAGE_B64 // (1024 * 1024)}MB",
+        )
     if not mime.startswith("image/"):
-        return None, f"不支持的图片类型 {mime}"
-    return {"mime": mime, "base64": b64}, ""
+        return None, codes.IMAGE_BAD_TYPE, f"不支持的图片类型 {mime}"
+    return {"mime": mime, "base64": b64}, "", ""
 
 
 class BridgeServer:
@@ -212,9 +236,16 @@ class BridgeServer:
         self._server = None
         self._client = None
         self._lock = asyncio.Lock()
-        self._send_locks: dict[str, asyncio.Lock] = {}
+        # per-conv 发送锁：跨连接保留（重连不能把同群的顺序打乱），空闲时回收。
+        self._send_locks: "OrderedDict[str, asyncio.Lock]" = OrderedDict()
         self._acks: "OrderedDict[str, tuple[float, dict]]" = OrderedDict()
         self._tick_task: asyncio.Task | None = None
+        # 连接代次：每注册一个新客户端 +1。旧连接上还没跑完的慢任务
+        # 完成后不能把 ack 写进新连接的缓存，否则 rid 从 a-1 重新开始时
+        # 第一条消息会「回 ok 但没发」。
+        self._epoch = 0
+        # 正在跑的 send/tool 任务数；上限见 MAX_INFLIGHT。
+        self._inflight = 0
         # 给状态面板看的信息
         self.client_address = ""
         self.connected_at: float | None = None
@@ -446,6 +477,28 @@ class BridgeServer:
             )
         return True
 
+    async def _check_hello(self, websocket, headers, frame: dict, address: str) -> bool:
+        """初次握手和同一连接上的重复 hello 共用同一套校验。
+
+        - token：`Authorization` 与帧内 token 同时出现时必须一致；
+          `token_equal` 按 UTF-8 比较，中文 token 不会 TypeError。
+        - 版本：重复 hello 也要重查，不能靠第一次握手的结果。
+        不通过时按原因 close（4003/4004），返回 False。
+        """
+        if self.token and not await self._authorize(websocket, headers, frame, address):
+            return False
+        version = hello_version(frame)
+        if version != PROTOCOL_VERSION:
+            self.version_refused += 1
+            logger.warning(
+                f"Cortico Bridge: {address} 协议版本不认（收到 {_s(frame.get('v')) or '缺省'}，"
+                f"本插件支持 {PROTOCOL_VERSION}），已断开"
+            )
+            with contextlib.suppress(Exception):
+                await websocket.close(code=4004, reason="unsupported protocol version")
+            return False
+        return True
+
     async def _handle_client(self, websocket) -> None:
         remote = getattr(websocket, "remote_address", None)
         if isinstance(remote, (tuple, list)) and remote:
@@ -469,10 +522,14 @@ class BridgeServer:
             return
 
         registered = False
+        epoch = self._epoch
         tasks: set[asyncio.Task] = set()
 
         def drop_task(task: asyncio.Task) -> None:
             tasks.discard(task)
+            # done callback 一定会跑（包括创建后立刻被取消的任务），
+            # 用它归还并发额度，避免连接关闭时计数泄漏。
+            self._inflight = max(0, self._inflight - 1)
             with contextlib.suppress(BaseException):
                 task.exception()
 
@@ -500,18 +557,7 @@ class BridgeServer:
                 with contextlib.suppress(Exception):
                     await websocket.close(code=4002, reason="hello required")
                 return
-            if self.token and not await self._authorize(websocket, headers, first, address):
-                return
-
-            version = hello_version(first)
-            if version != PROTOCOL_VERSION:
-                self.version_refused += 1
-                logger.warning(
-                    f"Cortico Bridge: {address} 协议版本不认（收到 {_s(first.get('v')) or '缺省'}，"
-                    f"本插件支持 {PROTOCOL_VERSION}），已断开"
-                )
-                with contextlib.suppress(Exception):
-                    await websocket.close(code=4004, reason="unsupported protocol version")
+            if not await self._check_hello(websocket, headers, first, address):
                 return
 
             caps = first.get("capabilities")
@@ -522,10 +568,12 @@ class BridgeServer:
                 self.connected_at = time.time()
                 self.last_frame_at = time.time()
                 self.capabilities = caps if isinstance(caps, dict) else {}
-                # 新连接意味着对端可能重启过，rid 会从头开始；旧回执和旧锁
-                # 不能带过来，否则第一条 a-1 可能拿到上一次的错误结果。
+                # 新连接意味着对端可能重启过，rid 会从头开始；旧 ack 不能
+                # 带过来，否则第一条 a-1 可能拿到上一次的结果。发送锁不随
+                # 连接清空：旧任务可能还持有它，清了会让同群发送并发。
                 self._acks.clear()
-                self._send_locks.clear()
+                self._epoch += 1
+                epoch = self._epoch
                 registered = True
             if old is not None and old is not websocket:
                 # 新连接顶掉旧的：Cortico 重启时常见。
@@ -561,14 +609,21 @@ class BridgeServer:
                     continue
                 # send/tool 可能是慢操作（TTS、查网），派发出去，
                 # 别让一次 30 秒的语音把后面的工具调用和回执全堵住。
-                if _s(frame.get("t")) in ("send", "tool"):
+                # 但并发数必须有上限：每帧可能带 8MB 图片，超限直接回 busy，
+                # 不新建任务（也就不占内存）。
+                kind = _s(frame.get("t"))
+                if kind in ("send", "tool"):
+                    if self._inflight >= MAX_INFLIGHT:
+                        await self._reject_busy(websocket, frame)
+                        continue
+                    self._inflight += 1
                     task = asyncio.create_task(
-                        self._serve_frame(websocket, frame)
+                        self._serve_frame(websocket, frame, epoch)
                     )
                     tasks.add(task)
                     task.add_done_callback(drop_task)
                 else:
-                    await self._on_frame(websocket, frame)
+                    await self._on_frame(websocket, frame, headers)
         except ConnectionClosed:
             pass
         except Exception as exc:  # noqa: BLE001
@@ -589,15 +644,41 @@ class BridgeServer:
                 )
                 self._emit("disconnected")
 
-    async def _serve_frame(self, websocket, frame: dict) -> None:
+    async def _reject_busy(self, websocket, frame: dict) -> None:
+        """并发超限：本帧没有执行，回 busy。不进 ack 缓存（结果不该被重放）。"""
+        kind = _s(frame.get("t"))
+        rid = _s(frame.get("rid"))
+        if kind == "tool":
+            payload: dict[str, Any] = {
+                "t": "tool-ack",
+                "rid": rid,
+                "ok": False,
+                "error": codes.BUSY,
+            }
+        else:
+            payload = {
+                "t": "ack",
+                "rid": rid,
+                "ok": False,
+                "voice": False,
+                "error": codes.BUSY,
+                "note": "桥正忙，本条没有发出",
+            }
+        await self._send_to(websocket, payload)
+
+    async def _serve_frame(self, websocket, frame: dict, epoch: int | None = None) -> None:
+        if epoch is None:
+            epoch = self._epoch
         kind = _s(frame.get("t"))
         if kind == "send":
-            await self._handle_send(websocket, frame)
+            await self._handle_send(websocket, frame, epoch)
         elif kind == "tool":
-            await self._handle_tool(websocket, frame)
+            await self._handle_tool(websocket, frame, epoch)
 
-    def _cached_ack(self, rid: str) -> dict | None:
+    def _cached_ack(self, rid: str, epoch: int | None = None) -> dict | None:
         if not rid:
+            return None
+        if epoch is not None and epoch != self._epoch:
             return None
         hit = self._acks.get(rid)
         if hit is None:
@@ -608,8 +689,16 @@ class BridgeServer:
             return None
         return dict(ack)
 
-    def _remember_ack(self, rid: str, ack: dict) -> None:
+    def _remember_ack(self, rid: str, ack: dict, epoch: int | None = None) -> None:
         if not rid:
+            return
+        if epoch is not None and epoch != self._epoch:
+            # 旧连接上跑完的慢任务：回执只属于旧连接，不能污染新连接的缓存。
+            logger.debug(
+                "Cortico Bridge: 旧连接（代次 %s）的回执已丢弃（当前代次 %s）",
+                epoch,
+                self._epoch,
+            )
             return
         now = time.time()
         self._acks[rid] = (now, dict(ack))
@@ -622,10 +711,34 @@ class BridgeServer:
                 break
             self._acks.pop(key, None)
 
-    async def _handle_send(self, websocket, frame: dict) -> None:
+    def _lock_for(self, key: str) -> asyncio.Lock:
+        """取某个会话的发送锁；锁表按 LRU 回收空闲项，绝不删正在用的锁。"""
+        lock = self._send_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._send_locks[key] = lock
+        else:
+            self._send_locks.move_to_end(key)
+        if len(self._send_locks) > SEND_LOCK_MAX:
+            for old_key in list(self._send_locks):
+                if len(self._send_locks) <= SEND_LOCK_MAX:
+                    break
+                old = self._send_locks[old_key]
+                if old_key == key or old.locked():
+                    continue
+                self._send_locks.pop(old_key, None)
+        return lock
+
+    async def _handle_send(self, websocket, frame: dict, epoch: int | None = None) -> None:
+        if epoch is None:
+            epoch = self._epoch
+        if epoch != self._epoch:
+            # 这条帧来自已经被替换的旧连接；不执行，也不写新缓存。
+            logger.debug("Cortico Bridge: 旧连接发来的 send 帧已忽略")
+            return
         rid = _s(frame.get("rid"))
         # 同一个 rid 重发：直接回上一次的结果，避免同一条消息发两遍。
-        cached = self._cached_ack(rid)
+        cached = self._cached_ack(rid, epoch)
         if cached is not None:
             await self._send_to(websocket, cached)
             return
@@ -643,54 +756,73 @@ class BridgeServer:
         voice = frame.get("voice") is True
 
         # UMO 是权威键；有 UMO 时从它派生 kind/id，并拒绝与 conv 冲突。
-        umo_err = ""
+        umo_code = ""
         if umo:
             parsed = parse_umo(umo)
             if parsed is None:
-                umo_err = "invalid_umo"
+                umo_code = codes.INVALID_UMO
             else:
                 p_platform, p_kind, p_id, p_umo = parsed
                 if conv_kind and conv_id and (conv_kind != p_kind or conv_id != p_id):
-                    umo_err = "umo_conv_mismatch"
+                    umo_code = codes.UMO_CONV_MISMATCH
                 else:
                     platform = p_platform or platform
                     conv_kind, conv_id, umo = p_kind, p_id, p_umo
-        image, image_err = _parse_image(frame.get("image"))
+        image, image_code, image_note = _parse_image(frame.get("image"))
         used_voice = False
         uncertain = False
+        # code 进 ack.error（只放英文稳定码），err 进 ack.note（中文说明）。
         code = ""
+        err = ""
 
-        if image_err:
-            ok, err = False, image_err
-        elif umo_err:
-            ok, err = False, umo_err
+        if image_code:
+            ok, code, err = False, image_code, image_note
+        elif umo_code:
+            ok, code = False, umo_code
+            err = (
+                "UMO 格式不正确"
+                if umo_code == codes.INVALID_UMO
+                else "UMO 与会话参数不一致"
+            )
         elif not text and image is None:
-            ok, err = False, "正文和图片都是空的"
+            ok, code, err = False, codes.EMPTY_MESSAGE, "正文和图片都是空的"
         elif voice and not text.strip():
-            ok, err = False, "语音需要正文"
+            ok, code, err = False, codes.VOICE_NEEDS_TEXT, "语音需要正文"
         elif voice and image is not None:
-            ok, err = False, "语音和图片不能是同一条消息"
+            ok, code, err = False, codes.VOICE_IMAGE_CONFLICT, "语音和图片不能是同一条消息"
         elif conv_kind not in ("group", "private") or not conv_id:
-            ok, err = False, "会话参数不合法"
+            ok, code, err = False, codes.BAD_SESSION, "会话参数不合法"
         else:
             # 同一个会话的发送串行，保证聊天顺序；不同会话互不堵。
             key = f"{conv_kind}:{conv_id}"
-            lock = self._send_locks.get(key)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._send_locks[key] = lock
+            lock = self._lock_for(key)
             try:
                 await asyncio.wait_for(lock.acquire(), timeout=SEND_QUEUE_TIMEOUT)
             except asyncio.TimeoutError:
-                ok, err = False, f"发送排队超过 {SEND_QUEUE_TIMEOUT:.0f} 秒，本条没有发出"
+                ok, code, err = (
+                    False,
+                    codes.SEND_QUEUE_TIMEOUT,
+                    f"发送排队超过 {SEND_QUEUE_TIMEOUT:.0f} 秒，本条没有发出",
+                )
             else:
                 try:
-                    ok, err, used_voice, uncertain, code = await self._on_send(
+                    ok, note, used_voice, uncertain, raw_code = await self._on_send(
                         conv_kind, conv_id, text, reply_to, platform, image, voice, umo
                     )
-                except Exception as exc:  # noqa: BLE001 - 发送层异常也要回执
-                    logger.warning(f"Cortico Bridge: 发送异常 —— {exc}")
-                    ok, err, used_voice, uncertain, code = False, str(exc).strip() or "发送异常", False, True, ""
+                    code = _s(raw_code).strip()
+                    err = _s(note)
+                except Exception:  # noqa: BLE001 - 发送层异常也要回执
+                    # 异常原文可能带 provider key / URL / 本机路径：只进 debug，
+                    # 回执给稳定 code + 中文短句。
+                    logger.debug("Cortico Bridge: 发送层异常", exc_info=True)
+                    logger.warning("Cortico Bridge: 发送层异常（详情见 debug 日志）")
+                    ok, err, used_voice, uncertain, code = (
+                        False,
+                        "发送失败，详情见插件日志",
+                        False,
+                        True,
+                        codes.SEND_FAILED,
+                    )
                 finally:
                     lock.release()
 
@@ -701,17 +833,23 @@ class BridgeServer:
             "voice": used_voice,
         }
         if not ok:
-            ack["error"] = code or err
-            if code and err and err != code:
+            # error 只放 code；没有 code 的旧回调一律归为 send_failed。
+            ack["error"] = code or codes.SEND_FAILED
+            if err and err != ack["error"]:
                 ack["note"] = err
         elif err:
             ack["note"] = err
         if uncertain:
             ack["uncertain"] = True
-        self._remember_ack(rid, ack)
+        self._remember_ack(rid, ack, epoch)
         await self._send_to(websocket, ack)
 
-    async def _handle_tool(self, websocket, frame: dict) -> None:
+    async def _handle_tool(self, websocket, frame: dict, epoch: int | None = None) -> None:
+        if epoch is None:
+            epoch = self._epoch
+        if epoch != self._epoch:
+            logger.debug("Cortico Bridge: 旧连接发来的 tool 帧已忽略")
+            return
         rid = _s(frame.get("rid"))
         name = _s(frame.get("name"))
         turn = _s(frame.get("turn"))
@@ -719,6 +857,28 @@ class BridgeServer:
         args = raw_args if isinstance(raw_args, dict) else {}
         raw_actor = frame.get("actor")
         actor = raw_actor if isinstance(raw_actor, dict) else None
+        has_actor = raw_actor is not None
+
+        # 纵深防御：身份在桥层先校验一遍，非法帧不调用 on_tool。
+        identity_code = ""
+        if not turn and not has_actor:
+            identity_code = codes.MISSING_IDENTITY
+        elif turn and has_actor:
+            identity_code = codes.AMBIGUOUS_IDENTITY
+        elif has_actor and (
+            actor is None
+            or _s(actor.get("kind")) != "owner"
+            or not _s(actor.get("id")).strip()
+        ):
+            identity_code = codes.BAD_ACTOR
+
+        if identity_code:
+            await self._send_to(
+                websocket,
+                {"t": "tool-ack", "rid": rid, "ok": False, "error": identity_code},
+            )
+            return
+
         if not name:
             ok, text = False, "缺少工具名"
         elif self._on_tool is None:
@@ -732,18 +892,16 @@ class BridgeServer:
         payload["result" if ok else "error"] = text[:MAX_TOOL_RESULT]
         await self._send_to(websocket, payload)
 
-    async def _on_frame(self, websocket, frame: dict) -> None:
+    async def _on_frame(self, websocket, frame: dict, headers=None) -> None:
         if websocket is not self._client:
             return
         kind = _s(frame.get("t"))
 
         if kind == "hello":
-            # 同一连接重复握手：token 变了就断开，否则只刷新能力并重推 ready。
-            token = _s(frame.get("token"))
-            if self.token and not hmac.compare_digest(token, self.token):
-                logger.warning("Cortico Bridge: token 不匹配，已断开该连接")
-                with contextlib.suppress(Exception):
-                    await websocket.close(code=4003, reason="bad token")
+            # 同一连接重复握手：和初次握手用同一套校验（header/帧 token +
+            # 协议版本）；成功只刷新能力并重推 ready，不重复注册、不换 client。
+            address = self.client_address
+            if not await self._check_hello(websocket, headers, frame, address):
                 return
             caps = frame.get("capabilities")
             if isinstance(caps, dict):
