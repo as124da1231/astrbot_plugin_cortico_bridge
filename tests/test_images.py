@@ -4,11 +4,14 @@ main.py 依赖较多 AstrBot 层，这里只 stub 到 import 和图片函数用�
 再用 object.__new__ 绕开插件的完整初始化。
 """
 
+import asyncio
+import json
 import sys
 import types
 import unittest
 from collections import OrderedDict
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
@@ -88,11 +91,21 @@ NO_VISION = "[图片|对端模型不能读图，且没有可用的视觉模型�
 
 
 class Image:
-    def __init__(self, url="https://example.com/cat.png"):
+    def __init__(
+        self,
+        url="https://example.com/cat.png",
+        *,
+        error=None,
+        data="iVBORw0KGgoAAAANSUhEUg",
+    ):
         self.url = url
+        self.error = error
+        self.data = data
 
     async def convert_to_base64(self):
-        return "iVBORw0KGgoAAAANSUhEUg"
+        if self.error is not None:
+            raise self.error
+        return self.data
 
 
 class FakeEvent:
@@ -252,6 +265,41 @@ class ImagePlanTests(unittest.IsolatedAsyncioTestCase):
         text = await bridge._message_text(event)
         self.assertIn("超出单次上限，未转述", text)
         self.assertEqual(len(bridge.context.calls), 2)
+
+    async def test_download_error_reason_is_fixed_and_redacted(self):
+        bridge = _bridge("image", peer=True)
+        secret = "SECRET https://cdn.example.com/cat.png?sig=topsecret"
+        event = FakeEvent([Image(error=RuntimeError(secret))])
+        with mock.patch.object(main_mod.asyncio, "sleep", new=mock.AsyncMock()):
+            images, errors, marks = await bridge._image_payloads(event)
+            text = await bridge._message_text(event)
+        body = main_mod._apply_image_marks(text, marks)
+
+        self.assertEqual(images, [])
+        self.assertEqual(errors, [{"index": 0, "reason": "下载失败"}])
+        self.assertEqual(marks, ["[图片|没取到：下载失败]"])
+        self.assertIn("没取到：下载失败", body)
+        blob = json.dumps(
+            {"body": body, "errors": errors, "marks": marks}, ensure_ascii=False
+        )
+        self.assertNotIn("SECRET", blob)
+        self.assertNotIn("example.com", blob)
+
+    async def test_download_timeout_reason_is_fixed(self):
+        bridge = _bridge("image", peer=True)
+        event = FakeEvent([Image(error=asyncio.TimeoutError())])
+        with mock.patch.object(main_mod.asyncio, "sleep", new=mock.AsyncMock()):
+            _images, errors, marks = await bridge._image_payloads(event)
+        self.assertEqual(errors, [{"index": 0, "reason": "下载超时"}])
+        self.assertEqual(marks, ["[图片|没取到：下载超时]"])
+
+    async def test_empty_image_data_reason_is_fixed(self):
+        bridge = _bridge("image", peer=True)
+        _images, errors, marks = await bridge._image_payloads(
+            FakeEvent([Image(data="")])
+        )
+        self.assertEqual(errors, [{"index": 0, "reason": "空数据"}])
+        self.assertEqual(marks, ["[图片|没取到：空数据]"])
 
 
 if __name__ == "__main__":

@@ -524,13 +524,50 @@ class MessageIdTests(unittest.IsolatedAsyncioTestCase):
         later = FakeEvent("在吗", messages=[Plain("在吗")], timestamp=130)
         self.assertFalse(bridge._is_fallback_duplicate(bridge._fallback_key(later)))
 
-    async def test_same_text_two_messages_both_push(self):
+    async def test_same_second_same_text_two_messages_both_push(self):
         bridge = make_bridge()
+        # 同一秒、同一发送者、同一句正文：没有 message_id 也必须是两条。
         first = FakeEvent("在吗", messages=[Plain("在吗")], timestamp=100)
-        second = FakeEvent("在吗", messages=[Plain("在吗")], timestamp=101)
+        second = FakeEvent("在吗", messages=[Plain("在吗")], timestamp=100)
         await bridge._push_event(first)
         await bridge._push_event(second)
         self.assertEqual(len(bridge.server.pushed), 2)
+        self.assertEqual(
+            len({frame["id"] for frame in bridge.server.pushed}), 2
+        )
+
+    async def test_same_second_two_different_images_both_push(self):
+        bridge = make_bridge()
+        first = FakeEvent(
+            "", messages=[Image("https://example.com/a.png")], timestamp=100
+        )
+        second = FakeEvent(
+            "", messages=[Image("https://example.com/b.png")], timestamp=100
+        )
+        await bridge._push_event(first)
+        await bridge._push_event(second)
+        self.assertEqual(len(bridge.server.pushed), 2)
+        self.assertEqual(
+            len({frame["id"] for frame in bridge.server.pushed}), 2
+        )
+
+    async def test_same_event_redelivery_within_three_seconds_pushes_once(self):
+        bridge = make_bridge()
+        event = FakeEvent("在吗", messages=[Plain("在吗")], timestamp=100)
+        await bridge._push_event(event)
+        await bridge._push_event(event)
+        self.assertEqual(len(bridge.server.pushed), 1)
+        self.assertEqual(bridge.stats["skipped"], 1)
+
+    async def test_raw_message_id_dedupes_across_event_objects(self):
+        bridge = make_bridge()
+        raw = {"message_id": "m-42", "message": []}
+        first = FakeEvent("在吗", messages=[Plain("在吗")], timestamp=100, raw=raw)
+        second = FakeEvent("在吗", messages=[Plain("在吗")], timestamp=100, raw=raw)
+        self.assertEqual(bridge._fallback_key(first), bridge._fallback_key(second))
+        await bridge._push_event(first)
+        await bridge._push_event(second)
+        self.assertEqual(len(bridge.server.pushed), 1)
 
     async def test_real_platform_id_still_dedupes(self):
         bridge = make_bridge()
@@ -668,6 +705,23 @@ class TrustedToolTests(unittest.IsolatedAsyncioTestCase):
                 "run_shell", {}, "", {"kind": "owner", "id": "111"}
             )
         self.assertEqual(bridge.tools.executed[-1][2], True)
+
+    async def test_owner_event_construction_failure_does_not_leak_exception(self):
+        bridge = make_bridge(context=FakeContext(admins=["111"]))
+        secret = "SECRET https://cdn.example.com/hook?sig=topsecret"
+        with mock.patch.object(
+            owner_event,
+            "build_owner_event",
+            side_effect=RuntimeError(secret),
+        ):
+            ok, text = await bridge._on_tool_call(
+                "run_shell", {}, "", {"kind": "owner", "id": "111"}
+            )
+        self.assertFalse(ok)
+        self.assertIn("主人事件构造失败", text)
+        self.assertNotIn("SECRET", text)
+        self.assertNotIn("example.com", text)
+        self.assertEqual(bridge.tools.executed, [])
 
     async def test_world_role_owner_fields_are_ignored(self):
         bridge = make_bridge(context=FakeContext(admins=["111"]))

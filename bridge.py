@@ -879,6 +879,8 @@ class BridgeServer:
             )
             return
 
+        code = ""
+        note = ""
         if not name:
             ok, text = False, "缺少工具名"
         elif self._on_tool is None:
@@ -886,10 +888,22 @@ class BridgeServer:
         else:
             try:
                 ok, text = await self._on_tool(name, args, turn, actor)
-            except Exception as exc:  # noqa: BLE001
-                ok, text = False, str(exc).strip() or type(exc).__name__
+            except Exception:  # noqa: BLE001
+                # 回调异常可能带 URL/路径；原文只进日志，回执只给稳定 code + 中文。
+                logger.error(
+                    "Cortico Bridge: 工具执行失败 name=%s" % name, exc_info=True
+                )
+                ok, text = False, ""
+                # errors.py 扩容前先在本层保留稳定 code；World 对未知 code 有兜底。
+                code = codes.TOOL_FAILED
+                note = "工具执行失败，详情见插件日志"
         payload: dict[str, Any] = {"t": "tool-ack", "rid": rid, "ok": ok}
-        payload["result" if ok else "error"] = text[:MAX_TOOL_RESULT]
+        if ok:
+            payload["result"] = text[:MAX_TOOL_RESULT]
+        else:
+            payload["error"] = code or text[:MAX_TOOL_RESULT]
+            if note:
+                payload["note"] = note
         await self._send_to(websocket, payload)
 
     async def _on_frame(self, websocket, frame: dict, headers=None) -> None:

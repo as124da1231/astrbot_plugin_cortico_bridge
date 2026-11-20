@@ -429,6 +429,29 @@ class ToolIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0][3], {"kind": "owner", "id": "100000001"})
 
 
+class ToolErrorTests(unittest.IsolatedAsyncioTestCase):
+    """T-004：工具回调异常只回稳定 code + 中文，不带异常原文。"""
+
+    async def test_callback_exception_is_not_echoed(self):
+        secret = "https://cdn.example.com/secret?token=SECRET"
+
+        async def on_tool(_name, _args, _turn, _actor):
+            raise RuntimeError(secret)
+
+        server = _server(on_tool=on_tool)
+        ws = _Ws()
+        await server._handle_tool(
+            ws, {"t": "tool", "rid": "t-8", "name": "x", "turn": "m-1"}
+        )
+        ack = ws.last()
+        self.assertFalse(ack["ok"])
+        self.assertEqual(ack["error"], "tool_failed")
+        self.assertEqual(ack["note"], "工具执行失败，详情见插件日志")
+        blob = json.dumps(ack, ensure_ascii=False)
+        self.assertNotIn("SECRET", blob)
+        self.assertNotIn("example.com", blob)
+
+
 class SendErrorTests(unittest.IsolatedAsyncioTestCase):
     """T-004：发送校验失败给稳定 code + 中文 note；异常原文不回执。"""
 

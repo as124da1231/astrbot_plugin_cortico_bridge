@@ -720,8 +720,14 @@ class CorticoBridge(Star):
                 event = build_owner_event(
                     self.context, platform, owner_id, self.server.self_id
                 )
-            except Exception as exc:  # noqa: BLE001
-                return False, f"当前 AstrBot 版本不能为 Coo 轮次构造工具身份：{exc}"
+            except Exception:  # noqa: BLE001
+                # 异常原文可能带路径/URL，只进日志；回给模型的是固定短句。
+                logger.error(
+                    "Cortico Bridge: 主人工具身份构造失败 platform=%s owner=%s"
+                    % (platform, owner_id),
+                    exc_info=True,
+                )
+                return False, "主人事件构造失败，已跳过"
             who = f"主人 {owner_id}"
         logger.info("Cortico Bridge: 执行工具 %s（来自 %s）" % (name, who))
         ok, text = await self.tools.execute(name, args, event, trusted=trusted)
@@ -1290,15 +1296,24 @@ class CorticoBridge(Star):
                     break
                 except asyncio.TimeoutError:
                     last_error = "下载超时"
-                except Exception as exc:  # noqa: BLE001
-                    last_error = str(exc).strip() or type(exc).__name__
+                    logger.debug(
+                        "Cortico Bridge: 取图超时（第 %d 次）" % (attempt + 1),
+                        exc_info=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    # 异常原文常带 CDN URL/签名，只进日志；正文和帧里只放固定原因。
+                    last_error = "下载失败"
+                    logger.warning(
+                        "Cortico Bridge: 取图失败（第 %d 次）" % (attempt + 1),
+                        exc_info=True,
+                    )
                 if attempt < 2:
                     await asyncio.sleep(0.4 * (attempt + 1))
             if not b64:
                 reason = last_error or "空数据"
                 errors.append({"index": slot, "reason": reason})
                 marks.append(f"[图片|没取到：{reason}]")
-                logger.warning(f"Cortico Bridge: 取图失败 —— {reason}")
+                logger.warning("Cortico Bridge: 取图失败 —— %s" % reason)
                 continue
             if len(b64) > MAX_IMAGE_B64:
                 errors.append({"index": slot, "reason": "太大"})
@@ -1499,11 +1514,85 @@ class CorticoBridge(Star):
         return False
 
     def _component_signature(self, event: AstrMessageEvent) -> str:
+        """组件数量 + 顺序类型的稳定描述（同秒两条的上下文仍然一样）。"""
         try:
-            names = [type(comp).__name__ for comp in event.get_messages()]
+            comps = list(event.get_messages())
         except Exception:  # noqa: BLE001
             return ""
-        return ",".join(sorted(names))
+        names = [type(comp).__name__ for comp in comps]
+        return f"{len(names)}:" + ",".join(names)
+
+    def _component_refs(self, event: AstrMessageEvent) -> list[str]:
+        """组件上能区分单次投递的媒体引用；base64 只取前 32 字符。"""
+        try:
+            comps = list(event.get_messages())
+        except Exception:  # noqa: BLE001
+            return []
+        refs: list[str] = []
+        for comp in comps:
+            for attr in ("url", "file", "path", "filename"):
+                value = getattr(comp, attr, None)
+                if isinstance(value, str) and value:
+                    refs.append(f"{attr}={value}")
+            b64 = getattr(comp, "base64", None)
+            if isinstance(b64, str) and b64:
+                refs.append("base64=" + b64[:32])
+        return refs
+
+    def _raw_message(self, event: AstrMessageEvent) -> Any:
+        """取适配器原始报文；不同 AstrBot 版本字段名不同，两个都兼容。"""
+        obj = getattr(event, "message_obj", None)
+        for attr in ("raw_message", "raw"):
+            try:
+                raw = getattr(obj, attr, None)
+            except Exception:  # noqa: BLE001
+                continue
+            if raw is not None and callable(getattr(raw, "get", None)):
+                return raw
+        return None
+
+    def _raw_image_refs(self, raw: Any) -> list[str]:
+        """原始报文里图片段的 url/file/base64 前缀，用来区分同秒的不同图。"""
+        if raw is None:
+            return []
+        try:
+            segments = raw.get("message")
+        except Exception:  # noqa: BLE001
+            return []
+        if not isinstance(segments, list):
+            return []
+        refs: list[str] = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            if _s(segment.get("type")) != "image":
+                continue
+            data = segment.get("data")
+            if not isinstance(data, dict):
+                data = {}
+            bits = []
+            for key in ("url", "file", "path", "filename"):
+                value = _s(data.get(key))
+                if value:
+                    bits.append(f"{key}={value}")
+            b64 = _s(data.get("base64"))
+            if b64:
+                bits.append("base64=" + b64[:32])
+            if bits:
+                refs.append("&".join(bits))
+        return refs
+
+    def _fallback_event_nonce(self, event: AstrMessageEvent) -> str:
+        """同一事件对象上的随机 nonce：重复观察命中，不同对象不会互相顶掉。"""
+        try:
+            nonce = event.get_extra("_cortico_fallback_nonce")
+            if nonce:
+                return _s(nonce)
+            nonce = secrets.token_hex(8)
+            event.set_extra("_cortico_fallback_nonce", nonce)
+            return nonce
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _event_timestamp(self, event: AstrMessageEvent) -> int:
         """message_obj.time/timestamp 可能是 datetime、秒或毫秒；统一成 int。"""
@@ -1522,16 +1611,47 @@ class CorticoBridge(Star):
         return 0
 
     def _fallback_key(self, event: AstrMessageEvent) -> str:
-        """退化投递的稳定指纹：同一条事件重复投递会命中，同文新消息不会。"""
-        raw = "|".join(
+        """退化投递的稳定指纹：同一条事件重复投递会命中，同文新消息不会。
+
+        指纹由「上下文」（正文/发送者/秒级时间/组件数量与类型序列）和
+        「单次投递标识」（raw 里的 message_id、图片 url/file、base64 前 32
+        字符）组成。没有任何投递标识时（纯文本且适配器不透出 message_id），
+        退回到事件对象自己的 nonce：同秒同文的第二条是另一个对象，照样推送；
+        同一事件在 3 秒内被重复观察仍只处理一次。
+
+        限制：若适配器把同一条消息重新构造成新对象、且 raw 里连 message_id/
+        图片引用都没有，两次投递在数据上完全不可区分，这种情况下不吞消息
+        （宁可重复也不丢），窗口仍为 3 秒。
+        """
+        raw = self._raw_message(event)
+        try:
+            conv = _s(event.get_group_id())
+        except Exception:  # noqa: BLE001
+            conv = ""
+        refs: list[str] = []
+        if raw is not None:
+            for key in ("message_id", "msg_id", "real_id"):
+                try:
+                    value = _s(raw.get(key))
+                except Exception:  # noqa: BLE001
+                    value = ""
+                if value:
+                    refs.append(f"raw_{key}={value}")
+            refs.extend("raw_image=" + item for item in self._raw_image_refs(raw))
+        refs.extend(self._component_refs(event))
+        if not refs:
+            refs.append("evt=" + self._fallback_event_nonce(event))
+        raw_key = "|".join(
             (
                 event.get_message_str(),
                 _s(event.get_sender_id()),
+                conv,
                 self._component_signature(event),
                 _s(self._event_timestamp(event)),
+                *refs,
             )
         )
-        return "f" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+        return "f" + hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:16]
 
     def _is_fallback_duplicate(self, key: str) -> bool:
         now = time.time()
