@@ -57,6 +57,8 @@ const state = {
   convs: [],
   refusals: { origin: 0, query: 0, token: 0, version: 0 },
   tools: [],
+  wildcard: false,
+  toolsTouched: false,
   picked: new Set(),
   saved: new Set(),
   query: '',
@@ -68,7 +70,84 @@ const state = {
   loaded: false,
   armClear: false,
   armTimer: 0,
+  tokenArm: { action: '', timer: 0 },
 };
+
+/* ---------------- 主题 ---------------- */
+
+// AstrBot 插件页 SDK 是否提供主题 API 未证实（DESIGN_REVIEW M13），
+// 所以只在 getTheme 真的是函数时才问宿主；否则用系统偏好。
+const darkMedia =
+  typeof window.matchMedia === 'function'
+    ? window.matchMedia('(prefers-color-scheme: dark)')
+    : null;
+let hostTheme = false;
+let paintedTheme = document.documentElement.dataset.theme || '';
+
+function paintTheme(theme) {
+  if (theme !== 'dark' && theme !== 'light') return;
+  const root = document.documentElement;
+  if (root.dataset.theme === theme) {
+    paintedTheme = theme;
+    return;
+  }
+  paintedTheme = theme;
+  root.dataset.theme = theme;
+}
+
+function syncTheme() {
+  // 宿主已经接管主题后不再抢着改回去。
+  if (hostTheme) return;
+  let wanted = '';
+  try {
+    wanted = new URLSearchParams(location.search).get('theme') || '';
+  } catch (e) {
+    wanted = '';
+  }
+  if (wanted === 'dark' || wanted === 'light') {
+    paintTheme(wanted);
+    return;
+  }
+  paintTheme(darkMedia && darkMedia.matches ? 'dark' : 'light');
+}
+
+function initTheme() {
+  syncTheme();
+  if (darkMedia && typeof darkMedia.addEventListener === 'function') {
+    darkMedia.addEventListener('change', syncTheme);
+  }
+  // 宿主若直接改 data-theme，视为它接管；之后的系统主题变化不再覆盖。
+  if (typeof MutationObserver === 'function') {
+    const root = document.documentElement;
+    new MutationObserver(() => {
+      if ((root.dataset.theme || '') !== paintedTheme) hostTheme = true;
+    }).observe(root, {
+      attributes: true,
+      attributeFilter: ['data-theme'],
+    });
+  }
+}
+
+async function adoptHostTheme() {
+  if (!bridge || typeof bridge.getTheme !== 'function') return;
+  // URL 显式指定时优先，用户/排障参数不被宿主覆盖。
+  try {
+    const forced = new URLSearchParams(location.search).get('theme');
+    if (forced === 'dark' || forced === 'light') return;
+  } catch (e) {
+    // 拿不到 search 就继续问宿主。
+  }
+  try {
+    const theme = await bridge.getTheme();
+    if (theme === 'dark' || theme === 'light') {
+      hostTheme = true;
+      paintTheme(theme);
+    }
+  } catch (e) {
+    // 宿主没实现或拒绝：保持系统偏好，不报错打扰用户。
+  }
+}
+
 
 /* ---------------- 小工具 ---------------- */
 
@@ -227,22 +306,154 @@ function setPill(node, text, on) {
   node.appendChild(pill);
 }
 
-async function tokenAction() {
-  const status = state.status || {};
-  const token = status.token || '';
+/* ---------------- token ---------------- */
+
+const TOKEN_BTN = {
+  copy: 'btnTokenCopy',
+  rotate: 'btnTokenRotate',
+  clear: 'btnTokenClear',
+};
+const TOKEN_LABEL = {
+  copy: '复制',
+  rotate: '生成（轮换）',
+  clear: '清除',
+};
+const TOKEN_ARMED = {
+  rotate: '再点一次生成',
+  clear: '再点一次清除',
+};
+
+function disarmToken() {
+  state.tokenArm.action = '';
+  clearTimeout(state.tokenArm.timer);
+  for (const [action, id] of Object.entries(TOKEN_BTN)) {
+    const btn = $(id);
+    if (!btn) continue;
+    btn.classList.remove('armed');
+    btn.textContent = TOKEN_LABEL[action];
+  }
+}
+
+function armToken(action) {
+  disarmToken();
+  state.tokenArm.action = action;
+  const btn = $(TOKEN_BTN[action]);
+  if (btn) {
+    btn.classList.add('armed');
+    btn.textContent = TOKEN_ARMED[action];
+  }
+  state.tokenArm.timer = setTimeout(disarmToken, 4000);
+}
+
+function showOnceToken(token, hint) {
+  const box = $('tokenOnceBox');
+  const input = $('tokenOnce');
+  if (!box || !input) return;
+  input.value = token || '';
+  const line = $('tokenOnceHint');
+  if (line) line.textContent = hint || '替换 Coo 里保存的旧 token，否则它会一直重连失败。';
+  box.hidden = !token;
+  if (token) {
+    input.focus();
+    input.select();
+  }
+}
+
+async function copyToken() {
+  let data;
   try {
-    if (token) {
-      await copyText(token);
+    data = unwrap(await bridge.apiGet('token')) || {};
+  } catch (err) {
+    toast('读取 token 失败：' + (err && err.message ? err.message : err), true);
+    return;
+  }
+  const plain = data.token || '';
+  if (!plain) {
+    toast(data.loopback ? '本机免密，还没有 token；点「生成」' : '还没有 token，点「生成」', true);
+    return;
+  }
+  const ok = await copyText(plain);
+  if (!ok) {
+    showOnceToken(plain, '浏览器不允许自动复制，请手动选中这一行。');
+    toast('复制失败：token 已显示在下方，手动复制即可', true);
+    return;
+  }
+  toast('token 已复制');
+}
+
+async function rotateToken() {
+  const btn = $('btnTokenRotate');
+  if (btn) btn.disabled = true;
+  try {
+    const data = unwrap(await bridge.apiPost('token', { action: 'generate' })) || {};
+    const plain = data.token || '';
+    if (!plain) {
+      toast('后端没有返回新 token', true);
       return;
     }
-    const data = unwrap(await bridge.apiPost('token', { action: 'generate' }));
-    if (data && data.token) {
-      await copyText(data.token);
-      await refresh();
-    }
+    showOnceToken(plain, '新 token 只显示这一次；Coo 需要用新 token 重连。');
+    const ok = await copyText(plain);
+    toast(
+      ok
+        ? '已生成新 token 并复制；当前 Coo 会断开，需要用新 token 重连'
+        : '已生成新 token（显示在下方）；Coo 会断开，需要手动复制并重连',
+      !ok,
+    );
+    await refresh().catch(() => toast('token 已更新，但刷新状态失败', true));
   } catch (err) {
-    toast('token 操作失败：' + (err && err.message ? err.message : err), true);
+    toast('生成 token 失败：' + (err && err.message ? err.message : err), true);
+  } finally {
+    if (btn) btn.disabled = false;
   }
+}
+
+async function clearToken() {
+  const btn = $('btnTokenClear');
+  if (btn) btn.disabled = true;
+  try {
+    await bridge.apiPost('token', { action: 'clear' });
+    showOnceToken('', '');
+    toast('token 已清除；Coo 会断开，本机仍可免密连接');
+    await refresh().catch(() => toast('token 已清除，但刷新状态失败', true));
+  } catch (err) {
+    toast('清除 token 失败：' + (err && err.message ? err.message : err), true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function initToken() {
+  const onCopy = () => {
+    disarmToken();
+    copyToken();
+  };
+  $('btnTokenCopy').addEventListener('click', onCopy);
+  $('kToken').addEventListener('click', onCopy);
+  $('btnTokenOnceCopy').addEventListener('click', async () => {
+    const token = $('tokenOnce').value;
+    if (!token) return;
+    const ok = await copyText(token);
+    toast(ok ? 'token 已复制' : '复制失败，请手动选中', !ok);
+  });
+
+  $('btnTokenRotate').addEventListener('click', () => {
+    if (state.tokenArm.action === 'rotate') {
+      disarmToken();
+      rotateToken();
+      return;
+    }
+    armToken('rotate');
+    toast('生成新 token 会让当前 Coo 断开，需要用新 token 重连；再点一次确认', true);
+  });
+  $('btnTokenClear').addEventListener('click', () => {
+    if (state.tokenArm.action === 'clear') {
+      disarmToken();
+      clearToken();
+      return;
+    }
+    armToken('clear');
+    toast('清除后跨机连接会失效，Coo 需要重连；再点一次确认', true);
+  });
 }
 
 function applyStatus(s) {
@@ -311,7 +522,10 @@ function applyStatus(s) {
   $('mSent').textContent = st.sent || 0;
   $('mFailed').textContent = st.failed || 0;
   $('mTools').textContent = s.toolCount || 0;
-  $('railTools').textContent = s.toolCount ? s.toolCount : '—';
+  // 工具页正在编辑时，不要把未保存的已选数覆盖成后端数字。
+  if (!(state.panel === 'tools' && state.loaded)) {
+    $('railTools').textContent = s.toolCount ? s.toolCount : '—';
+  }
 
   setPill($('kEnabled'), s.enabled ? '开' : '关', !!s.enabled);
 
@@ -374,31 +588,31 @@ function applyStatus(s) {
       : 'TTS Provider 已就绪，但插件里的「允许语音」还关着'
     : '去 AstrBot 的模型提供商页添加一个 TTS Provider（Edge TTS / OpenAI TTS 等）';
 
-  const token = s.token || '';
+  // /status 只给 tokenSet，明文一律按需走 /token（UI-002）。
+  const tokenSet = !!s.tokenSet;
   const loopback = !!s.loopback;
-  setPill($('kToken'), token ? '已设置' : loopback ? '本机免密' : '未设置', !!token);
-  $('kToken').title = token
-    ? '点击复制 token'
-    : loopback
-      ? '本机免密：只有本机能连；点击生成 token'
-      : '非回环监听必须设置 token；点击生成';
-  $('kToken').onclick = tokenAction;
+  const tokenNode = $('kToken');
+  if (tokenNode) {
+    tokenNode.textContent = tokenSet ? '已设置 · 点击复制' : loopback ? '本机免密' : '未设置';
+    tokenNode.classList.toggle('on', tokenSet);
+    tokenNode.title = tokenSet
+      ? '点击复制当前 token'
+      : loopback
+        ? '本机免密：只有本机能连；点「生成」可以跨机使用'
+        : '非回环监听必须设置 token；点「生成」';
+  }
 
   const tokenNote = $('kTokenNote');
   if (tokenNote) {
-    tokenNote.textContent = token
+    const noteText = tokenSet
       ? loopback
         ? '只在本机使用；浏览器已被 Origin 拦住'
         : '非回环监听，必须与 Coo 一致'
       : loopback
         ? '本机免密；生成后可以跨机使用'
         : '非回环必须设置 token';
-  }
-
-  const btnToken = $('btnToken');
-  if (btnToken) {
-    btnToken.textContent = token ? '复制 token' : '生成 token';
-    btnToken.onclick = tokenAction;
+    // aria-live 区域只在内容真的变化时更新，避免 20 秒轮询反复朗读。
+    if (tokenNote.textContent !== noteText) tokenNote.textContent = noteText;
   }
 
   const listen = $('kListen');
@@ -588,36 +802,137 @@ async function refresh() {
   applyStatus(s);
 }
 
-function connectStream() {
-  return bridge.subscribeSSE('events', {
-    onMessage(ev) {
-      const d = ev.parsed;
-      if (!d || typeof d !== 'object') return;
+const stream = {
+  handle: null,
+  timer: 0,
+  watch: 0,
+  tries: 0,
+  gen: 0,
+  state: 'idle',
+};
 
-      if (d.type === 'snapshot') {
-        applySnapshot(d);
-        return;
-      }
-      if (d.type === 'message') {
-        pushRow(d);
-        return;
-      }
-      if (d.type === 'tool') {
-        state.toolLog.unshift(d);
-        if (state.toolLog.length > 12) state.toolLog.length = 12;
-        renderToolLog();
-        if (state.panel === 'tools' && state.loaded) renderTools();
-        return;
-      }
-      if (d.type === 'connected' || d.type === 'disconnected' || d.type === 'listening' || d.type === 'info') {
-        toast(d.text || d.type, d.type === 'disconnected');
+function setLive(mode, detail) {
+  stream.state = mode;
+  const band = $('liveband');
+  const label = $('liveLabel');
+  const text = mode === 'live' ? '实时' : mode === 'retry' ? '重连中' : '已断开';
+  if (label) label.textContent = text;
+  if (band) {
+    band.dataset.live = mode;
+    band.title =
+      detail ||
+      (mode === 'live'
+        ? '实时流已连上'
+        : mode === 'retry'
+          ? '实时流断开，5 秒后自动重连；期间靠 20 秒轮询兜底'
+          : '实时流已断开，仍在重试；期间靠 20 秒轮询兜底');
+  }
+  if ($('msgCount')) $('msgCount').title = band ? band.title : '';
+}
+
+/** 连上或收到帧：清掉重连定时器，状态回到“实时”。 */
+function markStreamLive() {
+  clearTimeout(stream.timer);
+  stream.timer = 0;
+  clearTimeout(stream.watch);
+  stream.tries = 0;
+  if (stream.state !== 'live') setLive('live');
+}
+
+function closeStreamHandle() {
+  const handle = stream.handle;
+  stream.handle = null;
+  if (!handle) return;
+  try {
+    if (typeof handle.abort === 'function') handle.abort();
+    else if (typeof handle.close === 'function') handle.close();
+    else if (typeof handle === 'function') handle();
+  } catch (e) {
+    // 关不掉也没关系：重连前只求别在原对象上再挂监听。
+  }
+}
+
+function streamDown(detail) {
+  stream.tries += 1;
+  clearTimeout(stream.watch);
+  closeStreamHandle();
+  setLive(stream.tries > 2 ? 'off' : 'retry', detail);
+  clearTimeout(stream.timer);
+  stream.timer = setTimeout(connectStream, 5000);
+}
+
+function connectStream() {
+  clearTimeout(stream.timer);
+  stream.timer = 0;
+  clearTimeout(stream.watch);
+  closeStreamHandle();
+
+  const gen = ++stream.gen;
+  let handle;
+  try {
+    handle = bridge.subscribeSSE('events', {
+      onOpen() {
+        if (gen !== stream.gen) return;
+        markStreamLive();
+        // 断线期间可能漏了事件，连上后补一次状态（失败不影响实时流）。
         refresh().catch(() => {});
-      }
-    },
-    onError() {
-      $('msgCount').title = '实时流断开，正在靠定时刷新兜底';
-    },
-  });
+      },
+      onMessage(ev) {
+        if (gen !== stream.gen) return;
+        markStreamLive();
+        const d = ev.parsed;
+        if (!d || typeof d !== 'object') return;
+
+        if (d.type === 'snapshot') {
+          applySnapshot(d);
+          return;
+        }
+        if (d.type === 'message') {
+          // 通知（撤回 / 戳一戳 / 入退群）也走这里，notice 字段决定流水样式。
+          pushRow(d);
+          return;
+        }
+        if (d.type === 'tool') {
+          state.toolLog.unshift(d);
+          if (state.toolLog.length > 12) state.toolLog.length = 12;
+          renderToolLog();
+          if (state.panel === 'tools' && state.loaded) renderTools();
+          return;
+        }
+        if (d.type === 'connected' || d.type === 'disconnected' || d.type === 'listening' || d.type === 'info') {
+          toast(d.text || d.type, d.type === 'disconnected');
+          refresh().catch(() => {});
+        }
+      },
+      onError() {
+        if (gen !== stream.gen) return;
+        // 有的 SDK 会自己重连：先给 6 秒恢复窗口，没恢复再走 5 秒退避重连。
+        setLive('retry', '实时流断开，正在尝试恢复；期间靠 20 秒轮询兜底');
+        if (stream.timer) return;
+        stream.timer = setTimeout(() => {
+          if (gen === stream.gen && stream.state !== 'live') {
+            streamDown('实时流已断开，5 秒后重连；期间靠 20 秒轮询兜底');
+          }
+        }, 6000);
+      },
+    });
+  } catch (err) {
+    streamDown('实时流连不上，5 秒后重试；期间靠 20 秒轮询兜底');
+    return;
+  }
+
+  stream.handle = handle && typeof handle.then === 'function' ? handle : handle || null;
+  if (handle && typeof handle.catch === 'function') {
+    handle.catch(() => {
+      if (gen === stream.gen) streamDown('实时流已断开，5 秒后重连；期间靠 20 秒轮询兜底');
+    });
+  }
+  // 没等到 onOpen 也没收到帧时，别一直显示“实时”。
+  stream.watch = setTimeout(() => {
+    if (gen === stream.gen && stream.state === 'idle') {
+      setLive('retry', '实时流还没连上，正在等待；期间靠 20 秒轮询兜底');
+    }
+  }, 8000);
 }
 
 function applySnapshot(snap) {
@@ -697,12 +1012,12 @@ function dirty() {
   return false;
 }
 
-function riskCount(risk) {
-  return state.tools.filter((t) => t.risk === risk).length;
+function activeTools() {
+  return state.tools.filter((t) => t.active);
 }
 
-function pickedByRisk(risk) {
-  return state.tools.filter((t) => t.risk === risk && state.picked.has(t.name)).length;
+function riskCount(risk) {
+  return activeTools().filter((t) => t.risk === risk).length;
 }
 
 function updateSavebar() {
@@ -714,14 +1029,16 @@ function updateSavebar() {
 }
 
 function updateToolHero() {
-  const total = state.tools.length;
-  const picked = state.tools.filter((t) => state.picked.has(t.name)).length;
+  const active = activeTools();
+  const total = active.length;
+  const picked = active.filter((t) => state.picked.has(t.name)).length;
   $('pickedCount').textContent = picked;
   $('totalCount').textContent = total;
   $('railTools').textContent = String(picked);
 
+  // 已选只统计真实会下发的工具（inactive 不计，`*` 下的 exec 也不在 picked）。
   const parts = { read: 0, write: 0, exec: 0 };
-  for (const t of state.tools) {
+  for (const t of active) {
     if (state.picked.has(t.name)) parts[t.risk] = (parts[t.risk] || 0) + 1;
   }
   const sum = parts.read + parts.write + parts.exec;
@@ -737,6 +1054,14 @@ function updateToolHero() {
     chip.appendChild(document.createTextNode(`${RISK[key].label} ${parts[key]}`));
     chip.title = RISK[key].why;
     legend.appendChild(chip);
+  }
+
+  const note = $('toolNote');
+  if (note) {
+    note.hidden = !state.wildcard;
+    note.textContent = state.wildcard
+      ? '当前用「*」授权：只自动包含读 / 写工具；执行类工具需显式加入。'
+      : '';
   }
 
   $('cAll').textContent = total;
@@ -789,6 +1114,12 @@ function toolRow(t) {
   risk.title = (RISK[t.risk] || {}).why || '';
   line.appendChild(risk);
 
+  if (t.active && state.wildcard && t.risk === 'exec' && !state.picked.has(t.name)) {
+    const tag = el('span', 'offtag wildtag', '需显式加入');
+    tag.title = '「*」只自动包含读 / 写工具；执行类必须点名加入';
+    line.appendChild(tag);
+  }
+
   if (!t.active) line.appendChild(el('span', 'offtag', '已停用'));
   else if (state.used.has(t.name)) {
     const used = el('span', 'usedtag', '用过');
@@ -805,6 +1136,7 @@ function toolRow(t) {
 
   if (t.active) {
     box.addEventListener('change', () => {
+      state.toolsTouched = true;
       if (box.checked) state.picked.add(t.name);
       else state.picked.delete(t.name);
       if (state.onlySel) renderTools();
@@ -840,12 +1172,12 @@ function updateGroupCounts() {
     const plugin = card.dataset.plugin;
     const tools = state.tools.filter((t) => t.plugin === plugin);
     const active = tools.filter((t) => t.active);
-    const picked = tools.filter((t) => state.picked.has(t.name)).length;
+    const picked = active.filter((t) => state.picked.has(t.name)).length;
     const badge = card.querySelector('.gcount');
     if (badge) {
       badge.textContent = '';
       badge.appendChild(el('b', null, String(picked)));
-      badge.appendChild(document.createTextNode(`/${tools.length}`));
+      badge.appendChild(document.createTextNode(`/${active.length}`));
       badge.classList.toggle('zero', picked === 0);
     }
     const act = card.querySelector('.gact');
@@ -905,9 +1237,9 @@ function renderTools() {
 
     const count = el('span', 'gcount');
     const active = tools.filter((t) => t.active);
-    const picked = tools.filter((t) => state.picked.has(t.name)).length;
+    const picked = active.filter((t) => state.picked.has(t.name)).length;
     count.appendChild(el('b', null, String(picked)));
-    count.appendChild(document.createTextNode(`/${tools.length}`));
+    count.appendChild(document.createTextNode(`/${active.length}`));
     if (picked === 0) count.classList.add('zero');
     btn.appendChild(count);
 
@@ -930,6 +1262,7 @@ function renderTools() {
     act.disabled = active.length === 0;
     act.addEventListener('click', () => {
       const turnOn = !active.every((t) => state.picked.has(t.name));
+      state.toolsTouched = true;
       for (const t of active) {
         if (turnOn) state.picked.add(t.name);
         else state.picked.delete(t.name);
@@ -969,11 +1302,18 @@ async function loadTools() {
   }
   state.tools = Array.isArray(data.items) ? data.items : [];
   const sel = Array.isArray(data.selected) ? data.selected : [];
-  const every = !!data.all || sel.includes('*');
-  state.saved = new Set(every ? state.tools.map((t) => t.name) : sel);
+  const activeNames = new Set(activeTools().map((t) => t.name));
+  // `granted` 才是实际下发的名字：`*` 的 read/write + 显式 exec，inactive 不在内。
+  state.wildcard = !!data.all || sel.includes('*');
+  const fallback = state.wildcard
+    ? activeTools().filter((t) => t.risk !== 'exec').map((t) => t.name)
+    : sel;
+  const granted = Array.isArray(data.granted) ? data.granted : fallback;
+  state.saved = new Set(granted.filter((name) => activeNames.has(name)));
   state.picked = new Set(state.saved);
+  state.toolsTouched = false;
   state.loaded = true;
-  $('railTools').textContent = String(state.tools.filter((t) => state.picked.has(t.name)).length);
+  $('railTools').textContent = String(state.picked.size);
   renderTools();
 }
 
@@ -983,15 +1323,28 @@ async function saveTools() {
   const btn = $('btnSave');
   btn.disabled = true;
   btn.textContent = '保存中…';
+  const wasWildcard = state.wildcard;
+  // 没手动增删时继续提交 ["*"]，未来新工具仍会自动包含；动过就只能落显式清单。
+  const useWildcard = state.wildcard && !state.toolsTouched;
+  const payload = useWildcard ? ['*'] : [...state.picked];
   try {
-    await bridge.apiPost('tools', { tools: [...state.picked] });
-    state.saved = new Set(state.picked);
-    updateSavebar();
-    toast(`已保存 ${state.picked.size} 个工具，已同步给 Coo`);
+    const data = unwrap(await bridge.apiPost('tools', { tools: payload })) || {};
+    const selected = Array.isArray(data.selected) ? data.selected : payload;
+    const granted = Array.isArray(data.granted) ? data.granted : [...state.picked];
+    const activeNames = new Set(activeTools().map((t) => t.name));
+    state.wildcard = selected.includes('*');
+    state.saved = new Set(granted.filter((name) => activeNames.has(name)));
+    state.picked = new Set(state.saved);
+    state.toolsTouched = false;
+    renderTools();
+    if (wasWildcard && !state.wildcard) {
+      toast(`已改为显式清单：${state.picked.size} 个工具；新装的工具不会自动加入`);
+    } else {
+      toast(`已保存 ${state.picked.size} 个工具，已同步给 Coo`);
+    }
     if (state.status) {
       state.status.toolCount = state.picked.size;
       $('mTools').textContent = state.picked.size;
-      $('railTools').textContent = state.picked.size || '—';
     }
   } catch (e) {
     toast('保存失败：' + (e.message || e), true);
@@ -1149,24 +1502,22 @@ async function saveGroups() {
     toast('至少添加一个群，或选择「全部群」', true);
     return;
   }
-  const payload = {
-    scope: state.groupScope,
-    groups: state.groupScope === 'allowlist' ? state.groups.slice() : [],
-    mode: state.groupMode,
-  };
+  // scope=all 时不带 groups：后端会保留原名单，切回 allowlist 还能看到（UI-005）。
+  const payload = { scope: state.groupScope, mode: state.groupMode };
+  if (state.groupScope === 'allowlist') payload.groups = state.groups.slice();
   const btn = $('btnGroupSave');
   btn.disabled = true;
   try {
-    await bridge.apiPost('groups', payload);
-    state.groups = payload.groups;
-    state.groupScope = payload.scope;
-    state.groupMode = payload.mode;
+    const data = unwrap(await bridge.apiPost('groups', payload)) || {};
+    state.groupScope = data.scope === 'all' || data.scope === 'allowlist' ? data.scope : payload.scope;
+    state.groups = Array.isArray(data.groups) ? data.groups.slice() : state.groups.slice();
+    state.groupMode = data.mode === 'all' || data.mode === 'mention' ? data.mode : payload.mode;
     state.groupsDirty = false;
     renderGroups();
     toast(
-      payload.scope === 'all'
-        ? '已设为全部群'
-        : `已保存 ${payload.groups.length} 个群 · ${payload.mode === 'all' ? '全部消息' : '仅被叫'}`,
+      state.groupScope === 'all'
+        ? `已设为全部群${state.groups.length ? ` · 保留 ${state.groups.length} 个名单` : ''}`
+        : `已保存 ${state.groups.length} 个群 · ${state.groupMode === 'all' ? '全部消息' : '仅被叫'}`,
     );
   } catch (e) {
     toast('保存失败：' + (e.message || e), true);
@@ -1397,6 +1748,7 @@ function initTools() {
 
   $('btnRevert').addEventListener('click', () => {
     state.picked = new Set(state.saved);
+    state.toolsTouched = false;
     renderTools();
     toast('已回到上次保存的选择');
   });
@@ -1414,6 +1766,7 @@ function initTools() {
         added += 1;
       }
     }
+    if (added) state.toolsTouched = true;
     renderTools();
     toast(added ? `已加入 ${added} 个只读工具，记得保存` : '只读工具已经都在里面了');
   });
@@ -1429,6 +1782,7 @@ function initTools() {
     }
     disarmClear();
     state.picked.clear();
+    state.toolsTouched = true;
     renderTools();
     toast('已清空，保存后生效');
   });
@@ -1652,6 +2006,9 @@ async function main() {
     return;
   }
 
+  // 宿主主题只做能力检测；没有就不碰用户/系统选择（UI-001）。
+  adoptHostTheme();
+
   document.querySelectorAll('.navitem').forEach((btn) => {
     btn.addEventListener('click', () => setPanel(btn.dataset.panel));
   });
@@ -1675,14 +2032,16 @@ async function main() {
   initMessages();
   initScope();
   initTools();
+  initToken();
   initVoice();
 
+  // 状态读取失败只影响状态卡，不该让整场没有实时流（UI-007）。
   try {
     await refresh();
-    connectStream().catch(() => {});
   } catch (e) {
     toast('读取状态失败：' + (e.message || e), true);
   }
+  connectStream();
 
   renderRows();
   renderToolLog();
@@ -1690,9 +2049,11 @@ async function main() {
   const wanted = new URLSearchParams(location.search).get('panel');
   if (wanted && PANELS[wanted]) setPanel(wanted);
 
+  // 20 秒轮询兜底：SSE 断了也能把状态和流水补回来。
   setInterval(() => {
-    if (state.panel === 'status') refresh().catch(() => {});
+    refresh().catch(() => {});
   }, 20000);
 }
 
+initTheme();
 main();

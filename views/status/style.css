@@ -39,6 +39,14 @@
   --danger: #b45950;
   --violet: #25765e;
 
+  /* 风险语义色：read=蓝绿、write=黄、exec=危险红（UI-010）。
+     --violet 只留给头像 hash 等非风险用途。 */
+  --risk-read: var(--ink-blue);
+  --risk-write: var(--warn);
+  --risk-exec: var(--danger);
+
+  color-scheme: light;
+
   --shadow-soft: color-mix(in srgb, var(--ink) 7%, transparent);
   --shadow-card: 0 1px 2px var(--shadow-soft);
   --shadow-lift: 0 6px 20px color-mix(in srgb, var(--ink) 9%, transparent);
@@ -75,6 +83,8 @@
   --warn: #d6ae6a;
   --danger: #e08a80;
   --violet: #8fd4b6;
+
+  color-scheme: dark;
   --shadow-soft: color-mix(in srgb, #000 34%, transparent);
   --shadow-card: 0 1px 2px var(--shadow-soft);
   --shadow-lift: 0 8px 24px color-mix(in srgb, #000 45%, transparent);
@@ -709,9 +719,9 @@ mark {
   border-radius: 2px;
   vertical-align: 1px;
 }
-.swatch.read { background: var(--ink-dim); }
-.swatch.write { background: var(--warn); }
-.swatch.exec { background: var(--danger); }
+.swatch.read { background: var(--risk-read); }
+.swatch.write { background: var(--risk-write); }
+.swatch.exec { background: var(--risk-exec); }
 
 /* ========================== 消息流水 ========================== */
 
@@ -740,6 +750,18 @@ mark {
   background: var(--ok);
   box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 40%, transparent);
   animation: pulse 2.2s ease-out infinite;
+}
+.liveband[data-live="retry"] .livelabel { color: var(--warn); }
+.liveband[data-live="retry"] .pulse {
+  background: var(--warn);
+  box-shadow: none;
+  animation: none;
+}
+.liveband[data-live="off"] .livelabel { color: var(--danger); }
+.liveband[data-live="off"] .pulse {
+  background: var(--danger);
+  box-shadow: none;
+  animation: none;
 }
 @keyframes pulse {
   0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 40%, transparent); }
@@ -957,9 +979,9 @@ mark {
   background: var(--sheet-3);
 }
 .mixbar span { display: block; height: 100%; transition: width .2s ease; }
-.m-read { background: var(--ink-blue); }
-.m-write { background: var(--warn); }
-.m-exec { background: var(--violet); }
+.m-read { background: var(--risk-read); }
+.m-write { background: var(--risk-write); }
+.m-exec { background: var(--risk-exec); }
 #mixLegend { margin-top: 9px; }
 
 .toolsbar {
@@ -1224,9 +1246,9 @@ mark {
   border-radius: 20px;
   font: 10px/1.2 var(--sans);
 }
-.riskchip.read { color: var(--ink-blue); border-color: color-mix(in srgb, var(--ink-blue) 34%, transparent); }
-.riskchip.write { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 34%, transparent); }
-.riskchip.exec { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 34%, transparent); }
+.riskchip.read { color: var(--risk-read); border-color: color-mix(in srgb, var(--risk-read) 34%, transparent); }
+.riskchip.write { color: var(--risk-write); border-color: color-mix(in srgb, var(--risk-write) 34%, transparent); }
+.riskchip.exec { color: var(--risk-exec); border-color: color-mix(in srgb, var(--risk-exec) 34%, transparent); }
 
 .offtag, .usedtag {
   padding: 2px 7px;
@@ -1568,6 +1590,7 @@ body {
 /* =========================== 状态与焦点 =========================== */
 
 .btn:focus-visible, .chip:focus-visible, .segbtn:focus-visible, .stat.link:focus-visible,
+.tokenbtn:focus-visible, .navitem:focus-visible,
 input:focus-visible, select:focus-visible, textarea:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
   outline-offset: 2px;
@@ -1641,6 +1664,67 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 .secfoot-v.bad { color: var(--warn); }
+
+/* token 三个真实按钮 + 一次性明文（UI-002/003） */
+.token-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.secitem .tokenbtn {
+  display: block;
+  width: 100%;
+  margin: 9px 0 5px;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  color: var(--ink);
+  font: 600 16px/1.25 var(--mono);
+  cursor: pointer;
+}
+.secitem .tokenbtn:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.secitem .tokenbtn.on { color: var(--ok); }
+.tokenonce {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--warn) 38%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--warn) 7%, transparent);
+}
+.tokenonce-k {
+  display: block;
+  margin-bottom: 7px;
+  font-size: 11.5px;
+  color: var(--warn);
+}
+.tokenonce-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tokenonce-row input { min-width: 0; }
+.tokenonce-hint {
+  display: block;
+  margin-top: 7px;
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+
+/* 工具页：`*` 授权时提示 exec 需显式加入（UI-006） */
+.toolnote {
+  margin: 10px 0 0;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--risk-exec) 30%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--risk-exec) 6%, transparent);
+  color: var(--ink-soft);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.wildtag { color: var(--risk-exec); }
+
 
 .settings { margin-top: 16px; padding: 0; }
 .settings > summary {

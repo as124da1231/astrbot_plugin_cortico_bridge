@@ -1,16 +1,22 @@
 ﻿<!DOCTYPE html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="description" content="Cortico 桥控制台：管理 Cortico 与 AstrBot 之间的群聊、私聊、工具和语音。" />
 <title>Cortico 桥 · 控制台</title>
 <script>
-  // Bridge 会在 ready 后设置 data-theme；先按 URL 上的 theme 参数铺一次，避免闪白。
+  // 主题要在第一帧就定下来，避免深色系统先闪白：
+  // URL ?theme= 优先，其次系统 prefers-color-scheme。app.js 之后只在没有宿主主题时接管。
   try {
     var t = new URLSearchParams(location.search).get('theme');
-    if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t;
-  } catch (e) {}
+    if (t !== 'dark' && t !== 'light') {
+      t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.dataset.theme = t;
+  } catch (e) {
+    document.documentElement.dataset.theme = 'light';
+  }
 </script>
 <link rel="stylesheet" href="./style.css" />
 </head>
@@ -153,7 +159,11 @@
               <h2>谁能连进来</h2>
               <div class="sh-desc">本机默认免密；离开本机必须带 token。浏览器页面会被 Origin 拦住。</div>
             </div>
-            <button class="btn sm" type="button" id="btnToken">生成 token</button>
+            <div class="token-actions">
+              <button class="btn sm" type="button" id="btnTokenCopy" title="把当前 token 复制到剪贴板">复制</button>
+              <button class="btn sm" type="button" id="btnTokenRotate" title="生成新 token（轮换）；当前 Coo 会断开，需要用新 token 重连">生成（轮换）</button>
+              <button class="btn sm danger" type="button" id="btnTokenClear" title="清除 token；跨机连接会失效">清除</button>
+            </div>
           </div>
           <div class="secgrid">
             <div class="secitem">
@@ -163,9 +173,17 @@
             </div>
             <div class="secitem">
               <div class="k">访问 token</div>
-              <div class="v" id="kToken">—</div>
-              <small id="kTokenNote">—</small>
+              <button class="v tokenbtn" type="button" id="kToken" title="点击复制 token" aria-describedby="kTokenNote">—</button>
+              <small id="kTokenNote" aria-live="polite">—</small>
             </div>
+          </div>
+          <div class="tokenonce" id="tokenOnceBox" hidden>
+            <label class="tokenonce-k" for="tokenOnce">只显示这一次，复制给 Coo</label>
+            <div class="tokenonce-row">
+              <input class="kvselect grow mono" id="tokenOnce" type="text" readonly autocomplete="new-password" spellcheck="false" />
+              <button class="btn sm" type="button" id="btnTokenOnceCopy">复制</button>
+            </div>
+            <small class="tokenonce-hint" id="tokenOnceHint">替换 Coo 里保存的旧 token，否则它会一直重连失败。</small>
           </div>
           <div class="secfoot">
             <span class="secfoot-k">本次运行已拒绝</span>
@@ -188,9 +206,9 @@
                 <button class="chip" type="button" data-msg="at" aria-pressed="false">叫到</button>
               </div>
             </div>
-            <div class="liveband">
+            <div class="liveband" id="liveband" data-live="retry">
               <span class="pulse" aria-hidden="true"></span>
-              <span class="livelabel">实时</span>
+              <span class="livelabel" id="liveLabel" aria-live="polite">连接中</span>
               <span class="grow"></span>
               <span class="mono dim count-pill" id="msgCount">0 条</span>
             </div>
@@ -272,7 +290,7 @@
             <div class="policy-label" id="groupScopeLabel">范围</div>
             <div class="seg" id="groupScope" role="group" aria-labelledby="groupScopeLabel">
               <button class="segbtn" type="button" data-scope="all" aria-pressed="false">全部群</button>
-              <button class="segbtn" type="button" data-scope="list" aria-pressed="true">指定群</button>
+              <button class="segbtn" type="button" data-scope="allowlist" aria-pressed="true">指定群</button>
             </div>
             <p class="policy-hint" id="groupHint" aria-live="polite"></p>
             <div class="policy-label" id="groupModeLabel">消息范围</div>
@@ -367,6 +385,7 @@
               <span class="m-read" id="mixRead"></span><span class="m-write" id="mixWrite"></span><span class="m-exec" id="mixExec"></span>
             </div>
             <div class="chips" id="mixLegend"></div>
+            <p class="toolnote" id="toolNote" hidden></p>
           </div>
         </section>
 
