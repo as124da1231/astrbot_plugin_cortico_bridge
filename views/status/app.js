@@ -225,7 +225,26 @@ function setPill(node, text, on) {
   node.appendChild(pill);
 }
 
+async function tokenAction() {
+  const status = state.status || {};
+  const token = status.token || '';
+  try {
+    if (token) {
+      await copyText(token);
+      return;
+    }
+    const data = unwrap(await bridge.apiPost('token', { action: 'generate' }));
+    if (data && data.token) {
+      await copyText(data.token);
+      await refresh();
+    }
+  } catch (err) {
+    toast('token 操作失败：' + (err && err.message ? err.message : err), true);
+  }
+}
+
 function applyStatus(s) {
+  s = { ...(state.status || {}), ...s };
   state.status = s;
 
   const cls = lampClass(s);
@@ -361,21 +380,48 @@ function applyStatus(s) {
     : loopback
       ? '本机免密：只有本机能连；点击生成 token'
       : '非回环监听必须设置 token；点击生成';
-  $('kToken').onclick = async () => {
-    try {
-      if (token) {
-        await copyText(token);
-        return;
-      }
-      const data = unwrap(await bridge.apiPost('token', { action: 'generate' }));
-      if (data && data.token) {
-        await copyText(data.token);
-        await refresh();
-      }
-    } catch (err) {
-      console.warn('token 操作失败', err);
-    }
-  };
+  $('kToken').onclick = tokenAction;
+
+  const tokenNote = $('kTokenNote');
+  if (tokenNote) {
+    tokenNote.textContent = token
+      ? loopback
+        ? '只在本机使用；浏览器已被 Origin 拦住'
+        : '非回环监听，必须与 Coo 一致'
+      : loopback
+        ? '本机免密；生成后可以跨机使用'
+        : '非回环必须设置 token';
+  }
+
+  const btnToken = $('btnToken');
+  if (btnToken) {
+    btnToken.textContent = token ? '复制 token' : '生成 token';
+    btnToken.onclick = tokenAction;
+  }
+
+  const listen = $('kListen');
+  if (listen) listen.textContent = `${s.host || '—'}:${s.port || '—'}`;
+  const listenNote = $('kListenNote');
+  if (listenNote) {
+    listenNote.textContent = s.connected
+      ? 'Cortico 已连接'
+      : s.listening
+        ? '等待连接'
+        : s.listenError || '未监听';
+  }
+  const origin = $('kOriginRefused');
+  if (origin) origin.textContent = String(s.originRefused || 0);
+  const query = $('kQueryTokenRefused');
+  if (query) query.textContent = String(s.queryTokenRefused || 0);
+
+  const settings = document.querySelector('.settings');
+  if (settings && !settings.__bound) {
+    settings.__bound = true;
+    settings.addEventListener('toggle', () => {
+      const hint = $('settingsHint');
+      if (hint) hint.textContent = settings.open ? '收起' : '展开';
+    });
+  }
 
   const admins = s.admins || [];
   $('kOwner').textContent = admins.length ? admins.join('、') : '未配置';
@@ -547,6 +593,24 @@ function applySnapshot(snap) {
     $('mPushed').textContent = st.pushed || 0;
     $('mSent').textContent = st.sent || 0;
     $('mFailed').textContent = st.failed || 0;
+  }
+  if (typeof snap.originRefused === 'number') {
+    const node = $('kOriginRefused');
+    if (node) node.textContent = String(snap.originRefused);
+  }
+  if (typeof snap.queryTokenRefused === 'number') {
+    const node = $('kQueryTokenRefused');
+    if (node) node.textContent = String(snap.queryTokenRefused);
+  }
+  if (typeof snap.listening === 'boolean') {
+    const note = $('kListenNote');
+    if (note) {
+      note.textContent = snap.connected
+        ? 'Cortico 已连接'
+        : snap.listening
+          ? '等待连接'
+          : snap.listenError || '未监听';
+    }
   }
   if (typeof snap.connected === 'boolean') {
     const cls = lampClass(snap);

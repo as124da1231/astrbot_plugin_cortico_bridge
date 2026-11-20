@@ -126,23 +126,56 @@
             <article class="stat">
               <div class="k">推送</div>
               <div class="v mono" id="mPushed">0</div>
-              <small>PUSHED IN</small>
+              <small>收到并交给 Coo</small>
             </article>
             <article class="stat">
               <div class="k">发出</div>
               <div class="v mono" id="mSent">0</div>
-              <small>SENT OUT</small>
+              <small>Coo 发回 QQ</small>
             </article>
             <article class="stat">
               <div class="k">失败</div>
               <div class="v mono" id="mFailed">0</div>
-              <small>FAILED</small>
+              <small>发送没有成功</small>
             </article>
             <button class="stat link accent" type="button" id="metricTools" title="去工具设置">
               <div class="k">已授权</div>
               <div class="v mono" id="mTools">0</div>
-              <small>TOOLS ENABLED</small>
+              <small>可调用工具</small>
             </button>
+          </div>
+        </section>
+
+        <section class="sheet security">
+          <div class="sheethead">
+            <div class="sheethead-text">
+              <div class="sh-kicker">接入安全</div>
+              <h2>谁能连进来</h2>
+              <div class="sh-desc">本机默认免密；离开本机必须带 token。浏览器页面会被 Origin 拦住。</div>
+            </div>
+            <button class="btn sm" type="button" id="btnToken">生成 token</button>
+          </div>
+          <div class="secgrid">
+            <div class="secitem">
+              <div class="k">监听地址</div>
+              <div class="v mono" id="kListen">—</div>
+              <small id="kListenNote">—</small>
+            </div>
+            <div class="secitem">
+              <div class="k">访问 token</div>
+              <div class="v" id="kToken">—</div>
+              <small id="kTokenNote">—</small>
+            </div>
+            <div class="secitem">
+              <div class="k">浏览器来源拒绝</div>
+              <div class="v mono" id="kOriginRefused">0</div>
+              <small>带 Origin 的 WebSocket</small>
+            </div>
+            <div class="secitem">
+              <div class="k">URL token 拒绝</div>
+              <div class="v mono" id="kQueryTokenRefused">0</div>
+              <small>凭据不能进 URL</small>
+            </div>
           </div>
         </section>
 
@@ -150,7 +183,7 @@
           <section class="sheet msgcard">
             <div class="sheethead">
               <div class="sheethead-text">
-                <div class="sh-kicker">01—A · 消息流</div>
+                <div class="sh-kicker">消息流</div>
                 <h2>会话流水</h2>
                 <div class="sh-desc">消息从 QQ 进来、从 Coo 出去，都在这里。</div>
               </div>
@@ -181,7 +214,7 @@
             <section class="sheet">
               <div class="sheethead">
                 <div class="sheethead-text">
-                  <div class="sh-kicker">01—B · 工具回执</div>
+                  <div class="sh-kicker">工具回执</div>
                   <h2>最近调用</h2>
                   <div class="sh-desc">Coo 用 AstrBot 的手做过什么。</div>
                 </div>
@@ -189,35 +222,34 @@
               <div class="tlog" id="toolLog"></div>
               <div class="compare placeholder left" id="toolLogEmpty">还没用过工具。</div>
             </section>
-
-            <section class="sheet">
-              <div class="sheethead">
-                <div class="sheethead-text">
-                  <div class="sh-kicker">01—C · 只读</div>
-                  <h2>生效中的设置</h2>
-                  <div class="sh-desc">改值请去插件「配置」页；端口、监听地址和 token 改完点右上角「重开监听」，端口变了还要同步 World 的桥地址。</div>
-                </div>
-              </div>
-              <table class="kvtable">
-                <tbody>
-                  <tr><td>最近一条</td><td id="chLast">—</td></tr>
-                  <tr><td>建议出口</td><td id="chReply" title="QQ 消息用 astrbot_send_message；桌宠事件用 pet_say。">—</td></tr>
-                  <tr><td>接管对话</td><td id="kEnabled">—</td></tr>
-                  <tr><td>B 模式</td><td id="kObserve">—</td></tr>
-                  <tr><td>B 模式群</td><td id="kGroups">—</td></tr>
-                  <tr><td>称呼</td><td id="kAliases">—</td></tr>
-                  <tr><td>每分钟上限</td><td id="kMax">—</td></tr>
-                  <tr><td>图片</td><td id="kImage">—</td></tr>
-                  <tr><td>语音输入</td><td id="kVoiceIn">—</td></tr>
-                  <tr><td>语音输出</td><td id="kVoiceOut">—</td></tr>
-                  <tr><td>Token</td><td id="kToken">—</td></tr>
-                  <tr><td>QQ 上的主人</td><td id="kOwner">—</td></tr>
-                  <tr><td>已登记会话</td><td id="kConvs">—</td></tr>
-                </tbody>
-              </table>
-            </section>
           </div>
         </div>
+
+        <details class="sheet settings">
+          <summary>
+            <div>
+              <div class="sh-kicker">当前生效</div>
+              <h2>设置摘要</h2>
+            </div>
+            <span class="dim mono" id="settingsHint">展开</span>
+          </summary>
+          <table class="kvtable">
+            <tbody>
+              <tr><td>最近一条</td><td id="chLast">—</td></tr>
+              <tr><td>建议出口</td><td id="chReply" title="QQ 消息用 astrbot_send_message；桌宠事件用 pet_say。">—</td></tr>
+              <tr><td>接管对话</td><td id="kEnabled">—</td></tr>
+              <tr><td>B 模式</td><td id="kObserve">—</td></tr>
+              <tr><td>B 模式群</td><td id="kGroups">—</td></tr>
+              <tr><td>称呼</td><td id="kAliases">—</td></tr>
+              <tr><td>每分钟上限</td><td id="kMax">—</td></tr>
+              <tr><td>图片</td><td id="kImage">—</td></tr>
+              <tr><td>语音输入</td><td id="kVoiceIn">—</td></tr>
+              <tr><td>语音输出</td><td id="kVoiceOut">—</td></tr>
+              <tr><td>QQ 上的主人</td><td id="kOwner">—</td></tr>
+              <tr><td>已登记会话</td><td id="kConvs">—</td></tr>
+            </tbody>
+          </table>
+        </details>
       </div>
 
       <!-- ============ 群聊 ============ -->
