@@ -53,6 +53,13 @@ QQ → OneBot → AstrBot（现有插件照常工作）
 
 AstrBot 自己的模型不参与这些轮次；桥没连上时插件什么都不做，消息照常交给 AstrBot。
 
+## 文档
+
+- [从零接入教程](docs/tutorial.md)
+- [架构与边界](docs/architecture.md)
+- [配置、错误码与接口](docs/reference.md)
+- [接入安全模型](docs/security.md)
+
 ## 安装
 
 1. 在 AstrBot 插件市场搜索「Cortico 桥」，或把本仓库放进 `data/plugins/`。

@@ -1,0 +1,335 @@
+# 架构：桥、World 与边界
+
+这份文档说明「消息为什么这样走」，不重复安装步骤。
+
+---
+
+## 1. 两个包
+
+```text
+astrbot_plugin_cortico_bridge   AstrBot 侧，Python
+cortico-world-astrbot           Coo 侧，TypeScript
+```
+
+插件是**服务端**，World 是**客户端**。  
+桥只负责连接、收发和策略；人格、记忆、要不要说话由 Coo 决定。
+
+---
+
+## 2. 一条消息的完整链路
+
+```text
+QQ 消息
+  → AstrBot 平台适配器
+  → 插件事件层（最后执行）
+      指令 / 自轮询插件先跑
+      通知类直接推
+      普通消息只做标记
+  → LLM 阶段
+      插件钩子（第一个执行）
+      推帧 + stop
+  → WebSocket
+  → World driver
+  → world.onBridgeMessage
+  → pushEvent
+  → 模型
+  → astrbot_send_message / astrbot_call_tool
+  → WebSocket
+  → 插件发送/工具
+  → AstrBot send_message(umo) / 工具执行
+  → QQ
+```
+
+---
+
+## 3. 三个钩子
+
+| 钩子 | 优先级 | 作用 |
+|---|---|---|
+| `on_astrbot_loaded` | 默认 | 所有插件加载完后重推工具清单 |
+| `event_message_type(ALL)` | `-sys.maxsize` | 最后执行；指令判断、通知、标记 |
+| `on_llm_request` | `sys.maxsize` | 第一个执行；推 Coo + stop |
+
+### 事件层
+
+```text
+不是指令、不是通知、私聊或群 all 模式
+  → event.set_extra("_cortico_llm_owned", "private" / "group")
+  → 不推、不 stop
+```
+
+### LLM 层
+
+```text
+没有 _cortico_llm_owned → 不是 Coo 的轮次，放行
+是指令                   → 交给 AstrBot
+有标记                   → 推帧 + stop
+```
+
+`stop_event()` 之后，后面的 `on_llm_request` 注入全部跳过。  
+只在 Coo 接管的轮次生效，其他插件的 LLM 轮次不受影响。
+
+---
+
+## 4. 指令怎么切
+
+三条规则：
+
+```text
+1. wake_prefix 前缀（默认 /）
+2. 原始消息组件里的前缀（唤醒检查会剥掉 message_str 的前缀）
+3. 已注册指令名（无前缀私聊指令）
+```
+
+第三条只在 `is_at_or_wake_command` 为真时生效，避免群聊误判。  
+指令名从 AstrBot 的 handler 注册表读取，缓存 30 秒。
+
+执行顺序：
+
+```text
+wakepro / 注册指令 / 自轮询插件
+  → 我们的事件层（最后）
+  → LLM 层
+```
+
+谁先 stop，谁赢；没人 stop，才归 Coo。
+
+---
+
+## 5. UMO
+
+### 格式
+
+```text
+platform:MessageType:session_id
+```
+
+例：
+
+```text
+default:GroupMessage:123456789
+default:FriendMessage:100000001
+```
+
+规则：
+
+```text
+只切前两个冒号，session 里允许冒号
+平台/类型/会话为空 → 非法
+最大 512
+```
+
+### 注册表 v2
+
+```json
+{
+  "version": 2,
+  "umos": {
+    "default:GroupMessage:123456789": {
+      "umo": "default:GroupMessage:123456789",
+      "platform": "default",
+      "kind": "group",
+      "id": "123456789",
+      "name": "",
+      "firstSeen": 0,
+      "lastSeen": 0,
+      "lastMessageId": "",
+      "lastSender": ""
+    }
+  },
+  "legacy": {
+    "default|group|123456789": "default:GroupMessage:123456789"
+  }
+}
+```
+
+```text
+上限 500
+30 天 TTL
+原子写 + 权限 600
+旧 v1 迁移时备份 umos.v1.json
+```
+
+### 单通道
+
+发送只认 `umo`：
+
+```text
+missing_umo    这一帧没有 umo
+invalid_umo    格式不对
+unknown_umo    桥没见过或已过期
+```
+
+没有「按 conv 猜」的回退。旧 World 必须一起升级。
+
+---
+
+## 6. 安全
+
+```text
+默认监听 127.0.0.1
+回环 + 空 token   允许，不校验（本机免密）
+非回环 + 空 token 拒绝绑定
+回环 + 有 token   校验
+非回环 + token    校验
+```
+
+来源：
+
+```text
+带 Origin 的 WebSocket → close 4403
+URL 带 token/access_token → close 4401
+```
+
+状态门：
+
+```text
+enabled=false
+  → 不开放监听
+  → 发送返回 door_closed
+  → 工具调用拒绝
+```
+
+token 生成：
+
+```text
+状态页点「生成 token」
+→ secrets.token_urlsafe(32)
+→ 写回配置
+→ 重开监听
+→ 复制给 Coo
+```
+
+日志只记录 token 位数，不打印全文。
+
+---
+
+## 7. 工具链
+
+```text
+模型调 astrbot_call_tool(name, args)
+  → World driver.callTool(name, args, turn, actor)
+  → 帧 {t:'tool', rid, name, args, turn}
+  → 插件 _on_tool_call
+      1. enabled
+      2. turn 在 _turns 里，且不超过 600 秒
+      3. tools_allow
+      4. tool.call(ContextWrapper(触发消息的 event))
+  → tool-ack
+  → 模型
+```
+
+边界：
+
+```text
+桌宠/控制台轮次没有 turnMsgId → 不发
+turn 过期 → unknown_session
+工具不在白名单 → 拒绝
+管理员工具仍受 AstrBot 权限层约束
+```
+
+---
+
+## 8. Coo 侧边界
+
+World 维护：
+
+```text
+turnChannel      'qq' / undefined
+turnMixed        QQ + 桌宠/其他渠道混在一批
+turnMultiConv    同一批有多个人话 QQ 会话
+turnConv         当前 QQ 会话
+turnMsgId        当前人话消息 id
+```
+
+规则：
+
+```text
+只有 QQ 消息         → QQ 出口开
+只有桌宠/控制台      → QQ 出口关
+QQ + 桌宠混合        → QQ 出口关
+多个人话 QQ 会话     → 隐式发送拒绝，要求 conv_id / reply_to
+```
+
+`pickConv` 顺序：
+
+```text
+conv_id → reply_to 查 knownMsgConv → 多会话拒绝 → turnConv
+```
+
+发送不回退 `lastConv`；历史查询允许 `lastConv`。
+
+`qqTurnActive()` 还有 2 分钟兜底，防止 `onTurnEnded` 没来。
+
+---
+
+## 9. 和内置 qq 的对照
+
+| 维度 | 内置 qq | 我们 |
+|---|---|---|
+| 多会话 | 永远显式 `to` | 多会话才显式 |
+| 单会话 | 也要显式 | 默认当前会话 |
+| 主动发送 | draft + confirm | 直接发 |
+| 草稿生命周期 | 每轮作废 | 无草稿 |
+| 桌面轮次发 QQ | 允许（显式 + 确认） | 禁止 |
+| 目标检查 | World watch list | 插件 UMO 注册表 + 策略 |
+
+共同点：**不猜**。  
+不同点：**是否每一步都要说清、要不要确认**。
+
+---
+
+## 10. 已知交互
+
+### 唤醒插件（wakepro）
+
+`astrbot_plugin_wakepro` 的优先级是 99999，先于我们。  
+它判「不唤醒」时直接 `stop_event()`，Coo 收不到；这是它的职责，不是桥的问题。
+
+### `/llm off`
+
+会话级静音，AstrBot 和 Coo 一起停。  
+指令不受影响；通知仍作为上下文进入，但不触发回复。
+
+### 其他插件的 LLM 注入
+
+Coo 接管的轮次里会被 `stop_event()` 跳过：
+
+```text
+bilibili 跨端记忆
+splitter 颜文字提示
+live_stream_companion 的直播上下文 / Live2D 标签
+内置群聊上下文
+```
+
+需要这些信息时，走工具让 Coo 主动取，不做自动注入。
+
+---
+
+## 11. 测试与验证
+
+```bash
+# 插件
+python -m unittest discover -s tests
+
+# World
+pnpm typecheck
+pnpm test
+```
+
+当前：
+
+```text
+插件 17/17
+World 92/92
+```
+
+实机验证：
+
+```text
+私聊来回
+群 @ 来回
+工具调用
+桌宠轮次不发 QQ
+多会话轮次显式指定
+```
