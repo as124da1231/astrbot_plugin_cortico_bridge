@@ -181,6 +181,21 @@ unknown_umo    桥没见过或已过期
 URL 带 token/access_token → close 4401
 ```
 
+凭据：
+
+```text
+Authorization: Bearer <token>   首选
+hello.token                     兼容保留
+两者都有时必须一致
+```
+
+版本：
+
+```text
+hello.v 必须是 1
+缺省按 1，其他值 close 4004
+```
+
 状态门：
 
 ```text

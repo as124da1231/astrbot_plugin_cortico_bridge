@@ -229,11 +229,40 @@ class UmoContractTests(unittest.TestCase):
 
 
 class SecurityTests(unittest.IsolatedAsyncioTestCase):
-    async def _server(self, host: str):
+    async def _server(self, host: str, token: str = ""):
         async def on_send(*_args, **_kwargs):
             return True, "", False, False
 
-        return bridge.BridgeServer(host=host, port=0, token="", on_send=on_send)
+        return bridge.BridgeServer(host=host, port=0, token=token, on_send=on_send)
+
+    class _Ws:
+        def __init__(self):
+            self.closed: list[tuple[int, str]] = []
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            self.closed.append((code, reason))
+
+    class _FakeWs(_Ws):
+        def __init__(self, frames, headers=None, path: str = "/"):
+            super().__init__()
+            self._frames = list(frames)
+            self.request = types.SimpleNamespace(headers=headers or {}, path=path)
+            self.remote_address = ("127.0.0.1", 4321)
+            self.sent: list[str] = []
+
+        async def recv(self):
+            return self._frames.pop(0)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._frames:
+                return self._frames.pop(0)
+            raise StopAsyncIteration
+
+        async def send(self, data) -> None:
+            self.sent.append(data)
 
     async def test_non_loopback_without_token_refuses_to_bind(self):
         server = await self._server("0.0.0.0")
@@ -271,6 +300,88 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
     def test_native_client_passes(self):
         self.assertEqual(bridge.connection_refusal({}, "/"), "")
         self.assertEqual(bridge.connection_refusal(None, "/ws"), "")
+
+    def test_bearer_token_is_read_from_header(self):
+        self.assertEqual(
+            bridge.bearer_token({"authorization": "Bearer abc123"}), "abc123"
+        )
+        self.assertEqual(
+            bridge.bearer_token({"Authorization": "bearer   spaced"}), "spaced"
+        )
+        self.assertEqual(bridge.bearer_token({"authorization": "Basic abc"}), "")
+        self.assertEqual(bridge.bearer_token({"authorization": ""}), "")
+        self.assertEqual(bridge.bearer_token(None), "")
+
+    def test_hello_version(self):
+        self.assertEqual(bridge.hello_version({}), 1)
+        self.assertEqual(bridge.hello_version({"v": 1}), 1)
+        self.assertEqual(bridge.hello_version({"v": "1"}), 1)
+        self.assertEqual(bridge.hello_version({"v": 2}), 2)
+        self.assertEqual(bridge.hello_version({"v": True}), 0)
+        self.assertEqual(bridge.hello_version({"v": "x"}), 0)
+        self.assertEqual(bridge.hello_version({"v": None}), 0)
+
+    async def test_authorize_prefers_header(self):
+        server = await self._server("127.0.0.1", token="s3cret")
+        ws = self._Ws()
+        ok = await server._authorize(
+            ws, {"authorization": "Bearer s3cret"}, {"t": "hello"}, "1.2.3.4:1"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(ws.closed, [])
+
+    async def test_authorize_rejects_header_frame_mismatch(self):
+        server = await self._server("127.0.0.1", token="s3cret")
+        ws = self._Ws()
+        ok = await server._authorize(
+            ws,
+            {"authorization": "Bearer s3cret"},
+            {"t": "hello", "token": "other"},
+            "1.2.3.4:1",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(ws.closed, [(4003, "bad token")])
+
+    async def test_authorize_accepts_frame_token_for_compat(self):
+        server = await self._server("127.0.0.1", token="s3cret")
+        ws = self._Ws()
+        ok = await server._authorize(
+            ws, None, {"t": "hello", "token": "s3cret"}, "1.2.3.4:1"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(ws.closed, [])
+
+    async def test_authorize_rejects_wrong_token(self):
+        server = await self._server("127.0.0.1", token="s3cret")
+        ws = self._Ws()
+        ok = await server._authorize(
+            ws, {"authorization": "Bearer nope"}, {"t": "hello"}, "1.2.3.4:1"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(ws.closed, [(4003, "bad token")])
+        self.assertEqual(server.bad_token_refused, 1)
+
+    async def test_unknown_protocol_version_is_refused(self):
+        server = await self._server("127.0.0.1")
+        ws = self._FakeWs([json.dumps({"t": "hello", "v": 99})])
+        await server._handle_client(ws)
+        self.assertEqual(ws.closed, [(4004, "unsupported protocol version")])
+        self.assertEqual(server.version_refused, 1)
+
+    async def test_header_token_handshake_registers_client(self):
+        server = await self._server("127.0.0.1", token="s3cret")
+
+        async def no_refresh():
+            return None
+
+        server._refresh_ready_later = no_refresh
+        ws = self._FakeWs(
+            [json.dumps({"t": "hello", "v": 1, "token": "s3cret"})],
+            headers={"authorization": "Bearer s3cret"},
+        )
+        await server._handle_client(ws)
+        self.assertEqual(ws.closed, [])
+        self.assertTrue(any('"ready"' in frame for frame in ws.sent))
 
     def test_command_prefix_is_detected(self):
         self.assertTrue(bridge.looks_like_command("/help", ["/"]))

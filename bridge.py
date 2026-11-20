@@ -92,6 +92,29 @@ def connection_refusal(headers, path: str) -> str:
     return ""
 
 
+def bearer_token(headers) -> str:
+    """从 Authorization 头里取 Bearer 凭据；没有或格式不对返回空。"""
+    raw = _header(headers, "authorization").strip()
+    if not raw:
+        return ""
+    parts = raw.split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1].strip()
+    return ""
+
+
+def hello_version(frame: dict) -> int:
+    """hello 里声明的协议版本；缺省按 1 处理，非法值返回 0。"""
+    raw = frame.get("v", 1)
+    if isinstance(raw, bool):
+        return 0
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.strip().isdigit():
+        return int(raw.strip())
+    return 0
+
+
 def is_loopback_host(host: str) -> bool:
     return str(host).strip().lower() in ("127.0.0.1", "localhost", "::1", "[::1]")
 
@@ -124,6 +147,9 @@ MAX_TOOL_RESULT = 4000
 
 # 握手超时：连上后必须在这么久内发出合法的 hello，否则断开。
 HELLO_TIMEOUT = 10.0
+
+# 桥协议版本：World 在 hello 里声明，插件不认就断开，避免版本错配后「能连上但行为不对」。
+PROTOCOL_VERSION = 1
 
 # 同一个会话的发送排队上限：前面的语音/大图还没发完时，后面的别无限等。
 SEND_QUEUE_TIMEOUT = 5.0
@@ -191,6 +217,9 @@ class BridgeServer:
         # 来源门计数：带 Origin 的浏览器连接、URL 里带 token 的连接，各自记一笔。
         self.origin_refused = 0
         self.query_token_refused = 0
+        # 握手门计数：token 不对、协议版本不认。
+        self.bad_token_refused = 0
+        self.version_refused = 0
         # 对端在 hello 里自报的能力；目前只有「能不能收图」。
         self.capabilities: dict = {}
         # 桥自报的身份；第一条 QQ 事件到达后由上层补上。
@@ -380,6 +409,37 @@ class BridgeServer:
                 f"Cortico Bridge: {address} 把 token 放在 URL 查询里，已拒绝（凭据不能进 URL）"
             )
 
+    async def _authorize(self, websocket, headers, frame: dict, address: str) -> bool:
+        """校验 hello 的凭据；不通过就断开并返回 False。
+
+        凭据优先认 `Authorization: Bearer`（和 OneBot v11 一致，凭据不进帧）。
+        帧内 `token` 保留一个版本的兼容期，给还没升级的 World 用。
+        """
+        header_token = bearer_token(headers)
+        frame_token = _s(frame.get("token")).strip()
+        if header_token and frame_token and not hmac.compare_digest(
+            header_token, frame_token
+        ):
+            self.bad_token_refused += 1
+            logger.warning(
+                f"Cortico Bridge: {address} Header 与握手帧里的 token 不一致，已断开"
+            )
+            with contextlib.suppress(Exception):
+                await websocket.close(code=4003, reason="bad token")
+            return False
+        presented = header_token or frame_token
+        if not presented or not hmac.compare_digest(presented, self.token):
+            self.bad_token_refused += 1
+            logger.warning(f"Cortico Bridge: {address} token 不匹配，已断开")
+            with contextlib.suppress(Exception):
+                await websocket.close(code=4003, reason="bad token")
+            return False
+        if not header_token:
+            logger.info(
+                f"Cortico Bridge: {address} 仍在使用帧内 token；升级 World 后可只走 Authorization 头"
+            )
+        return True
+
     async def _handle_client(self, websocket) -> None:
         remote = getattr(websocket, "remote_address", None)
         if isinstance(remote, (tuple, list)) and remote:
@@ -388,8 +448,9 @@ class BridgeServer:
             address = _s(remote)
 
         request = getattr(websocket, "request", None)
+        headers = getattr(request, "headers", None)
         refusal = connection_refusal(
-            getattr(request, "headers", None),
+            headers,
             _s(getattr(request, "path", "")),
         )
         if refusal:
@@ -433,12 +494,18 @@ class BridgeServer:
                 with contextlib.suppress(Exception):
                     await websocket.close(code=4002, reason="hello required")
                 return
-            if self.token and not hmac.compare_digest(
-                _s(first.get("token")), self.token
-            ):
-                logger.warning(f"Cortico Bridge: {address} token 不匹配，已断开")
+            if self.token and not await self._authorize(websocket, headers, first, address):
+                return
+
+            version = hello_version(first)
+            if version != PROTOCOL_VERSION:
+                self.version_refused += 1
+                logger.warning(
+                    f"Cortico Bridge: {address} 协议版本不认（收到 {_s(first.get('v')) or '缺省'}，"
+                    f"本插件支持 {PROTOCOL_VERSION}），已断开"
+                )
                 with contextlib.suppress(Exception):
-                    await websocket.close(code=4003, reason="bad token")
+                    await websocket.close(code=4004, reason="unsupported protocol version")
                 return
 
             caps = first.get("capabilities")

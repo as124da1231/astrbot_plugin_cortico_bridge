@@ -95,6 +95,8 @@ conversations      最近会话（UMO）
 recent             最近消息流水
 originRefused      带 Origin 被拒次数
 queryTokenRefused  URL 带 token 被拒次数
+badTokenRefused    token 不匹配被拒次数
+versionRefused     协议版本不匹配被拒次数
 ```
 
 ---
@@ -141,6 +143,27 @@ queryTokenRefused  URL 带 token 被拒次数
 umos.json      600
 umos.v1.json   600，迁移时只备份一次
 ```
+
+---
+
+## 5.1 握手与关闭码
+
+```text
+第一帧必须是 hello，10 秒超时
+token 优先读 Authorization: Bearer，帧内 token 兼容
+hello.v 必须是 1
+```
+
+| code | 含义 |
+|---|---|
+| 4001 | 握手超时 |
+| 4002 | 第一帧不是 hello |
+| 4003 | token 不匹配 |
+| 4004 | 协议版本不支持 |
+| 4401 | URL 里带了 token |
+| 4403 | 带了 Origin |
+
+World 收到这些码会记一条「桥拒绝了这次连接」，并按退避继续重连。
 
 ---
 

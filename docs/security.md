@@ -1,6 +1,6 @@
 # 桥的接入安全模型
 
-状态：已实施并部署到测试服（2026-11-20）。
+状态：安全升级已部署到测试服（2026-11-20）；Header 凭据与协议版本门已本地完成，待测试服 SSH 恢复后部署。
 
 ## 目标
 
@@ -22,7 +22,41 @@
 | 非回环 + 有 token | 校验 token |
 | 带 `Origin` 的连接 | 一律拒绝，close 4403 |
 | URL 携带 `token` / `access_token` | 一律拒绝，close 4401 |
+| `hello` 的 `v` 不是 1 | 拒绝，close 4004 |
+| `Authorization` 与帧内 token 不一致 | 拒绝，close 4003 |
 | `enabled=false` | 不开放监听；发送与工具调用返回 `door_closed` |
+
+## 凭据通道
+
+```text
+Authorization: Bearer <token>     首选，凭据不进帧
+hello.token                       兼容保留，升级期继续接受
+```
+
+两者同时出现时必须一致；只给帧内 token 会记一条提示日志。  
+等 World 都升级完，可以把帧内 token 去掉。
+
+## 协议版本
+
+```text
+World 在 hello 里发 v: 1
+插件只接受 1
+缺省按 1 处理；其他值 close 4004
+```
+
+版本不匹配时宁可断开，也不让「能连上但行为不对」的错配继续跑。  
+将来升到 v2 时，旧 World 会收到明确的 4004，而不是静默发错消息。
+
+## 关闭码
+
+| code | 含义 |
+|---|---|
+| 4001 | 握手超时（10 秒内没发 hello） |
+| 4002 | 第一帧不是 hello |
+| 4003 | token 不匹配 |
+| 4004 | 协议版本不支持 |
+| 4401 | URL 里带了 token |
+| 4403 | 带了 Origin（浏览器） |
 
 ## token 生命周期
 
@@ -59,5 +93,7 @@
 非回环 + 空 token    → 拒绝绑定
 非回环 + token       → 允许
 ?token=              → close 4401
+Header + 帧内 token 不一致 → close 4003
+hello.v=2            → close 4004
 测试服（0.0.0.0 + 48 位 token） → connected=True
 ```
