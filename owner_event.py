@@ -25,6 +25,7 @@ def build_owner_event(context, platform_id: str, owner_id: str, self_id: str = "
         PlatformMetadata = None  # type: ignore[assignment]
 
     meta = None
+    inst = None
     get_inst = getattr(context, "get_platform_inst", None)
     if callable(get_inst):
         try:
@@ -32,6 +33,7 @@ def build_owner_event(context, platform_id: str, owner_id: str, self_id: str = "
             if inst is not None and hasattr(inst, "meta"):
                 meta = inst.meta()
         except Exception:  # noqa: BLE001 - 拿不到实例就退到最小元数据
+            inst = None
             meta = None
     if meta is None:
         if PlatformMetadata is None:
@@ -64,6 +66,11 @@ def build_owner_event(context, platform_id: str, owner_id: str, self_id: str = "
             await context.send_message(self.unified_msg_origin, chain)
 
     event = CooOwnerEvent("", msg, meta, owner_id)
+    # 工具插件常直接走 event.bot（aiocqhttp 的 CQHttp 客户端）。
+    # 合成事件没有平台回调，这里把真实平台实例的 bot 挂上。
+    bot = getattr(inst, "bot", None) if inst is not None else None
+    if bot is not None:
+        event.bot = bot
     event.role = "admin"
     event.is_wake = True
     event.is_at_or_wake_command = True
