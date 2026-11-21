@@ -4,6 +4,7 @@ tools.py 用包内相对导入，所以按插件包导入；astrbot 只 stub 到
 """
 
 import asyncio
+import importlib.util
 import sys
 import types
 import unittest
@@ -97,6 +98,11 @@ sys.modules["astrbot.core"] = core
 sys.modules["astrbot.core.agent"] = agent_pkg
 sys.modules["astrbot.core.agent.run_context"] = run_context
 sys.modules["astrbot.core.astr_agent_context"] = agent_context
+
+# 不依赖仓库目录名：把插件根目录注册为合成包 `plugin`
+spec = importlib.util.spec_from_loader("plugin", None, is_package=True)
+spec.submodule_search_locations = [str(ROOT)]
+sys.modules.setdefault("plugin", importlib.util.module_from_spec(spec))
 
 from plugin import tools as tools_mod  # noqa: E402
 from plugin.tools import ToolRegistry  # noqa: E402

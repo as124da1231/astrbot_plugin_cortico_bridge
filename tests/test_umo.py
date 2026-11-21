@@ -112,7 +112,7 @@ class UmoContractTests(unittest.TestCase):
         delivery.remember("default", "private", "100000001", umo)
         self.assertTrue(delivery.has_umo(umo))
         self.assertEqual(delivery.umo_for("default", "private", "100000001"), umo)
-        self.assertFalse(delivery.has_umo("default:FriendMessage:999999999"))
+        self.assertFalse(delivery.has_umo("default:FriendMessage:123456788"))
 
     def test_delivery_ttl(self):
         import time

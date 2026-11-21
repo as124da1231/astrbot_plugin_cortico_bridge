@@ -327,26 +327,26 @@ World 维护：
 
 ```text
 turnChannel      'qq' / undefined
-turnMixed        QQ + 桌宠/其他渠道混在一批
 turnMultiConv    同一批有多个人话 QQ 会话
 turnConv         当前 QQ 会话
 turnMsgId        当前人话消息 id
 ```
 
+只按本 World 的 `astrbot.message` 事件建立轮次（1.3.6），其他 World 的输入不参与判断。
+
 规则：
 
 ```text
-只有 QQ 消息         → QQ 出口开
-只有桌宠/控制台      → QQ 出口关，显式 conv_id 也不能发
-QQ + 桌宠混合        → QQ 出口关，显式 conv_id 也不能发
+只有 QQ 消息         → QQ 出口开，可隐式回触发会话
+非 QQ 轮次           → 只有填了主人 QQ（且在 admins_id 里）+ 显式 conv_id/reply_to + 已知会话时才开
 多个人话 QQ 会话     → 隐式发送拒绝，要求 conv_id / reply_to
 QQ 轮次已过期        → 拒绝，不退回 owner / lastConv
 ```
 
-`pickConv` 只在 QQ 轮次有效时执行：
+`pickConv` 对两种轮次都执行：
 
 ```text
-conv_id → reply_to 查 knownMsgConv → 多会话拒绝 → turnConv
+conv_id → reply_to 查 knownMsgConv → 多会话拒绝 → turnConv（只有 QQ 轮次有）
 ```
 
 发送不回退 `lastConv`；历史查询允许 `lastConv`。
@@ -363,7 +363,7 @@ conv_id → reply_to 查 knownMsgConv → 多会话拒绝 → turnConv
 | 单会话 | 也要显式 | 默认当前会话 |
 | 主动发送 | draft + confirm | 直接发 |
 | 草稿生命周期 | 每轮作废 | 无草稿 |
-| 桌面轮次发 QQ | 允许（显式 + 确认） | 禁止 |
+| 桌面轮次发 QQ | 允许（显式 + 确认） | 允许（主人 QQ + 显式目标 + 已知会话） |
 | 目标检查 | World watch list | 插件 UMO 注册表 + 策略 |
 
 共同点：**不猜**。  
@@ -412,13 +412,13 @@ pnpm test
 当前：
 
 ```text
-插件 unittest     全部通过
+插件 unittest     156 通过
 World Vitest      全部通过
 World typecheck   通过
 前端 app.js       node --check 通过
 ```
 
-具体用例数量以实际输出为准，不在文档里写死。
+用例数量随版本变化，以实际输出为准（1.3.6 实测 156）。
 
 实机验证：
 
@@ -428,6 +428,6 @@ World typecheck   通过
 工具调用（QQ 发言者 / Coo 主人）
 exec 只被 * 覆盖时拒绝
 图片原图 / 转述 / 无视觉模型时的明确原因
-桌宠轮次不发 QQ
+桌宠轮次：没填主人 QQ 时拒绝；填了主人 QQ + 显式目标时主动发送（1.3.6 新增，仅单测）
 多会话轮次显式指定
 ```

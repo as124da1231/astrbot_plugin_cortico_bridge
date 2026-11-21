@@ -5,6 +5,7 @@ main.py 依赖较多 AstrBot 层；这里和 test_images 一样只 stub 到 impo
 """
 
 import contextlib
+import importlib.util
 import sys
 import time
 import types
@@ -84,6 +85,11 @@ sys.modules["astrbot"] = astrbot
 sys.modules["astrbot.api"] = api
 sys.modules["astrbot.api.event"] = event_mod
 sys.modules["astrbot.api.star"] = star_mod
+
+# 不依赖仓库目录名：把插件根目录注册为合成包 `plugin`
+spec = importlib.util.spec_from_loader("plugin", None, is_package=True)
+spec.submodule_search_locations = [str(ROOT)]
+sys.modules.setdefault("plugin", importlib.util.module_from_spec(spec))
 
 from plugin import main as main_mod  # noqa: E402
 from plugin import owner_event  # noqa: E402

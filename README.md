@@ -216,23 +216,23 @@ token 的复制 / 生成 / 清除都走 `POST /token`：
 | 帧 | 方向 | 关键字段 |
 |---|---|---|
 | `hello` | World → 插件 | `v`、`token`（兼容）、`capabilities.images` |
-| `ready` | 插件 → World | `v`、`channel`、`self`、`admins`、`tts` |
+| `ready` | 插件 → World | `v`、`channel`、`self`、`admins`、`tts`、`conversations[]`（最多 20 条最近会话） |
 | `msg` | 插件 → World | `umo`、`conv`、`sender`、`text`、`mentioned`、`images` / `image_errors`、通知用 `kind: "notice"` |
 | `tick` | 插件 → World | `ts`（epoch 秒） |
-| `send` | World → 插件 | `rid`、`umo`（必填）、`conv`（UMO 的投影，可省略）、`text`、`replyTo`、`image`、`voice` |
+| `send` | World → 插件 | `rid`、`umo`（必填）、`conv`（UMO 的投影，可省略）、`text`、`replyTo`、`image`、`voice`、`at`（群 @，最多 10 个，支持 `all`） |
 | `ack` | 插件 → World | `rid`、`ok`、`voice`、失败时 `error`（英文 code）+ `note`（中文）、结果未知时 `uncertain` |
 | `tools` | 插件 → World | `items[]`：`name`、`risk`、`desc`、`sig` |
 | `tool` | World → 插件 | `rid`、`name`、`args`、`turn` 或 `actor: {kind:"owner", id}`（二选一） |
 | `tool-ack` | 插件 → World | `rid`、`ok`、成功 `result`、失败 `error` + `note` |
 
-发送只认 `umo`：没有 `umo` 回 `missing_umo`，格式不对回 `invalid_umo`，桥没见过回 `unknown_umo`，与 `conv` 冲突回 `umo_conv_mismatch`。`ack` 的 `error` 只放 `errors.py` 里的英文 code，人看的中文放 `note`。
+发送只认 `umo`：没有 `umo` 回 `missing_umo`，格式不对回 `invalid_umo`，桥没见过回 `unknown_umo`，与 `conv` 冲突回 `umo_conv_mismatch`。`ack` 的 `error` 只放 `errors.py` 里的英文 code，人看的中文放 `note`。`at` 只对群生效，最多 10 个，支持 `["all"]`（@全体，World 侧需先打开 `worlds.astrbot.allowAtAll`）；语音不能和 `at` 同条（`voice_at_conflict`），格式不对或超量回 `bad_at`。
 
 通知没有单独的 `notice` 帧，统一是 `msg` + `kind: "notice"`；`ref` 是可选的原消息 id。
 
 ## 开发
 
 ```bash
-python -m py_compile main.py bridge.py deliver.py tools.py
+python -m py_compile main.py bridge.py deliver.py tools.py owner_event.py errors.py
 python -m unittest discover -s tests
 node --check views/status/app.js
 ```

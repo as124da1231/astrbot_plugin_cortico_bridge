@@ -74,6 +74,8 @@
 | `empty_message` | 正文和图片都为空 |
 | `voice_needs_text` | 语音消息没有正文 |
 | `voice_image_conflict` | 语音和图片不能同一条 |
+| `voice_at_conflict` | 语音和 `at` 不能同一条 |
+| `bad_at` | `at` 不是 QQ 号数组、不是数字 QQ 号 / `"all"`，或超过 10 个 |
 | `bad_session` | 会话 kind / id 不合法 |
 | `missing_umo` | 帧里没有 `umo` |
 | `invalid_umo` | UMO 格式不合法 |
@@ -247,17 +249,23 @@ World 收到这些码会记一条「桥拒绝了这次连接」，并按退避�
 | 帧 | 方向 | 字段 |
 |---|---|---|
 | `hello` | World → 插件 | `v`、`token`（兼容）、`capabilities.images` |
-| `ready` | 插件 → World | `v: 1`、`channel`、`self {id,name}`、`admins[]`、`tts {ready,provider}` |
+| `ready` | 插件 → World | `v: 1`、`channel`、`self {id,name}`、`admins[]`、`tts {ready,provider}`、`conversations[] {key,umo,platform,kind,id,name,age_sec}`（最多 20 条，按最近出现排序） |
 | `msg` | 插件 → World | `channel`、`id`、`umo`、`ts`、`conv {kind,id,name}`、`sender {id,name}`、`text`、`mentioned`、`platform`、`role`、`owner`、`can`、`images[]`、`image_errors[]` |
 | `msg`（通知） | 插件 → World | 同上，`kind: "notice"`、`ref`，`can.screenshot=false` |
 | `tick` | 插件 → World | `ts`（epoch 秒） |
-| `send` | World → 插件 | `rid`、`umo`（必填）、`conv`、`text`、`replyTo`、`platform`、`image {mime,base64}`、`voice` |
+| `send` | World → 插件 | `rid`、`umo`（必填）、`conv`、`text`、`replyTo`、`platform`、`image {mime,base64}`、`voice`、`at[]` |
 | `ack` | 插件 → World | `rid`、`ok`、`voice`、`error`、`note`、`uncertain` |
 | `tools` | 插件 → World | `items[] {name,risk,desc,sig}` |
 | `tool` | World → 插件 | `rid`、`name`、`args`、`turn` 或 `actor {kind:"owner",id}` |
 | `tool-ack` | 插件 → World | `rid`、`ok`、`result`（成功）或 `error` / `note`（失败） |
 
 `send` 只认 `umo`；`conv` 是投影，可省略。通知不单独发 `notice` 帧，统一走 `msg` + `kind: "notice"`。
+
+`ready.conversations` 是桥记得的最近会话（含重启前恢复的），World 用它支持主动发送。最多 20 条，按最近出现排序；要发到没列出的会话，先在目标会话说一句，让桥记下它并进入快照，再发。
+
+`send.at` 只对群生效：QQ 号数组，最多 10 个，`["all"]` 表示 @全体（World 侧要先打开 `worlds.astrbot.allowAtAll`，面板暂无开关）。私聊里 `at` 被忽略并在回执里说明；`voice` 和 `at` 不能同一条，回 `voice_at_conflict`；格式不对或超量回 `bad_at`。
+
+发送权限（1.3.6）：QQ 轮次可以隐式回触发会话；**非 QQ 轮次**（桌宠、Coo 对话等）只有在「连接」里填了主人 QQ、该号是 AstrBot 管理员，并且用 `conv_id` / `reply_to` 显式指定一个已知会话时才允许主动发送。缺任何一条都在 World 侧本地拒绝，不发帧。
 
 ---
 
@@ -286,7 +294,7 @@ Cortico Bridge: 识图失败 provider=... —— ...
 
 ```bash
 # 插件
-python -m py_compile main.py bridge.py deliver.py tools.py
+python -m py_compile main.py bridge.py deliver.py tools.py owner_event.py errors.py
 python -m unittest discover -s tests
 
 # World
