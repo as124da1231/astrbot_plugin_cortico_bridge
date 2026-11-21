@@ -88,7 +88,7 @@
       "off"
     ],
     "default": "auto",
-    "hint": "auto=能读图就传原图；对端不能收图时尝试视觉转述，没有视觉模型会明确说明未转述。image=始终传原图（仅当 Cortico 端点勾了「支持图片输入」）；对端不能收图时会转述或明确说明，不会静默丢图。describe=始终转述成文字；off=只留 [图片] 占位，不花任何视觉调用。"
+    "hint": "auto=对端声明能读图就传原图，否则尝试视觉转述。image=始终传原图（用户显式选择，即使对端未声明支持也照发）；原图会先经 AstrBot 处理：GIF 切成 3×3 帧拼图、大图压到 provider_settings.image_compress_options.max_size（默认 1280）。describe=始终转述成文字；off=只留 [图片] 占位，不花任何视觉调用。"
   },
   "tts_enabled": {
     "description": "允许 Coo 用语音说话",

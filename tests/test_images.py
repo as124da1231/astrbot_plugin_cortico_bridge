@@ -181,22 +181,47 @@ class ImagePlanTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(images, [])
         self.assertEqual(errors[0]["reason"], "peer_text_only")
 
-    async def test_peer_false_image_mode_describes_instead_of_native(self):
+    async def test_peer_false_image_mode_forces_native(self):
+        # 显式 image = 强制原图：对端没声明能力也照发，由用户承担模型读不了的风险。
         bridge = _bridge("image", peer=False)
         plan = bridge.image_plan()
-        self.assertFalse(plan["native"])
-        self.assertTrue(plan["describe"])
-        images, _errors, _marks = await bridge._image_payloads(
+        self.assertTrue(plan["native"])
+        self.assertFalse(plan["describe"])
+        text = await bridge._message_text(FakeEvent([Image()]))
+        self.assertEqual(text, "[图片]")
+        images, errors, _marks = await bridge._image_payloads(
             FakeEvent([Image()])
         )
-        self.assertEqual(images, [])
-        text = await bridge._message_text(FakeEvent([Image()]))
-        self.assertIn("一只猫", text)
+        self.assertEqual(len(images), 1)
+        self.assertEqual(errors, [])
 
-    async def test_peer_false_image_mode_without_provider_explains(self):
-        bridge = _bridge("image", peer=False, provider=None)
-        text = await bridge._message_text(FakeEvent([Image()]))
-        self.assertIn(NO_VISION, text)
+    async def test_native_uses_astrbot_montage_and_marks_it(self):
+        bridge = _bridge("image", peer=True, provider=None)
+
+        async def fake_prepare(_comp):
+            return "QUJD", True, ""
+
+        bridge._prepare_native_image = fake_prepare
+        images, errors, marks = await bridge._image_payloads(
+            FakeEvent([Image()])
+        )
+        self.assertEqual(len(images), 1)
+        self.assertEqual(errors, [])
+        self.assertTrue(any("3×3" in m for m in marks))
+
+    async def test_native_falls_back_when_prepare_unavailable(self):
+        bridge = _bridge("image", peer=True, provider=None)
+
+        async def fake_prepare(_comp):
+            return "", False, ""
+
+        bridge._prepare_native_image = fake_prepare
+        images, errors, marks = await bridge._image_payloads(
+            FakeEvent([Image()])
+        )
+        self.assertEqual(len(images), 1)
+        self.assertEqual(errors, [])
+        self.assertIn("[图片]", marks)
 
     async def test_peer_true_auto_and_image_send_native(self):
         for mode in ("auto", "image"):

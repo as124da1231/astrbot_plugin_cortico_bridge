@@ -31,6 +31,7 @@ import secrets
 import sys
 import time
 from collections import OrderedDict, deque
+from pathlib import Path
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
@@ -1147,14 +1148,20 @@ class CorticoBridge(Star):
         if mode == "off":
             return {"native": False, "describe": False, "reason": "off"}
 
-        if self._peer_images():
-            if mode in ("auto", "image"):
-                return {"native": True, "describe": False, "reason": ""}
-            return {"native": False, "describe": True, "reason": "describe"}
+        # 显式 image = 强制原图。对端没声明能力也照发，由用户承担模型读不了的风险；
+        # auto 才按对端能力保守降级。
+        if mode == "image":
+            if not self._peer_images():
+                logger.debug(
+                    "Cortico Bridge: image 模式强制发原图（对端未声明支持图片）"
+                )
+            return {"native": True, "describe": False, "reason": ""}
 
-        # 对端不能收图：auto/image 都不得传原图；有视觉模型就转述。
         if mode == "describe":
             return {"native": False, "describe": True, "reason": "describe"}
+
+        if self._peer_images():
+            return {"native": True, "describe": False, "reason": ""}
         if self._vision_provider_id():
             return {
                 "native": False,
@@ -1256,6 +1263,71 @@ class CorticoBridge(Star):
 
     # ---------- 入站图片（对端能收图时才传） ----------
 
+    def _image_max_size(self) -> int:
+        """对齐 AstrBot 的 provider_settings.image_compress_options.max_size。"""
+        try:
+            from astrbot.core.utils.media_utils import (
+                normalize_model_image_max_size,
+            )
+
+            return normalize_model_image_max_size(None)
+        except Exception:  # noqa: BLE001
+            return 1280
+
+    async def _prepare_native_image(self, comp) -> tuple[str, bool, str]:
+        """用 AstrBot 自带机制处理原图，再给 Coo 的 LLM。
+
+        - 动图（GIF/WebP 动画）→ 3×3 帧拼图，保留动作顺序；
+        - 静图 → 最长边压到 AstrBot 配置的 max_size（默认 1280）；
+        - 超过单图上限 → 返回“太大”，不回退原图。
+
+        返回 (base64, 是否动图拼图, 失败原因)。AstrBot 不可用或处理失败时
+        返回空串，调用方回退到旧的 convert_to_base64。
+        """
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+            from astrbot.core.utils.media_utils import (
+                ImageInputTooLargeError,
+                prepare_model_image,
+            )
+        except Exception:  # noqa: BLE001
+            return "", False, ""
+
+        try:
+            path = await comp.convert_to_file_path()
+        except Exception:  # noqa: BLE001
+            logger.debug("Cortico Bridge: 取本地图片失败", exc_info=True)
+            return "", False, ""
+        if not path:
+            return "", False, ""
+
+        try:
+            prepared = await prepare_model_image(
+                path,
+                max_size=self._image_max_size(),
+                output_dir=Path(get_astrbot_temp_path()),
+            )
+        except ImageInputTooLargeError:
+            logger.warning("Cortico Bridge: 图片超过 AstrBot 单图上限，跳过")
+            return "", False, "太大"
+        except Exception:  # noqa: BLE001
+            logger.debug("Cortico Bridge: 图片预处理失败，回退原图", exc_info=True)
+            return "", False, ""
+        if not prepared:
+            return "", False, ""
+
+        prepared_path, is_montage, needs_cleanup, _original = prepared
+        try:
+            data = Path(prepared_path).read_bytes()
+        except Exception:  # noqa: BLE001
+            logger.debug("Cortico Bridge: 读取处理后图片失败", exc_info=True)
+            return "", False, ""
+        finally:
+            if needs_cleanup:
+                with contextlib.suppress(OSError):
+                    os.remove(prepared_path)
+        return base64.b64encode(data).decode(), is_montage, ""
+
     async def _image_payloads(
         self, event: AstrMessageEvent
     ) -> tuple[list[dict], list[dict], list[str]]:
@@ -1290,27 +1362,30 @@ class CorticoBridge(Star):
             index += 1
             # QQ 图片 CDN 偶尔会断连；隔一会儿重试通常就好。每次最多等 10 秒，
             # 免得一次卡死的下载把这一轮回复也拖住。
-            b64 = ""
-            last_error = ""
-            for attempt in range(3):
-                try:
-                    b64 = await asyncio.wait_for(comp.convert_to_base64(), timeout=10)
-                    break
-                except asyncio.TimeoutError:
-                    last_error = "下载超时"
-                    logger.debug(
-                        "Cortico Bridge: 取图超时（第 %d 次）" % (attempt + 1),
-                        exc_info=True,
-                    )
-                except Exception:  # noqa: BLE001
-                    # 异常原文常带 CDN URL/签名，只进日志；正文和帧里只放固定原因。
-                    last_error = "下载失败"
-                    logger.warning(
-                        "Cortico Bridge: 取图失败（第 %d 次）" % (attempt + 1),
-                        exc_info=True,
-                    )
-                if attempt < 2:
-                    await asyncio.sleep(0.4 * (attempt + 1))
+            b64, is_montage, last_error = await self._prepare_native_image(comp)
+            if not b64 and not last_error:
+                # AstrBot 预处理不可用/失败时回退到旧路径；重试仍只在下载阶段。
+                for attempt in range(3):
+                    try:
+                        b64 = await asyncio.wait_for(
+                            comp.convert_to_base64(), timeout=10
+                        )
+                        break
+                    except asyncio.TimeoutError:
+                        last_error = "下载超时"
+                        logger.debug(
+                            "Cortico Bridge: 取图超时（第 %d 次）" % (attempt + 1),
+                            exc_info=True,
+                        )
+                    except Exception:  # noqa: BLE001
+                        # 异常原文常带 CDN URL/签名，只进日志；正文和帧里只放固定原因。
+                        last_error = "下载失败"
+                        logger.warning(
+                            "Cortico Bridge: 取图失败（第 %d 次）" % (attempt + 1),
+                            exc_info=True,
+                        )
+                    if attempt < 2:
+                        await asyncio.sleep(0.4 * (attempt + 1))
             if not b64:
                 reason = last_error or "空数据"
                 errors.append({"index": slot, "reason": reason})
@@ -1335,7 +1410,9 @@ class CorticoBridge(Star):
                 continue
             payloads.append({"mime": _sniff_image_mime(b64), "base64": b64})
             total_b64 += len(b64)
-            marks.append("[图片]")
+            marks.append(
+                "[图片：动图已按 3×3 帧拼图]" if is_montage else "[图片]"
+            )
         return payloads, errors, marks
 
     # ---------- 通知类事件（撤回 / 入群 / 戳一戳…） ----------
