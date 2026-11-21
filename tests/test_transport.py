@@ -344,7 +344,6 @@ class CallbackTypeTests(unittest.TestCase):
 
 class ParseAtTests(unittest.TestCase):
     """发送帧的 @ 校验：只接受 QQ 号或 all，去重，@全体 只留 all。"""
-
     def test_missing_or_empty(self):
         self.assertEqual(bridge._parse_at(None), ([], "", ""))
         self.assertEqual(bridge._parse_at([]), ([], "", ""))
@@ -368,6 +367,30 @@ class ParseAtTests(unittest.TestCase):
     def test_rejects_non_list(self):
         _at, code, _note = bridge._parse_at("10001")
         self.assertEqual(code, "bad_at")
+
+
+class ReadyFrameTests(unittest.IsolatedAsyncioTestCase):
+    """ready 帧带上桥记得的会话，World 重启后也能主动发送。"""
+
+    async def test_ready_carries_known_conversations(self):
+        convs = [
+            {
+                "umo": "default:FriendMessage:10001",
+                "kind": "private",
+                "id": "10001",
+                "name": "主人",
+            }
+        ]
+        server = bridge.BridgeServer(
+            host="127.0.0.1",
+            port=0,
+            token="",
+            on_send=_ok_send,
+            conversations=lambda: convs,
+        )
+        frame = await server.ready_frame()
+        self.assertEqual(frame["t"], "ready")
+        self.assertEqual(frame["conversations"], convs)
 
 
 class ToolIdentityTests(unittest.IsolatedAsyncioTestCase):

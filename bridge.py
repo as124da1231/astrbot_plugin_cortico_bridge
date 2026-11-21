@@ -255,6 +255,7 @@ class BridgeServer:
         on_tool: ToolCallback | None = None,
         tools_frame: ToolsProvider | None = None,
         tts_available: TtsInfoProvider | None = None,
+        conversations: Callable[[], list[dict]] | None = None,
     ) -> None:
         self.host = host
         self.port = port
@@ -265,6 +266,7 @@ class BridgeServer:
         self._on_tool = on_tool
         self._tools_frame = tools_frame
         self._tts_available = tts_available or (lambda: False)
+        self._conversations = conversations or (lambda: [])
         self._server = None
         self._client = None
         self._lock = asyncio.Lock()
@@ -454,6 +456,8 @@ class BridgeServer:
             "admins": list(self._admin_ids()),
             # 桥这边能不能发语音，以及会用哪个 provider（World 可据此少试一次）。
             "tts": await self._tts_info(),
+            # 桥记得的会话（含重启前恢复的），World 用它来支持主动发送。
+            "conversations": self._conversations()[:20],
             "v": 1,
         }
 

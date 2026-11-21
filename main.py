@@ -181,6 +181,7 @@ class CorticoBridge(Star):
             on_tool=self._on_tool_call,
             tools_frame=self.tools.frame,
             tts_available=self._tts_info,
+            conversations=self.delivery.known_conversations,
         )
         # 最近推送的消息，给面板看
         self._recent: deque[dict] = deque(maxlen=40)
