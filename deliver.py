@@ -12,6 +12,7 @@ import contextlib
 import json
 import os
 import shutil
+import tempfile
 import time
 from typing import Any, Callable
 
@@ -60,8 +61,9 @@ class Delivery:
         self._send_stamps: list[float] = []
         # 重启后会话表为空会发不出去；把 umo 落到插件数据目录。
         self._umos_file = os.path.join(data_dir, "umos.json") if data_dir else ""
-        self._last_save = 0.0
+        self._last_save_attempt = 0.0
         self._dirty = False
+        self._migration_pending = False
         # 最近一次发送失败的结构化错误码；bridge 用它写 ack.error。
         self.last_error_code = ""
         self._load_umos()
@@ -169,23 +171,27 @@ class Delivery:
                 self._legacy[_s(key)] = umo
                 migrated = True
 
-        if not is_v2 and migrated:
-            backup = os.path.join(os.path.dirname(self._umos_file), "umos.v1.json")
-            if not os.path.exists(backup):
-                try:
-                    shutil.copy2(self._umos_file, backup)
-                    with contextlib.suppress(OSError):
-                        os.chmod(backup, 0o600)
-                    logger.info("Cortico Bridge: 已备份旧会话表到 %s", backup)
-                except OSError as exc:  # noqa: BLE001
-                    logger.warning("Cortico Bridge: 备份旧会话表失败 —— %s", exc)
-
         self._prune()
         if migrated:
+            self._migration_pending = True
             self._save_umos(force=True)
-            logger.info(f"Cortico Bridge: 会话表已迁移到 UMO v2，共 {len(self._umos)} 条")
         elif self._umos:
             logger.info(f"Cortico Bridge: 从磁盘恢复 {len(self._umos)} 个 UMO")
+
+    def _backup_legacy_umos(self) -> None:
+        directory = os.path.dirname(self._umos_file)
+        backup = os.path.join(directory, "umos.v1.json")
+        if os.path.isfile(backup):
+            return
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix="umos.v1.", suffix=".tmp")
+        try:
+            os.close(fd)
+            shutil.copyfile(self._umos_file, tmp)
+            os.replace(tmp, backup)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+        logger.info("Cortico Bridge: 已备份旧会话表到 %s", backup)
 
     def _fresh(self, ts: float) -> bool:
         return bool(ts) and time.time() - ts <= UMO_TTL_SECONDS
@@ -205,9 +211,17 @@ class Delivery:
         if not self._umos_file:
             return
         now = time.time()
-        if not force and now - self._last_save < UMO_SAVE_INTERVAL:
+        if not force and now - self._last_save_attempt < UMO_SAVE_INTERVAL:
             self._dirty = True
             return
+        self._last_save_attempt = now
+        if self._migration_pending:
+            try:
+                self._backup_legacy_umos()
+            except OSError as exc:
+                self._dirty = True
+                logger.warning("Cortico Bridge: 备份旧会话表失败，暂缓写入 v2 —— %s", exc)
+                return
         try:
             os.makedirs(os.path.dirname(self._umos_file), exist_ok=True)
             payload = {
@@ -221,14 +235,16 @@ class Delivery:
             with contextlib.suppress(OSError):
                 os.chmod(tmp, 0o600)
             os.replace(tmp, self._umos_file)
-            self._last_save = now
             self._dirty = False
+            if self._migration_pending:
+                self._migration_pending = False
+                logger.info(f"Cortico Bridge: 会话表已迁移到 UMO v2，共 {len(self._umos)} 条")
         except Exception as exc:  # noqa: BLE001
             self._dirty = True
             logger.debug(f"Cortico Bridge: 会话表落盘失败 —— {exc}")
 
     def flush(self) -> None:
-        if self._dirty or self._last_save == 0:
+        if self._dirty or self._last_save_attempt == 0:
             self._save_umos(force=True)
 
     def remember(

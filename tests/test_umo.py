@@ -148,6 +148,35 @@ class UmoContractTests(unittest.TestCase):
             self.assertIn("default:GroupMessage:123456789", data.get("umos", {}))
             self.assertTrue((Path(tmp) / "umos.v1.json").exists())
 
+    def test_v1_registry_stays_intact_until_backup_succeeds(self):
+        import tempfile
+        import time
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "umos.json"
+            backup = Path(tmp) / "umos.v1.json"
+            umo = "default:GroupMessage:123456789"
+            original = json.dumps({"default|group|123456789": [umo, time.time()]})
+            path.write_text(original, encoding="utf-8")
+
+            def fail_during_copy(_source, destination):
+                Path(destination).write_bytes(b"partial")
+                raise OSError("disk full")
+
+            with patch("deliver.shutil.copyfile", side_effect=fail_during_copy):
+                delivery = Delivery(None, lambda: {}, data_dir=tmp)
+                self.assertTrue(delivery.has_umo(umo))
+                delivery.flush()
+                self.assertEqual(path.read_text(encoding="utf-8"), original)
+                self.assertEqual(list(Path(tmp).iterdir()), [path])
+
+            delivery.flush()
+            self.assertEqual(backup.read_text(encoding="utf-8"), original)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["version"], 2)
+            self.assertIn(umo, saved["umos"])
+
     def test_send_without_umo_is_refused(self):
         import asyncio
 
