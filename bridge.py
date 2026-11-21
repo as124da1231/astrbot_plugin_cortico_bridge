@@ -2,7 +2,7 @@
 
 这一层只管「连接」和「帧」，不懂 QQ、不懂 Cortico 的语义。
 上层通过两个回调把行为注入进来：
-- on_send(conv_kind, conv_id, text, reply_to, platform, image, voice, umo)
+- on_send(conv_kind, conv_id, text, reply_to, platform, image, voice, umo, at)
   -> (ok, note, used_voice, uncertain, error_code)
 - on_tool(name, args, turn, actor) -> (ok, text)
 """
@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover - 缺依赖时插件仍要能加载
 # (ok, 备注/中文说明, 是否用了语音, 结果是否未知, 错误码)
 # 第 5 位只在失败时有值，取 errors.py 里的稳定 code；ack.error 只放它。
 SendCallback = Callable[
-    [str, str, str, str, str, "dict | None", bool, str],
+    [str, str, str, str, str, "dict | None", bool, str, list[str]],
     Awaitable[tuple[bool, str, bool, bool, str]],
 ]
 EventCallback = Callable[[str, dict], None]
@@ -206,6 +206,38 @@ def _parse_image(raw: Any) -> tuple[dict | None, str, str]:
     if not mime.startswith("image/"):
         return None, codes.IMAGE_BAD_TYPE, f"不支持的图片类型 {mime}"
     return {"mime": mime, "base64": b64}, "", ""
+
+
+#: 一条消息最多 @ 多少人；@全体 用 "all" 表示。
+AT_MAX = 10
+
+
+def _parse_at(raw: Any) -> tuple[list[str], str, str]:
+    """校验 send 帧里的 at（群 @）。
+
+    返回 (QQ 号列表, 错误码, 中文说明)；没有 at 时三个值是 ([], "", "")。
+    只接受数字 QQ 号或 "all"；去重，@全体 时只保留 "all"。
+    """
+    if raw is None:
+        return [], "", ""
+    if not isinstance(raw, list):
+        return [], codes.BAD_AT, "at 必须是 QQ 号数组"
+    if len(raw) > AT_MAX:
+        return [], codes.BAD_AT, f"一条消息最多 @ {AT_MAX} 人"
+    out: list[str] = []
+    for item in raw:
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            return [], codes.BAD_AT, "at 里只能是 QQ 号或 all"
+        value = str(item).strip()
+        if value == "all":
+            out.append("all")
+            continue
+        if not (5 <= len(value) <= 20) or not value.isdigit():
+            return [], codes.BAD_AT, f"「{value}」不是 QQ 号，at 只接受数字"
+        out.append(value)
+    if "all" in out:
+        return ["all"], "", ""
+    return list(dict.fromkeys(out)), "", ""
 
 
 class BridgeServer:
@@ -754,6 +786,7 @@ class BridgeServer:
         conv_kind = _s(conv.get("kind"))
         conv_id = _s(conv.get("id"))
         voice = frame.get("voice") is True
+        at, at_code, at_note = _parse_at(frame.get("at"))
 
         # UMO 是权威键；有 UMO 时从它派生 kind/id，并拒绝与 conv 冲突。
         umo_code = ""
@@ -777,6 +810,8 @@ class BridgeServer:
 
         if image_code:
             ok, code, err = False, image_code, image_note
+        elif at_code:
+            ok, code, err = False, at_code, at_note
         elif umo_code:
             ok, code = False, umo_code
             err = (
@@ -790,6 +825,8 @@ class BridgeServer:
             ok, code, err = False, codes.VOICE_NEEDS_TEXT, "语音需要正文"
         elif voice and image is not None:
             ok, code, err = False, codes.VOICE_IMAGE_CONFLICT, "语音和图片不能是同一条消息"
+        elif voice and at:
+            ok, code, err = False, codes.VOICE_AT_CONFLICT, "语音和 @ 不能是同一条消息"
         elif conv_kind not in ("group", "private") or not conv_id:
             ok, code, err = False, codes.BAD_SESSION, "会话参数不合法"
         else:
@@ -807,7 +844,7 @@ class BridgeServer:
             else:
                 try:
                     ok, note, used_voice, uncertain, raw_code = await self._on_send(
-                        conv_kind, conv_id, text, reply_to, platform, image, voice, umo
+                        conv_kind, conv_id, text, reply_to, platform, image, voice, umo, at
                     )
                     code = _s(raw_code).strip()
                     err = _s(note)

@@ -92,10 +92,17 @@ class Reply:
         self.id = id
 
 
+class At:
+    def __init__(self, qq, name=""):
+        self.qq = qq
+        self.name = name
+
+
 components.Plain = Plain
 components.Image = Image
 components.Record = Record
 components.Reply = Reply
+components.At = At
 api.message_components = components
 
 star_mod = types.ModuleType("astrbot.api.star")
@@ -342,6 +349,33 @@ class SendFallbackTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertFalse(uncertain)
         self.assertEqual(ctx.sent, [["Plain"]])
+
+    def test_group_mentions_are_added_before_text(self):
+        delivery, ctx = _delivery()
+        ok, note, _voice, _uncertain = asyncio.run(
+            delivery.send("", "group", "123456789", "@你", umo=UMO, at=["10001", "10002"])
+        )
+        self.assertTrue(ok, note)
+        self.assertEqual(ctx.sent, [["At", "At", "Plain"]])
+
+    def test_all_mention_is_one_component(self):
+        delivery, ctx = _delivery()
+        ok, _note, _voice, _uncertain = asyncio.run(
+            delivery.send("", "group", "123456789", "通知", umo=UMO, at=["all"])
+        )
+        self.assertTrue(ok)
+        self.assertEqual(ctx.sent, [["At", "Plain"]])
+
+    def test_private_mentions_are_ignored_with_note(self):
+        private_umo = "default:FriendMessage:123456789"
+        delivery, ctx = _delivery()
+        delivery.remember("default", "private", "123456789", private_umo)
+        ok, note, _voice, _uncertain = asyncio.run(
+            delivery.send("", "private", "123456789", "hi", umo=private_umo, at=["10001"])
+        )
+        self.assertTrue(ok)
+        self.assertEqual(ctx.sent, [["Plain"]])
+        self.assertIn("@ 不生效", note)
 
 
 if __name__ == "__main__":

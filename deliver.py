@@ -396,19 +396,23 @@ class Delivery:
         image: dict | None,
         voice: bool,
         allow_text_fallback: bool,
+        at: list[str] | None = None,
+        conv_kind: str = "",
     ) -> tuple[Any, bool, bool, bool, list[str], bool]:
         """构造消息链；返回 (chain, 用了语音, 加了引用, 加了图, notes, 是否中止)。
 
         构造阶段的异常直接向上抛，由 send 判断为「确定没发」。
+        `at` 只在群里生效；私聊里给 at 会被忽略并在备注说明。
         """
         from astrbot.api.event import MessageChain
-        from astrbot.api.message_components import Image, Plain, Record, Reply
+        from astrbot.api.message_components import At, Image, Plain, Record, Reply
 
         notes: list[str] = []
         chain = MessageChain()
         reply_added = False
         image_added = False
         used_voice = False
+        at_list = list(at or [])
 
         if reply_to:
             try:
@@ -417,6 +421,18 @@ class Delivery:
             except Exception as exc:  # 引用失败不影响正文
                 logger.debug("Cortico Bridge: 引用构造失败 —— %s", exc, exc_info=True)
                 notes.append("引用失败，已忽略引用")
+
+        if at_list:
+            if conv_kind and conv_kind != "group":
+                notes.append("私聊里 @ 不生效，已忽略")
+            else:
+                for qq in at_list:
+                    try:
+                        chain.chain.append(At(qq=qq))
+                    except Exception as exc:  # @ 失败不影响正文
+                        logger.debug("Cortico Bridge: @ 构造失败 —— %s", exc, exc_info=True)
+                        notes.append("@ 构造失败，已忽略")
+                        break
 
         if voice:
             if not self._tts_enabled():
@@ -506,6 +522,7 @@ class Delivery:
         voice: bool = False,
         umo: str = "",
         allow_text_fallback: bool = True,
+        at: list[str] | None = None,
     ) -> tuple[bool, str, bool, bool]:
         """发一条消息。返回 (成功, 备注, 是否真的用了语音, 结果是否未知)。
 
@@ -543,7 +560,7 @@ class Delivery:
         try:
             chain, used_voice, reply_added, image_added, notes, aborted = (
                 await self._compose_chain(
-                    umo, text, reply_to, image, voice, allow_text_fallback
+                    umo, text, reply_to, image, voice, allow_text_fallback, at or [], conv_kind
                 )
             )
         except Exception as exc:  # noqa: BLE001

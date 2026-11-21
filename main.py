@@ -767,11 +767,12 @@ class CorticoBridge(Star):
         image: dict | None = None,
         voice: bool = False,
         umo: str = "",
+        at: list[str] | None = None,
     ) -> tuple[bool, str, bool, bool, str]:
         if not self.config.get("enabled", False):
             return False, "桥未启用，发送门是关的", False, False, "door_closed"
         ok, note, used_voice, uncertain = await self.delivery.send(
-            platform, conv_kind, conv_id, text, reply_to, image, voice, umo
+            platform, conv_kind, conv_id, text, reply_to, image, voice, umo, at=at or []
         )
         if ok:
             self.stats["sent"] += 1

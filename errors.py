@@ -16,6 +16,8 @@ IMAGE_BAD_TYPE = "image_bad_type"  # mime 不是 image/*
 EMPTY_MESSAGE = "empty_message"  # 正文和图片都为空
 VOICE_NEEDS_TEXT = "voice_needs_text"  # 语音消息没有正文
 VOICE_IMAGE_CONFLICT = "voice_image_conflict"  # 语音和图片不能同条
+VOICE_AT_CONFLICT = "voice_at_conflict"  # 语音和 @ 不能同条
+BAD_AT = "bad_at"  # at 不是 QQ 号 / "all"，或超过上限
 BAD_SESSION = "bad_session"  # 会话 kind/id 不合法
 MISSING_UMO = "missing_umo"  # 发送必须有 UMO（旧 World 兼容失败）
 INVALID_UMO = "invalid_umo"  # UMO 解析失败
@@ -48,6 +50,8 @@ ALL_CODES = frozenset(
         EMPTY_MESSAGE,
         VOICE_NEEDS_TEXT,
         VOICE_IMAGE_CONFLICT,
+        VOICE_AT_CONFLICT,
+        BAD_AT,
         BAD_SESSION,
         MISSING_UMO,
         INVALID_UMO,

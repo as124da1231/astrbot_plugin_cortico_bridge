@@ -48,10 +48,17 @@ class _Reply:
         self.id = id
 
 
+class _At:
+    def __init__(self, qq, name=""):
+        self.qq = qq
+        self.name = name
+
+
 components.Plain = _Plain
 components.Image = _Image
 components.Record = _Record
 components.Reply = _Reply
+components.At = _At
 
 event_mod = types.ModuleType("astrbot.api.event")
 

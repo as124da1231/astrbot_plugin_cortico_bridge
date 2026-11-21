@@ -342,6 +342,34 @@ class CallbackTypeTests(unittest.TestCase):
         )
 
 
+class ParseAtTests(unittest.TestCase):
+    """发送帧的 @ 校验：只接受 QQ 号或 all，去重，@全体 只留 all。"""
+
+    def test_missing_or_empty(self):
+        self.assertEqual(bridge._parse_at(None), ([], "", ""))
+        self.assertEqual(bridge._parse_at([]), ([], "", ""))
+
+    def test_numbers_and_duplicates(self):
+        self.assertEqual(bridge._parse_at(["10001", "10001", 10002]), (["10001", "10002"], "", ""))
+
+    def test_all_wins(self):
+        self.assertEqual(bridge._parse_at(["10001", "all"]), (["all"], "", ""))
+
+    def test_rejects_nickname(self):
+        at, code, _note = bridge._parse_at(["小明"])
+        self.assertEqual(at, [])
+        self.assertEqual(code, "bad_at")
+
+    def test_rejects_too_many(self):
+        at, code, _note = bridge._parse_at([str(10000 + i) for i in range(11)])
+        self.assertEqual(at, [])
+        self.assertEqual(code, "bad_at")
+
+    def test_rejects_non_list(self):
+        _at, code, _note = bridge._parse_at("10001")
+        self.assertEqual(code, "bad_at")
+
+
 class ToolIdentityTests(unittest.IsolatedAsyncioTestCase):
     """E-008：缺身份/身份冲突/actor 非法由桥层拒绝。"""
 
