@@ -1270,13 +1270,15 @@ class CorticoBridge(Star):
         ]
         if not plan["native"]:
             if plan["describe"]:
-                reason = "describe"
-            elif plan["reason"] == "peer_text_only":
-                reason = "peer_text_only"
-            else:
+                # 转述不算“没取到”：正文里已经有 [图片：描述]，不再往
+                # image_errors 里塞，否则日志/模型会误以为这张图失败了。
                 return [], [], []
-            errors = [{"index": i, "reason": reason} for i in range(len(images))]
-            return [], errors, []
+            if plan["reason"] == "peer_text_only":
+                errors = [
+                    {"index": i, "reason": "peer_text_only"} for i in range(len(images))
+                ]
+                return [], errors, []
+            return [], [], []
 
         payloads: list[dict] = []
         errors: list[dict] = []

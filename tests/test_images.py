@@ -161,7 +161,8 @@ class ImagePlanTests(unittest.IsolatedAsyncioTestCase):
             FakeEvent([Image()])
         )
         self.assertEqual(images, [])
-        self.assertEqual(errors, [{"index": 0, "reason": "describe"}])
+        # 转述成功不是“没取到”：errors 必须为空，否则日志/模型会误判。
+        self.assertEqual(errors, [])
         self.assertEqual(marks, [])
 
     async def test_peer_false_auto_without_provider_explains(self):
