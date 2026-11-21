@@ -181,21 +181,21 @@ class UmoContractTests(unittest.TestCase):
         import asyncio
 
         delivery = Delivery(None, lambda: {})
-        ok, _note, _voice, _uncertain = asyncio.run(
+        ok, _note, _voice, _uncertain, error_code = asyncio.run(
             delivery.send("default", "group", "123456789", "hi")
         )
         self.assertFalse(ok)
-        self.assertEqual(delivery.last_error_code, "missing_umo")
+        self.assertEqual(error_code, "missing_umo")
 
     def test_send_with_unknown_umo_is_refused(self):
         import asyncio
 
         delivery = Delivery(None, lambda: {})
-        ok, _note, _voice, _uncertain = asyncio.run(
+        ok, _note, _voice, _uncertain, error_code = asyncio.run(
             delivery.send("", "", "", "hi", umo="default:GroupMessage:999")
         )
         self.assertFalse(ok)
-        self.assertEqual(delivery.last_error_code, "unknown_umo")
+        self.assertEqual(error_code, "unknown_umo")
 
     def test_send_with_umo_and_missing_conv_uses_umo(self):
         import asyncio
@@ -205,7 +205,7 @@ class UmoContractTests(unittest.TestCase):
         umo = "default:FriendMessage:100000001"
         delivery.remember("default", "private", "100000001", umo)
 
-        ok, _note, _voice, _uncertain = asyncio.run(
+        ok, _note, _voice, _uncertain, error_code = asyncio.run(
             delivery.send("", "", "", "hi", umo=umo)
         )
         self.assertTrue(ok)
@@ -220,7 +220,7 @@ class UmoContractTests(unittest.TestCase):
         delivery.remember("default", "private", "100000001", umo)
 
         # conv 写成别的群：交付层以 umo 为准；帧层是否拒绝由 bridge 负责。
-        ok, _note, _voice, _uncertain = asyncio.run(
+        ok, _note, _voice, _uncertain, error_code = asyncio.run(
             delivery.send("default", "group", "999999", "hi", umo=umo)
         )
         self.assertTrue(ok)
@@ -391,45 +391,6 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(ok)
         self.assertEqual(ws.closed, [])
-
-    async def test_tool_frame_passes_owner_actor(self):
-        calls = []
-
-        async def on_tool(name, args, turn, actor):
-            calls.append((name, args, turn, actor))
-            return True, "ok"
-
-        async def on_send(*_args, **_kwargs):
-            return True, "", False, False
-
-        server = bridge.BridgeServer(
-            host="127.0.0.1", port=0, token="", on_send=on_send, on_tool=on_tool
-        )
-        ws = self._FakeWs([])
-        await server._handle_tool(
-            ws,
-            {
-                "t": "tool",
-                "rid": "t-1",
-                "name": "query_lyrics_by_name",
-                "args": {"song": "晴天"},
-                "actor": {"kind": "owner", "id": "100000001"},
-            },
-        )
-        self.assertEqual(
-            calls,
-            [
-                (
-                    "query_lyrics_by_name",
-                    {"song": "晴天"},
-                    "",
-                    {"kind": "owner", "id": "100000001"},
-                )
-            ],
-        )
-        payload = json.loads(ws.sent[0])
-        self.assertTrue(payload["ok"])
-        self.assertEqual(payload["result"], "ok")
 
     async def test_authorize_rejects_wrong_token(self):
         server = await self._server("127.0.0.1", token="s3cret")

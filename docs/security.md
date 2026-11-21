@@ -87,9 +87,9 @@ World 在 hello 里发 v: 1
 
 ## 工具与主人
 
-- 工具身份只有两条：QQ 发言者，或 Coo 连接设置里填的主人 QQ。
-- 主人 QQ 必须在 AstrBot 的 `admins_id` 里；World 帧里的 `role` / `owner` 不被信任。
-- `tools_allow=["*"]` 只含 read / write；exec 必须显式点名，且调用者必须是管理员/主人。
+- QQ 轮次使用 AstrBot 保存的真实发言者记录。Coo 对话使用桥端指定的主人 QQ，该号须在 `admins_id` 里。
+- 主人身份须通过独立工具令牌授权。Coo 只在回环 WebSocket 或 WSS 上提交令牌，桥以收到的连接凭据和本地配置判定权限。工具令牌须与桥 token 不同。
+- `tools_allow=["*"]` 只含在 `tools_risks` 中明确标为 read / write 的工具。未审查的工具按 exec 处理。exec 需要显式点名、管理员身份和已获工具授权的连接。
 - 权限拒绝会如实失败，不会包装成成功。
 
 ## 为什么回环可以免密

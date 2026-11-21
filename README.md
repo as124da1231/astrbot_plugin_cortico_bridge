@@ -2,7 +2,7 @@
 
 <img src="./logo.png" width="88" alt="Cortico 桥" align="right">
 
-**当前版本：1.3.6**
+**当前版本：1.3.7**
 
 把 AstrBot 收到的 QQ 消息转给 [Cortico](https://github.com/Pal-AI-Lab/Cortico) 的人格，再把它的回复发回群里。  
 *Bridge QQ messages from AstrBot to [Cortico](https://github.com/Pal-AI-Lab/Cortico) persona and send replies back to QQ.*
@@ -64,7 +64,7 @@ WebSocket 单帧上限          16MB
 | 值 | 行为 |
 |---|---|
 | `auto`（默认） | 对端握手声明能收图就传原图；不能收图时尝试用视觉模型转述。没有可用视觉模型时，正文写 `[图片|对端模型不能读图，且没有可用的视觉模型转述]`，不静默丢图 |
-| `image` | 只在 Cortico 端点声明支持图片输入时传原图；对端不支持时同样转述或明确说明，不会硬塞原图 |
+| `image` | 强制传原图；适合明确知道对端能收图时使用。需要按对端能力自动转述时选择 auto |
 | `describe` | 始终转述成文字；没有视觉模型或调用失败时写 `[图片|转述失败：原因]` |
 | `off` | 只保留 `[图片]` 占位，不传原图、不调用视觉模型 |
 
@@ -75,14 +75,14 @@ WebSocket 单帧上限          16MB
 `tools_allow` 决定 Coo 能调哪些 AstrBot 工具：
 
 - 空列表：一个都不给；
-- `*`：只自动包含 read / write 类工具，**不含 exec**；
-- exec 类工具（shell、python、browser 等）必须在 `tools_allow` 里**显式点名**，且调用者必须是 AstrBot 管理员/主人；
+- `*`：只自动包含管理员在 `tools_risks` 里明确标为 read / write 的工具；
+- 风险未标注的工具按 exec 管理。exec 必须显式点名，要求管理员身份和已获工具授权的连接；
 - 工具清单和风险标签在插件启动日志里（搜「可调工具」），控制台「工具」栏也能看。
 
 工具身份有两条路径，**都不信任 World 帧里传来的 `role` / `owner`**：
 
 - **QQ 发言者**：这一轮由 QQ 消息触发时，用触发消息的事件执行，身份就是发言者；管理员工具由 AstrBot 权限层拦。
-- **Coo 主人**：Coo 对话轮次在连接设置里填了主人 QQ，且该 QQ 在 AstrBot 的 `admins_id` 里时，以主人身份执行。
+- **Coo 主人**：在 AstrBot 插件配置里指定 `owner_tool_qq` 和 `owner_tool_token`，在 Coo「连接」填写相同的 QQ 和独立工具令牌。该账号须在 AstrBot 的管理员名单里，工具令牌须与桥 token 不同。远程连接在 Coo 使用 `wss://`。
 
 权限拒绝、工具停用、不在白名单、这一轮已过期，都会**如实失败**并说明原因，不会回「成功」。工具异常原文只进日志，回给模型的是固定短句。
 
@@ -142,7 +142,10 @@ AstrBot 自己的模型不参与这些轮次；桥没连上时插件什么都不
 | `max_sends_per_minute` | `30` | 防止失控刷屏，`0` 表示不限 |
 | `image_mode` | `auto` | 见上文「图片」 |
 | `image_vision_provider` | 空 | 「转述」这条路用哪个视觉模型；留空自动挑一个带 vision / VL 的 |
-| `tools_allow` | 空 | 一行一个工具名；`*` 只含 read/write，不含 exec；exec 必须显式点名 |
+| `tools_allow` | 空 | 一行一个工具名；通配授权只覆盖已审查的读写工具 |
+| `tools_risks` | 空 | 一行一项 `工具名:read` 或 `工具名:write`；仅配置已确认行为的工具 |
+| `owner_tool_qq` / `owner_tool_token` | 空 | 配对 Coo 主人工具授权，独立于桥 token |
+| 语音设置 | 见参考 | [语音配置键](docs/reference.md#1-插件配置) |
 | `private_mode` | `all` | `off` / `allowlist` / `all` |
 | `private_allow` | 空 | 私聊白名单 |
 | `private_admin_bypass` | 开 | 管理员即使不在私聊名单也能私聊 |
@@ -157,7 +160,7 @@ AstrBot 自己的模型不参与这些轮次；桥没连上时插件什么都不
 - 握手时把 `admins` 告诉 Cortico，界面上给这些人加 `(主人)` 标记；
 - 只有主人说话的那一轮才允许 Cortico 截屏（配合 Coopanion 的 CUA）；
 - 非管理员说话会立刻收回授权；
-- Coo 对话轮次要调工具，必须在连接设置里填一个在 `admins_id` 里的主人 QQ。
+- Coo 对话轮次需完成上方的主人工具授权。群聊与私聊的普通转发沿用原连接设置。
 
 ## 能力
 

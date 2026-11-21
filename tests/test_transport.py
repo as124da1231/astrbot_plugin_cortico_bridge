@@ -396,15 +396,23 @@ class ReadyFrameTests(unittest.IsolatedAsyncioTestCase):
 class ToolIdentityTests(unittest.IsolatedAsyncioTestCase):
     """E-008：缺身份/身份冲突/actor 非法由桥层拒绝。"""
 
-    async def _call(self, frame):
+    async def _call(self, frame, owner_token="", bridge_token="bridge-fixture"):
         calls = []
 
         async def on_tool(name, args, turn, actor):
             calls.append((name, args, turn, actor))
             return True, "ok"
 
-        server = _server(on_tool=on_tool)
-        ws = _Ws()
+        server = bridge.BridgeServer(
+            host="127.0.0.1",
+            port=0,
+            token=bridge_token,
+            on_send=_ok_send,
+            on_tool=on_tool,
+            admin_ids=lambda: ["100000001", "100000002"],
+            owner_credentials=lambda: ("100000001", "owner-fixture"),
+        )
+        ws = _FakeWs([], headers={"X-Cortico-Owner-Token": owner_token})
         await server._handle_tool(ws, frame)
         return ws.last(), calls
 
@@ -467,17 +475,35 @@ class ToolIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][2], "m-1")
 
-    async def test_owner_actor_still_works(self):
+    async def test_owner_actor_with_verified_credential_works(self):
         payload, calls = await self._call(
             {
                 "t": "tool",
                 "rid": "t-7",
                 "name": "x",
                 "actor": {"kind": "owner", "id": "100000001"},
-            }
+            },
+            owner_token="owner-fixture",
         )
         self.assertTrue(payload["ok"])
         self.assertEqual(calls[0][3], {"kind": "owner", "id": "100000001"})
+
+    async def test_owner_actor_requires_separate_token_and_configured_id(self):
+        for account, owner_token, bridge_token in (
+            ("100000001", "", "bridge-fixture"),
+            ("100000001", "bridge-fixture", "bridge-fixture"),
+            ("100000002", "owner-fixture", "bridge-fixture"),
+            ("100000001", "owner-fixture", ""),
+            ("100000001", "owner-fixture", "owner-fixture"),
+        ):
+            with self.subTest(account=account, separate_token=bool(bridge_token)):
+                payload, calls = await self._call(
+                    {"t": "tool", "rid": "t-8", "name": "x", "actor": {"kind": "owner", "id": account}},
+                    owner_token,
+                    bridge_token,
+                )
+                self.assertEqual(payload["error"], codes.OWNER_AUTH_REQUIRED)
+                self.assertEqual(calls, [])
 
 
 class ToolErrorTests(unittest.IsolatedAsyncioTestCase):

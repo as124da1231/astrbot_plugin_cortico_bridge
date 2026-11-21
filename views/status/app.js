@@ -1148,7 +1148,7 @@ function updateToolHero() {
   if (note) {
     note.hidden = !state.wildcard;
     note.textContent = state.wildcard
-      ? '当前用「*」授权：只自动包含读 / 写工具；执行类工具需显式加入。'
+      ? '当前用「*」授权：只包含在插件配置中明确标为读或写的工具。'
       : '';
   }
 
@@ -1204,7 +1204,7 @@ function toolRow(t) {
 
   if (t.active && state.wildcard && t.risk === 'exec' && !state.picked.has(t.name)) {
     const tag = el('span', 'offtag wildtag', '需显式加入');
-    tag.title = '「*」只自动包含读 / 写工具；执行类必须点名加入';
+    tag.title = '「*」只包含已审查的读写工具';
     line.appendChild(tag);
   }
 

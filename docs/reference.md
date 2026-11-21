@@ -10,9 +10,9 @@
 |---|---|---|---|
 | `enabled` | bool | `false` | 接管开关。关着时不开放监听，发送和工具调用返回 `door_closed` |
 | `bridge_platforms` | list | `["default"]` | 只接管这些平台（UMO 第一段）。`webchat`/`console`/`default1` 不在列表里就不碰 |
-| `group_scope` | string | `all` | `all` / `allowlist` |
+| `group_scope` | string | `inherit` | 有旧名单时沿用，默认接全部群。可在群聊页切换 `all` / `allowlist` |
 | `group_allow` | list | `[]` | 指定群；支持 UMO 或旧群号，保存时归一化；`allowlist` 下不能为空 |
-| `group_mode` | string | `mention` | `mention` 只接 @ / 回复 / 命中称呼；`all` 每条群消息都接 |
+| `group_mode` | string | `inherit` | 默认仅点名。有旧 `observe_all` 时沿用；也可明确设置 `mention` / `all` |
 | `name_aliases` | list | `[]` | 除 @ 外算叫到自己的称呼；`mention` 下命中会唤醒并交给 Coo |
 | `listen_host` | string | `127.0.0.1` | 同机用回环；跨机才改 `0.0.0.0`，未配置时也按回环启动 |
 | `listen_port` | int | `17999` | 桥监听端口 |
@@ -25,7 +25,10 @@
 | `tts_max_chars` | int | `120` | 超过就改文字；`0` 不限 |
 | `stt_enabled` | bool | `false` | 把 QQ 语音转成文字 |
 | `stt_provider_id` | string | `""` | 指定 STT Provider |
-| `tools_allow` | list | `[]` | Coo 可调用的 AstrBot 工具；`*` 只含 read/write，不含 exec |
+| `tools_allow` | list | `[]` | 工具许可名单，通配项只包含已审查的读写工具 |
+| `tools_risks` | list | `[]` | 管理员逐项配置工具名与风险，未标注按 exec |
+| `owner_tool_qq` | string | 空 | 获授权的 AstrBot 管理员 QQ |
+| `owner_tool_token` | string | 空 | 主人工具独立令牌 |
 | `private_mode` | string | `all` | `off` / `allowlist` / `all` |
 | `private_allow` | list | `[]` | 私聊白名单 |
 | `private_admin_bypass` | bool | `true` | 管理员即使不在名单也能私聊 |
@@ -38,7 +41,7 @@
 | 值 | 对端能收图 | 对端不能收图 |
 |---|---|---|
 | `auto` | 传原图 | 有视觉模型就转述；没有则正文写明确原因 |
-| `image` | 传原图 | 转述；没有视觉模型则写明确原因，不硬塞原图 |
+| `image` | 传原图 | 强制传原图 |
 | `describe` | 转述 | 转述 |
 | `off` | 只留 `[图片]` | 只留 `[图片]` |
 
@@ -48,14 +51,14 @@
 
 ```text
 []            一个都不给
-["*"]         read / write 全部；exec 不包含
-["exec_x"]    显式点名；调用者必须是 AstrBot 管理员/主人
+["*"]         管理员在 tools_risks 标记的 read / write
+["exec_x"]    显式点名，管理员身份和连接工具授权均须有效
 ```
 
 工具身份：
 
 - QQ 轮次：用触发消息的发言者身份；
-- Coo 轮次：`actor {kind:"owner", id}`，`id` 必须在 `admins_id` 里；
+- Coo 轮次：`actor {kind:"owner", id}` 的账号必须匹配服务端主人 QQ，同时经独立工具令牌授权；
 - World 帧里的 `role` / `owner` 不参与判定。
 
 ---
@@ -107,6 +110,7 @@
 | `missing_identity` | `turn` 和 `actor` 都没有 |
 | `ambiguous_identity` | `turn` 和 `actor` 同时存在 |
 | `bad_actor` | `actor` 不是 `{kind:"owner", id:非空}` |
+| `owner_auth_required` | 当前连接未获得这个主人账号的工具授权 |
 | `tool_failed` | 工具回调抛错；异常原文只进日志 |
 
 工具回调里的业务失败（白名单、过期、权限）沿用下面的中文说明，放在 `tool-ack.error`；能定位到桥层时用上表的英文 code。

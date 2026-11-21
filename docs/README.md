@@ -37,10 +37,10 @@
 ## 当前验证
 
 ```text
-插件 unittest     156 通过
+插件 unittest     以当前运行结果为准
 World Vitest      全部通过
 World typecheck   通过
 前端 app.js       node --check 通过
 ```
 
-用例数量随版本变化，以实际输出为准（1.3.6 实测 156）。
+用例数量随版本变化，以实际输出为准。

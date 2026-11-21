@@ -175,13 +175,22 @@ def _tools():
     ]
 
 
-def _registry(allow, tools=None):
-    config = {"tools_allow": allow}
+def _registry(allow, tools=None, risks=("play_song:write", "query_weather:read")):
+    config = {"tools_allow": allow, "tools_risks": list(risks)}
     tools = tools if tools is not None else _tools()
     return ToolRegistry(_Ctx(tools), lambda: config), tools
 
 
 class RiskGateTests(unittest.TestCase):
+    def test_unreviewed_tools_require_explicit_grant_and_trust(self):
+        tool = FakeTool("maintenance", "Read system status")
+        registry, _ = _registry(["*"], [tool], risks=())
+        self.assertEqual(registry.frame()["items"], [])
+        self.assertFalse(asyncio.run(registry.execute("maintenance", {}, object(), trusted=True))[0])
+        registry, _ = _registry(["maintenance"], [tool], risks=())
+        self.assertFalse(asyncio.run(registry.execute("maintenance", {}, object()))[0])
+        self.assertEqual(tool.calls, [])
+
     def test_risk_for_uses_complete_catalog_and_fails_closed(self):
         registry, _tools_list = _registry(["*"])
         self.assertEqual(registry.risk_for("run_shell"), "exec")

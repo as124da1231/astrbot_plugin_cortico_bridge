@@ -74,35 +74,6 @@ def plugin_label(name: str) -> str:
     return short or name or "未知来源"
 
 
-def risk_of(name: str, description: str) -> str:
-    """粗分三档：exec / write / read。分错不要紧，重要的是默认全关。"""
-    text = f"{name} {description}".lower()
-    exec_words = ("shell", "exec", "python", "browser", "click", "script", "terminal")
-    write_words = (
-        "send",
-        "reply",
-        "post",
-        "upload",
-        "delete",
-        "write",
-        "set_",
-        "create",
-        "bind",
-        "block",
-        "poke",
-        "play",
-        "trigger",
-        "steal",
-        "comment",
-        "like",
-    )
-    if any(w in text for w in exec_words):
-        return "exec"
-    if any(w in text for w in write_words):
-        return "write"
-    return "read"
-
-
 def _signature(parameters: Any) -> str:
     """把 JSON Schema 压成一行参数签名：必填原名，可选带 `?`。"""
     if not isinstance(parameters, dict):
@@ -148,23 +119,31 @@ class ToolRegistry:
                 out.append(name)
         return out
 
-    def allows(self, name: str) -> bool:
-        allow = self.allow_list()
-        return "*" in allow or name in allow
+    def _declared_risks(self) -> dict[str, str]:
+        raw = self._config().get("tools_risks")
+        entries = raw if isinstance(raw, list) else []
+        risks = {}
+        for entry in entries:
+            name, _, risk = _s(entry).rpartition(":")
+            name, risk = name.strip(), risk.strip().lower()
+            if name and risk in ("read", "write", "exec"):
+                risks[name] = risk
+        return risks
 
     # ---------- 清单 ----------
 
     def catalog(self, force: bool = False) -> list[dict]:
+        risks = self._declared_risks()
         now = time.time()
         if not force and self._catalog and now - self._catalog_at < CATALOG_TTL:
-            return self._catalog
+            return [{**row, "risk": risks.get(row["name"], "exec")} for row in self._catalog]
         rows: list[dict] = []
         labels = _plugin_labels()
         try:
             tools = self.context.get_llm_tool_manager().func_list
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"Cortico Bridge: 读工具表失败 —— {exc}")
-            return self._catalog
+            return []
         for tool in tools:
             name = _s(getattr(tool, "name", ""))
             if not name:
@@ -177,7 +156,7 @@ class ToolRegistry:
                     "desc": desc[:300],
                     "plugin": plugin,
                     "plugin_label": labels.get(plugin) or plugin_label(plugin),
-                    "risk": risk_of(name, desc),
+                    "risk": risks.get(name, "exec"),
                     "active": bool(getattr(tool, "active", True)),
                     "sig": _signature(getattr(tool, "parameters", None)),
                 }
@@ -271,10 +250,10 @@ class ToolRegistry:
             return False, f"工具 {name or '（空名）'} 没有在插件的 tools_allow 里"
 
         row = self._catalog_row(name)
-        risk = self.risk_for(name)
+        if row is None:
+            return False, f"工具 {name} 不在可用清单里，不能执行"
+        risk = row["risk"]
         if risk == "exec":
-            if row is None:
-                return False, f"工具 {name} 不在可用清单里，不能执行"
             if not explicit:
                 return False, f"工具 {name} 是执行类，需要显式加入 tools_allow"
             if not trusted:

@@ -153,6 +153,17 @@ def _bridge(mode, peer, provider="vision-1", reply="一只猫", error=None):
 
 
 class ImagePlanTests(unittest.IsolatedAsyncioTestCase):
+    def test_native_image_uses_astrbot_compression_setting(self):
+        bridge = _bridge("image", peer=True)
+        bridge.context.get_config = lambda: {
+            "provider_settings": {"image_compress_options": {"max_size": 2048}}
+        }
+        media_utils = types.ModuleType("astrbot.core.utils.media_utils")
+        media_utils.normalize_model_image_max_size = mock.Mock(return_value=2048)
+        with mock.patch.dict(sys.modules, {media_utils.__name__: media_utils}):
+            self.assertEqual(bridge._image_max_size(), 2048)
+        media_utils.normalize_model_image_max_size.assert_called_once_with(2048)
+
     async def test_peer_false_auto_describes(self):
         bridge = _bridge("auto", peer=False)
         plan = bridge.image_plan()

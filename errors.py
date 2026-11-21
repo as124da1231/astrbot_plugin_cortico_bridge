@@ -40,6 +40,7 @@ DOOR_CLOSED = "door_closed"
 MISSING_IDENTITY = "missing_identity"  # turn 和 actor 都没有
 AMBIGUOUS_IDENTITY = "ambiguous_identity"  # turn 和 actor 同时存在
 BAD_ACTOR = "bad_actor"  # actor 不是 {kind: owner, id: 非空}
+OWNER_AUTH_REQUIRED = "owner_auth_required"  # 连接未获对应主人的工具授权
 TOOL_FAILED = "tool_failed"  # 工具回调抛错（原文只进日志）
 
 ALL_CODES = frozenset(
@@ -68,8 +69,7 @@ ALL_CODES = frozenset(
         MISSING_IDENTITY,
         AMBIGUOUS_IDENTITY,
         BAD_ACTOR,
+        OWNER_AUTH_REQUIRED,
         TOOL_FAILED,
     }
 )
-
-__all__ = sorted(ALL_CODES)

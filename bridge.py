@@ -253,6 +253,7 @@ class BridgeServer:
         on_event: EventCallback | None = None,
         admin_ids: Callable[[], list[str]] | None = None,
         on_tool: ToolCallback | None = None,
+        owner_credentials: Callable[[], tuple[str, str]] | None = None,
         tools_frame: ToolsProvider | None = None,
         tts_available: TtsInfoProvider | None = None,
         conversations: Callable[[], list[dict]] | None = None,
@@ -264,6 +265,7 @@ class BridgeServer:
         self._on_event = on_event
         self._admin_ids = admin_ids or (lambda: [])
         self._on_tool = on_tool
+        self._owner_credentials = owner_credentials or (lambda: ("", ""))
         self._tools_frame = tools_frame
         self._tts_available = tts_available or (lambda: False)
         self._conversations = conversations or (lambda: [])
@@ -339,7 +341,7 @@ class BridgeServer:
                 ping_interval=20,
                 ping_timeout=20,
             )
-        except OSError as exc:
+        except (OSError, ValueError, OverflowError) as exc:
             logger.error(f"Cortico Bridge: 无法监听 {self.host}:{self.port} —— {exc}")
             self._server = None
             self.listening = False
@@ -453,13 +455,28 @@ class BridgeServer:
             # 第一条 QQ 事件到达后由上层补上；早期为空。
             "self": {"id": self.self_id, "name": self.self_name},
             # 谁是 AstrBot 的管理员；当前约定这就是 QQ 上的「主人」。
-            "admins": list(self._admin_ids()),
+            "admins": list(self._admin_ids()) if self.token else [],
+            "ownerTools": bool(self.tool_owner),
             # 桥这边能不能发语音，以及会用哪个 provider（World 可据此少试一次）。
             "tts": await self._tts_info(),
             # 桥记得的会话（含重启前恢复的），World 用它来支持主动发送。
             "conversations": self._conversations()[:20],
             "v": 1,
         }
+
+    @property
+    def tool_owner(self) -> str:
+        return self._authorized_owner(self._client)
+
+    def _authorized_owner(self, websocket) -> str:
+        owner_id, owner_token = self._owner_credentials()
+        if not self.token or not owner_token or token_equal(self.token, owner_token):
+            return ""
+        headers = getattr(getattr(websocket, "request", None), "headers", None)
+        presented = _header(headers, "x-cortico-owner-token")
+        if not presented or not token_equal(presented, owner_token):
+            return ""
+        return owner_id if owner_id in self._admin_ids() else ""
 
     async def push_ready(self) -> None:
         """重推一次 ready：握手时 provider 可能还没就绪，语音设置变了也要刷新。"""
@@ -912,12 +929,14 @@ class BridgeServer:
             or not _s(actor.get("id")).strip()
         ):
             identity_code = codes.BAD_ACTOR
+        elif actor is not None and self._authorized_owner(websocket) != _s(actor.get("id")).strip():
+            identity_code = codes.OWNER_AUTH_REQUIRED
 
         if identity_code:
-            await self._send_to(
-                websocket,
-                {"t": "tool-ack", "rid": rid, "ok": False, "error": identity_code},
-            )
+            payload = {"t": "tool-ack", "rid": rid, "ok": False, "error": identity_code}
+            if identity_code == codes.OWNER_AUTH_REQUIRED:
+                payload["note"] = "请在 AstrBot 配置主人 QQ 和独立工具令牌，并在 Coo 连接页填入相同值。"
+            await self._send_to(websocket, payload)
             return
 
         code = ""

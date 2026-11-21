@@ -17,11 +17,12 @@
     "description": "群范围：全部群 / 指定群",
     "type": "string",
     "options": [
+      "inherit",
       "all",
       "allowlist"
     ],
-    "default": "all",
-    "hint": "all=所有群都可以进来；allowlist=只处理 group_allow 里的群。旧 observe_groups 会自动迁移。"
+    "default": "inherit",
+    "hint": "inherit=沿用旧群名单，无旧名单时接全部群；all=所有群；allowlist=只处理 group_allow。要清除旧名单，请在插件的群聊页保存全部群。"
   },
   "group_allow": {
     "description": "指定群名单",
@@ -33,11 +34,12 @@
     "description": "群消息范围：仅被叫 / 全部消息",
     "type": "string",
     "options": [
+      "inherit",
       "mention",
       "all"
     ],
-    "default": "mention",
-    "hint": "mention=只有 @ 或命中称呼时才交给 Cortico；all=群里每条消息都交给 Cortico。旧 observe_all 会自动迁移。"
+    "default": "inherit",
+    "hint": "inherit=沿用旧 observe_all，未设置时仅处理点名；mention=仅被叫时交给 Cortico；all=处理群里的全部消息。"
   },
   "name_aliases": {
     "description": "算作叫到自己的称呼",
@@ -70,6 +72,20 @@
     "type": "int",
     "default": 30,
     "hint": "防止 Cortico 失控刷屏。0 表示不限。"
+  },
+  "owner_tool_qq": {
+    "description": "可从 Coo 调用工具的主人 QQ",
+    "type": "string",
+    "default": "",
+    "hint": "填写一个已在 AstrBot 管理员名单里的 QQ 号，并在 Coo 连接页选择同一个账号。"
+  },
+  "owner_tool_token": {
+    "description": "主人工具令牌",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "obvious_hint": true,
+    "hint": "用于 Coo 对话借主人身份调用工具。桥 token 须已设置；此处另填一个不同的独立随机令牌，使用可打印 ASCII 字符。"
   },
   "image_vision_provider": {
     "description": "群里的图片用哪个模型看",
@@ -124,7 +140,13 @@
     "description": "允许 Cortico 调用的 AstrBot 工具",
     "type": "list",
     "default": [],
-    "hint": "一行一个工具名，留空表示一个都不给，填 * 表示全部（* 只含 read/write，不含 exec）。exec 类工具必须显式点名，且只有 AstrBot 管理员/主人身份能执行；工具身份是发言者或 Coo 主人，不是 World 传来的 role/owner。可用工具名在插件启动日志里列出（搜「可调工具」）。"
+    "hint": "一行一个工具名。* 只包含管理员在 tools_risks 中明确标记为 read 或 write 的工具。其余工具必须点名，并通过管理员身份和桥授权。"
+  },
+  "tools_risks": {
+    "description": "已审查的工具风险",
+    "type": "list",
+    "default": [],
+    "hint": "每行填写 工具名:read 或 工具名:write。只标记已确认行为的工具；未标记的工具一律按执行类处理。"
   },
   "private_mode": {
     "description": "私聊策略",

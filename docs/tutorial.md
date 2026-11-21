@@ -161,7 +161,7 @@ QQ 群：Coo 的回复
 QQ：歌词或失败原因
 ```
 
-`tools_allow=["*"]` 只自动包含 read / write，不含 exec。exec 类工具（shell、python、browser 等）必须显式点名，且调用者必须是 AstrBot 管理员/主人。权限拒绝会如实失败，不会回“成功”。
+`tools_allow=["*"]` 只自动包含管理员在 `tools_risks` 中明确标记的 read / write。其他工具按 exec 管理，须显式点名、具备管理员身份，并使用已获得工具授权的连接。权限拒绝会如实失败，不会回“成功”。
 
 ---
 

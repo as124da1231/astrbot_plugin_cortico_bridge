@@ -191,7 +191,8 @@ image_plan()
     auto / image               → 传原图
     describe                   → 转述
   对端不能收图
-    describe / auto / image    → 有视觉模型就转述
+    describe / auto            → 有视觉模型就转述
+    image                      → 强制传原图
                                  没有就写明确原因，不静默丢图
 ```
 
@@ -412,13 +413,13 @@ pnpm test
 当前：
 
 ```text
-插件 unittest     156 通过
+插件 unittest     以当前运行结果为准
 World Vitest      全部通过
 World typecheck   通过
 前端 app.js       node --check 通过
 ```
 
-用例数量随版本变化，以实际输出为准（1.3.6 实测 156）。
+用例数量随版本变化，以实际输出为准。
 
 实机验证：
 

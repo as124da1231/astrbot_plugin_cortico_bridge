@@ -64,8 +64,6 @@ class Delivery:
         self._last_save_attempt = 0.0
         self._dirty = False
         self._migration_pending = False
-        # 最近一次发送失败的结构化错误码；bridge 用它写 ack.error。
-        self.last_error_code = ""
         self._load_umos()
 
     # ---------- umo 登记 ----------
@@ -539,8 +537,8 @@ class Delivery:
         umo: str = "",
         allow_text_fallback: bool = True,
         at: list[str] | None = None,
-    ) -> tuple[bool, str, bool, bool]:
-        """发一条消息。返回 (成功, 备注, 是否真的用了语音, 结果是否未知)。
+    ) -> tuple[bool, str, bool, bool, str]:
+        """发一条消息。返回 (成功, 备注, 是否真的用了语音, 结果是否未知, 错误码)。
 
         语音是「尽量」：没开 TTS、没 Provider、太长或合成失败，都会退回文字，
         并在备注里说明，不把整条消息吞掉。`allow_text_fallback=False`（试听）
@@ -549,29 +547,23 @@ class Delivery:
         附件失败的降级只用于「确定没发」：构造阶段异常、平台明确 `ok is False`。
         超时/未知异常可能已经送达，不重试，返回 `uncertain=True`。
         """
-        self.last_error_code = ""
         # 单通道：只认 UMO。旧帧的 conv 在升级时已经迁移成 UMO，不再运行时猜。
         target = _s(umo).strip()
         if not target:
-            self.last_error_code = codes.MISSING_UMO
-            return False, "这一帧没有带 umo，桥只按 umo 发送", False, False
+            return False, "这一帧没有带 umo，桥只按 umo 发送", False, False, codes.MISSING_UMO
         parsed = self._parse_umo(target)
         if parsed is None:
-            self.last_error_code = codes.INVALID_UMO
             logger.debug("Cortico Bridge: 非法 UMO —— %r", target)
-            return False, "会话标识格式不正确", False, False
+            return False, "会话标识格式不正确", False, False, codes.INVALID_UMO
         platform_id, conv_kind, conv_id = parsed
         umo = target
         if not self.has_umo(umo):
-            self.last_error_code = codes.UNKNOWN_UMO
             logger.debug("Cortico Bridge: 未知会话 %r", umo)
-            return False, "桥还没有见过这个会话，先让对方发一条消息", False, False
+            return False, "桥还没有见过这个会话，先让对方发一条消息", False, False, codes.UNKNOWN_UMO
         if not self.allow():
-            self.last_error_code = codes.RATE_LIMITED
-            return False, f"已达到每分钟 {self._limit()} 条的上限，本条没有发出", False, False
+            return False, f"已达到每分钟 {self._limit()} 条的上限，本条没有发出", False, False, codes.RATE_LIMITED
         if voice and not text.strip():
-            self.last_error_code = codes.VOICE_NEEDS_TEXT
-            return False, "语音需要正文", False, False
+            return False, "语音需要正文", False, False, codes.VOICE_NEEDS_TEXT
 
         try:
             chain, used_voice, reply_added, image_added, notes, aborted = (
@@ -585,24 +577,18 @@ class Delivery:
             if text.strip():
                 status, why = await self._send_plain(umo, text)
                 if status == "ok":
-                    return True, "附件构造失败，已改发纯文字", False, False
+                    return True, "附件构造失败，已改发纯文字", False, False, ""
                 if status == "false":
-                    self.last_error_code = codes.PLATFORM_MISSING
-                    return False, "附件构造失败，改发纯文字也没有发出", False, False
-                self.last_error_code = (
-                    codes.SEND_TIMEOUT if status == "timeout" else codes.SEND_FAILED
-                )
-                return False, why, False, True
-            self.last_error_code = codes.SEND_FAILED
-            return False, "附件构造失败，本条没有发出", False, False
+                    return False, "附件构造失败，改发纯文字也没有发出", False, False, codes.PLATFORM_MISSING
+                error_code = codes.SEND_TIMEOUT if status == "timeout" else codes.SEND_FAILED
+                return False, why, False, True, error_code
+            return False, "附件构造失败，本条没有发出", False, False, codes.SEND_FAILED
 
         if aborted:
-            self.last_error_code = codes.TTS_UNAVAILABLE
-            return False, _join_notes(notes) or "语音不可用，本条没有发出", False, False
+            return False, _join_notes(notes) or "语音不可用，本条没有发出", False, False, codes.TTS_UNAVAILABLE
 
         if not chain.chain:
-            self.last_error_code = codes.EMPTY_MESSAGE
-            return False, "正文和图片都是空的", False, False
+            return False, "正文和图片都是空的", False, False, codes.EMPTY_MESSAGE
 
         # 按实际 append 进链的组件判断，不用入参：引用构造失败/语音回退都不算附件。
         had_attachment = reply_added or image_added or used_voice
@@ -615,12 +601,10 @@ class Delivery:
                 "Cortico Bridge: 平台发送超过 %.0f 秒没有确认，消息可能已经发出",
                 SEND_TIMEOUT,
             )
-            self.last_error_code = codes.SEND_TIMEOUT
-            return False, "平台发送超时，可能已发出", used_voice, True
+            return False, "平台发送超时，可能已发出", used_voice, True, codes.SEND_TIMEOUT
         except Exception as exc:  # noqa: BLE001
             logger.warning("Cortico Bridge: 发送失败 —— %s", exc, exc_info=True)
-            self.last_error_code = codes.SEND_FAILED
-            return False, "发送异常，可能已发出", used_voice, True
+            return False, "发送异常，可能已发出", used_voice, True, codes.SEND_FAILED
 
         if ok is False:
             # 平台明确说没发：有附件且还有正文时，降级重试一次纯文字。
@@ -628,17 +612,13 @@ class Delivery:
                 status, why = await self._send_plain(umo, text)
                 if status == "ok":
                     notes.append("附件未发出，已改发纯文字")
-                    return True, _join_notes(notes), used_voice, False
+                    return True, _join_notes(notes), False, False, ""
                 if status == "false":
-                    self.last_error_code = codes.PLATFORM_MISSING
                     notes.append("改发纯文字也没有发出")
-                    return False, _join_notes(notes), used_voice, False
-                self.last_error_code = (
-                    codes.SEND_TIMEOUT if status == "timeout" else codes.SEND_FAILED
-                )
+                    return False, _join_notes(notes), used_voice, False, codes.PLATFORM_MISSING
                 notes.append(why)
-                return False, _join_notes(notes), used_voice, True
-            self.last_error_code = codes.PLATFORM_MISSING
+                error_code = codes.SEND_TIMEOUT if status == "timeout" else codes.SEND_FAILED
+                return False, _join_notes(notes), False, True, error_code
             notes.append("AstrBot 没有找到该会话对应的平台")
-            return False, _join_notes(notes), used_voice, False
-        return True, note, used_voice, False
+            return False, _join_notes(notes), used_voice, False, codes.PLATFORM_MISSING
+        return True, note, used_voice, False, ""

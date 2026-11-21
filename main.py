@@ -38,6 +38,8 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
 
+from . import errors as codes
+
 try:  # 面板是可选能力：旧版 AstrBot 没有 astrbot.api.web，插件本身照样能跑。
     from astrbot.api.web import (
         error_response,
@@ -179,6 +181,7 @@ class CorticoBridge(Star):
             on_event=self._on_server_event,
             admin_ids=self._admin_ids,
             on_tool=self._on_tool_call,
+            owner_credentials=self._owner_tool_credentials,
             tools_frame=self.tools.frame,
             tts_available=self._tts_info,
             conversations=self.delivery.known_conversations,
@@ -275,10 +278,21 @@ class CorticoBridge(Star):
     # ---------- 配置读写 ----------
 
     def _port(self) -> int:
+        raw = self.config.get("listen_port", 17999)
         try:
-            return int(self.config.get("listen_port", 17999) or 17999)
-        except (TypeError, ValueError):
-            return 17999
+            value = float(raw) if not isinstance(raw, bool) else 0.0
+            if value.is_integer() and 1 <= value <= 65535:
+                return int(value)
+        except (TypeError, ValueError, OverflowError):
+            pass
+        logger.warning("Cortico Bridge: 监听端口无效，使用 17999")
+        return 17999
+
+    def _owner_tool_credentials(self) -> tuple[str, str]:
+        return (
+            _s(self.config.get("owner_tool_qq")).strip(),
+            _s(self.config.get("owner_tool_token")).strip(),
+        )
 
     def _listen_host(self) -> str:
         """监听地址缺省/留空一律回环；跨机必须显式写 0.0.0.0 并配 token。"""
@@ -301,15 +315,15 @@ class CorticoBridge(Star):
 
     def _group_scope(self) -> str:
         """群范围：all / allowlist。旧配置按 observe_groups 是否为空推导。"""
-        raw = self.config.get("group_scope")
-        if raw in (None, ""):
+        raw = _s(self.config.get("group_scope")).strip().lower()
+        if raw in ("", "inherit") or (raw == "all" and not self.config.get("group_allow")):
             return "allowlist" if self._observe_groups() else "all"
-        return "allowlist" if _s(raw).strip().lower() == "allowlist" else "all"
+        return "allowlist" if raw == "allowlist" else "all"
 
     def _group_allow(self) -> list[str]:
         """指定群列表；旧配置回退到 observe_groups。"""
         raw = self.config.get("group_allow")
-        if raw is None:
+        if not raw and _s(self.config.get("group_scope")).strip().lower() != "allowlist":
             return self._observe_groups()
         if isinstance(raw, list):
             return [str(x).strip() for x in raw if str(x).strip()]
@@ -318,8 +332,8 @@ class CorticoBridge(Star):
     def _group_mode(self) -> str:
         """群消息范围：mention / all。旧配置按 observe_all 推导。"""
         raw = self.config.get("group_mode")
-        if raw in (None, ""):
-            return "all" if bool(self.config.get("observe_all", False)) else "mention"
+        if raw in (None, "", "inherit"):
+            return "all" if _as_bool(self.config.get("observe_all")) else "mention"
         return "all" if _s(raw).strip().lower() == "all" else "mention"
 
     def _bridge_platforms(self) -> list[str]:
@@ -704,7 +718,7 @@ class CorticoBridge(Star):
                 self._turns.pop(turn, None)
                 return False, "这一轮的消息已经过期，请重新说一次"
             # T-001：只按 AstrBot 管理员名单判断；不信任 World 帧里的 role/owner。
-            trusted = _s(event.get_sender_id()) in self._admin_ids()
+            trusted = bool(self.server.tool_owner) and _s(event.get_sender_id()) in self._admin_ids()
             who = f"消息 {turn}"
         else:
             owner_id = ""
@@ -714,6 +728,8 @@ class CorticoBridge(Star):
                 return False, "这一轮没有 QQ 消息身份；要在这里调工具，先在 Coo 的连接设置里填主人 QQ"
             if owner_id not in self._admin_ids():
                 return False, f"{owner_id} 不在 AstrBot 的管理员名单里"
+            if owner_id != self.server.tool_owner:
+                return False, "未获该主人 QQ 的工具授权"
             trusted = True
             platform = (self._bridge_platforms() or ["default"])[0]
             try:
@@ -771,8 +787,8 @@ class CorticoBridge(Star):
         at: list[str] | None = None,
     ) -> tuple[bool, str, bool, bool, str]:
         if not self.config.get("enabled", False):
-            return False, "桥未启用，发送门是关的", False, False, "door_closed"
-        ok, note, used_voice, uncertain = await self.delivery.send(
+            return False, "桥未启用，发送门是关的", False, False, codes.DOOR_CLOSED
+        ok, note, used_voice, uncertain, error_code = await self.delivery.send(
             platform, conv_kind, conv_id, text, reply_to, image, voice, umo, at=at or []
         )
         if ok:
@@ -806,7 +822,7 @@ class CorticoBridge(Star):
                     "text": f"{prefix} {conv_kind}:{conv_id} —— {note}",
                 }
             )
-        return ok, note, used_voice, uncertain, ("" if ok else self.delivery.last_error_code)
+        return ok, note, used_voice, uncertain, error_code
 
     def _remember_out(
         self,
@@ -1272,7 +1288,10 @@ class CorticoBridge(Star):
                 normalize_model_image_max_size,
             )
 
-            return normalize_model_image_max_size(None)
+            config = self.context.get_config() or {}
+            settings = config.get("provider_settings") or {}
+            compression = settings.get("image_compress_options") or {}
+            return normalize_model_image_max_size(compression.get("max_size"))
         except Exception:  # noqa: BLE001
             return 1280
 
@@ -2230,7 +2249,7 @@ class CorticoBridge(Star):
         if not umo:
             return error_response("最近的会话标识不完整。", status_code=400)
         # 试听失败只报错：allow_text_fallback=False 保证不会把文字发到最近会话。
-        ok, note, used_voice, _uncertain = await self.delivery.send(
+        ok, note, used_voice, _uncertain, _error_code = await self.delivery.send(
             "", "", "", text, "", None, True, umo, allow_text_fallback=False
         )
         if not ok:

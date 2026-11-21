@@ -248,7 +248,7 @@ class SendFallbackTests(unittest.TestCase):
     def test_construction_failure_without_text_is_not_uncertain(self):
         STATE["image_raise"] = True
         delivery, ctx = _delivery()
-        ok, _note, _voice, uncertain = asyncio.run(
+        ok, _note, _voice, uncertain, error_code = asyncio.run(
             delivery.send("", "", "", "", image={"base64": "x"}, umo=UMO)
         )
         self.assertFalse(ok)
@@ -258,7 +258,7 @@ class SendFallbackTests(unittest.TestCase):
     def test_construction_failure_with_text_retries_plain(self):
         STATE["image_raise"] = True
         delivery, ctx = _delivery()
-        ok, note, _voice, uncertain = asyncio.run(
+        ok, note, _voice, uncertain, error_code = asyncio.run(
             delivery.send("", "", "", "hello", image={"base64": "x"}, umo=UMO)
         )
         self.assertTrue(ok)
@@ -269,7 +269,7 @@ class SendFallbackTests(unittest.TestCase):
 
     def test_platform_false_retries_plain_without_attachment(self):
         delivery, ctx = _delivery(results=[False, True])
-        ok, note, _voice, uncertain = asyncio.run(
+        ok, note, _voice, uncertain, error_code = asyncio.run(
             delivery.send("", "", "", "hello", image={"base64": "x"}, umo=UMO)
         )
         self.assertTrue(ok)
@@ -283,31 +283,31 @@ class SendFallbackTests(unittest.TestCase):
         delivery, ctx = _delivery(
             exc=RuntimeError("https://api.example?key=SECRET")
         )
-        ok, note, _voice, uncertain = asyncio.run(
+        ok, note, _voice, uncertain, error_code = asyncio.run(
             delivery.send("", "", "", "hello", umo=UMO)
         )
         self.assertFalse(ok)
         self.assertTrue(uncertain)
-        self.assertEqual(delivery.last_error_code, "send_failed")
+        self.assertEqual(error_code, "send_failed")
         self.assertNotIn("SECRET", note)
         self.assertEqual(ctx.calls, 1)
         self.assertTrue(any("SECRET" in text for _lvl, text in logger.records))
 
     def test_timeout_is_not_retried_and_is_uncertain(self):
         delivery, ctx = _delivery(exc=asyncio.TimeoutError())
-        ok, note, _voice, uncertain = asyncio.run(
+        ok, note, _voice, uncertain, error_code = asyncio.run(
             delivery.send("", "", "", "hello", umo=UMO)
         )
         self.assertFalse(ok)
         self.assertTrue(uncertain)
-        self.assertEqual(delivery.last_error_code, "send_timeout")
+        self.assertEqual(error_code, "send_timeout")
         self.assertIn("超时", note)
         self.assertEqual(ctx.calls, 1)
 
     def test_reply_construction_failure_is_not_an_attachment(self):
         STATE["reply_raise"] = True
         delivery, ctx = _delivery(results=[False])
-        ok, note, _voice, uncertain = asyncio.run(
+        ok, note, _voice, uncertain, error_code = asyncio.run(
             delivery.send("", "", "", "hello", reply_to="m-1", umo=UMO)
         )
         self.assertFalse(ok)
@@ -319,7 +319,7 @@ class SendFallbackTests(unittest.TestCase):
         delivery, ctx = _delivery(
             results=[False], config={"tts_enabled": True}
         )
-        ok, note, used_voice, uncertain = asyncio.run(
+        ok, note, used_voice, uncertain, error_code = asyncio.run(
             delivery.send("", "", "", "hello", voice=True, umo=UMO)
         )
         self.assertFalse(ok)
@@ -330,7 +330,7 @@ class SendFallbackTests(unittest.TestCase):
 
     def test_voice_without_text_fallback_stops_before_send(self):
         delivery, ctx = _delivery(config={"tts_enabled": False})
-        ok, _note, used_voice, uncertain = asyncio.run(
+        ok, _note, used_voice, uncertain, error_code = asyncio.run(
             delivery.send(
                 "", "", "", "hello", voice=True, umo=UMO, allow_text_fallback=False
             )
@@ -338,12 +338,12 @@ class SendFallbackTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertFalse(used_voice)
         self.assertFalse(uncertain)
-        self.assertEqual(delivery.last_error_code, "tts_unavailable")
+        self.assertEqual(error_code, "tts_unavailable")
         self.assertEqual(ctx.calls, 0)
 
     def test_plain_send_still_works(self):
         delivery, ctx = _delivery()
-        ok, _note, _voice, uncertain = asyncio.run(
+        ok, _note, _voice, uncertain, error_code = asyncio.run(
             delivery.send("", "", "", "hello", umo=UMO)
         )
         self.assertTrue(ok)
@@ -352,7 +352,7 @@ class SendFallbackTests(unittest.TestCase):
 
     def test_group_mentions_are_added_before_text(self):
         delivery, ctx = _delivery()
-        ok, note, _voice, _uncertain = asyncio.run(
+        ok, note, _voice, _uncertain, error_code = asyncio.run(
             delivery.send("", "group", "123456789", "@你", umo=UMO, at=["10001", "10002"])
         )
         self.assertTrue(ok, note)
@@ -360,7 +360,7 @@ class SendFallbackTests(unittest.TestCase):
 
     def test_all_mention_is_one_component(self):
         delivery, ctx = _delivery()
-        ok, _note, _voice, _uncertain = asyncio.run(
+        ok, _note, _voice, _uncertain, error_code = asyncio.run(
             delivery.send("", "group", "123456789", "通知", umo=UMO, at=["all"])
         )
         self.assertTrue(ok)
@@ -370,7 +370,7 @@ class SendFallbackTests(unittest.TestCase):
         private_umo = "default:FriendMessage:123456789"
         delivery, ctx = _delivery()
         delivery.remember("default", "private", "123456789", private_umo)
-        ok, note, _voice, _uncertain = asyncio.run(
+        ok, note, _voice, _uncertain, error_code = asyncio.run(
             delivery.send("", "private", "123456789", "hi", umo=private_umo, at=["10001"])
         )
         self.assertTrue(ok)

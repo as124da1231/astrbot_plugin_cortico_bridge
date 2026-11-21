@@ -6,6 +6,7 @@ main.py 依赖较多 AstrBot 层；这里和 test_images 一样只 stub 到 impo
 
 import contextlib
 import importlib.util
+import json
 import sys
 import time
 import types
@@ -211,6 +212,7 @@ class FakeServer:
         self.host = "0.0.0.0"
         self.port = 17999
         self.token = "old-token"
+        self.tool_owner = "111"
         self.listening = False
         self.listen_error = ""
         self.client_address = ""
@@ -237,12 +239,11 @@ class FakeServer:
 
 
 class FakeDelivery:
-    def __init__(self, conversations=None, result=(True, "", True, False)):
+    def __init__(self, conversations=None, result=(True, "", True, False, "")):
         self.conversations = conversations or [
             {"key": "group:1", "umo": "default:GroupMessage:1"}
         ]
         self.result = result
-        self.last_error_code = ""
         self.sent = []
 
     def known_conversations(self):
@@ -673,7 +674,7 @@ class VoiceTestTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_voice_failure_never_falls_back_to_text(self):
         bridge = make_bridge({"tts_enabled": True})
-        bridge.delivery = FakeDelivery(result=(False, "TTS 失败", False, False))
+        bridge.delivery = FakeDelivery(result=(False, "TTS 失败", False, False, "tts_unavailable"))
 
         async def provider(_kind):
             return object()
@@ -688,6 +689,13 @@ class VoiceTestTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TrustedToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_qq_admin_without_tool_authorization_is_not_trusted(self):
+        bridge = make_bridge(context=FakeContext(admins=["111"]))
+        bridge.server.tool_owner = ""
+        bridge._turns["t1"] = (time.time(), FakeEvent(sender_id="111"))
+        await bridge._on_tool_call("test_tool", {}, "t1")
+        self.assertFalse(bridge.tools.executed[-1][2])
+
     async def test_qq_admin_sender_is_trusted(self):
         bridge = make_bridge(context=FakeContext(admins=["111"]))
         event = FakeEvent(sender_id="111")
@@ -746,9 +754,8 @@ class SendPassThroughTests(unittest.IsolatedAsyncioTestCase):
     async def test_send_returns_five_tuple_with_code_and_note(self):
         bridge = make_bridge()
         bridge.delivery = FakeDelivery(
-            result=(False, "发送失败，详情见插件日志", False, False)
+            result=(False, "发送失败，详情见插件日志", False, False, "send_failed")
         )
-        bridge.delivery.last_error_code = "send_failed"
         result = await bridge._on_send_from_cortico(
             "group", "1", "hi", "", "default"
         )
@@ -756,6 +763,32 @@ class SendPassThroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result[0])
         self.assertEqual(result[1], "发送失败，详情见插件日志")
         self.assertEqual(result[4], "send_failed")
+
+
+class ConfigCompatibilityTests(unittest.TestCase):
+    def test_schema_defaults_preserve_legacy_group_policy(self):
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        defaults = {key: value["default"] for key, value in schema.items()}
+        bridge = make_bridge({**defaults, "observe_groups": ["123456"], "observe_all": True})
+        self.assertEqual(bridge._group_scope(), "allowlist")
+        self.assertEqual(bridge._group_allow(), ["123456"])
+        self.assertEqual(bridge._group_mode(), "all")
+
+    def test_already_injected_scope_does_not_widen_legacy_allowlist(self):
+        bridge = make_bridge({"group_scope": "all", "group_allow": [], "observe_groups": ["123456"]})
+        self.assertEqual(bridge._group_scope(), "allowlist")
+        self.assertEqual(bridge._group_allow(), ["123456"])
+        bridge.config.update({"group_scope": "allowlist", "group_allow": ["456789"]})
+        self.assertEqual(bridge._group_allow(), ["456789"])
+
+    def test_invalid_port_uses_default(self):
+        bridge = make_bridge()
+        for port in (None, 0, True, 1.5, -1, 65536, float("inf")):
+            with self.subTest(port=port):
+                bridge.config["listen_port"] = port
+                self.assertEqual(bridge._port(), 17999)
+        bridge.config["listen_port"] = "18000.0"
+        self.assertEqual(bridge._port(), 18000)
 
 
 class PageBackendTests(unittest.IsolatedAsyncioTestCase):
