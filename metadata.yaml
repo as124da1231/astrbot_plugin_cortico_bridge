@@ -9,7 +9,7 @@ author: as124da1231
 repo: https://github.com/as124da1231/astrbot_plugin_cortico_bridge
 entry: main.py
 license: MIT
-astrbot_version: ">=4.25.3"
+astrbot_version: ">=4.29.1"
 support_platforms:
   - aiocqhttp
 tags:
