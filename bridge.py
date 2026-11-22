@@ -4,7 +4,7 @@
 上层通过两个回调把行为注入进来：
 - on_send(conv_kind, conv_id, text, reply_to, platform, image, voice, umo, at)
   -> (ok, note, used_voice, uncertain, error_code)
-- on_tool(name, args, turn, actor) -> (ok, text)
+- on_tool(name, args, turn, actor) -> (ok, text or component receipt)
 """
 
 from __future__ import annotations
@@ -22,8 +22,10 @@ from astrbot.api import logger
 
 try:  # AstrBot 以包方式加载插件；单元测试把插件目录直接放进 sys.path
     from . import errors as codes
+    from .message_segments import ComponentReceipt
 except ImportError:  # pragma: no cover - 单文件加载（测试/脚本）
     import errors as codes
+    from message_segments import ComponentReceipt
 
 try:
     from websockets.asyncio.server import serve as ws_serve
@@ -42,8 +44,8 @@ SendCallback = Callable[
     Awaitable[tuple[bool, str, bool, bool, str]],
 ]
 EventCallback = Callable[[str, dict], None]
-# (工具名, 参数, 触发这一轮的消息 id, Coo 轮次的主人身份) -> (成功, 文本)
-ToolCallback = Callable[[str, dict, str, "dict | None"], Awaitable[tuple[bool, str]]]
+# (工具名, 参数, 触发这一轮的消息 id, Coo 轮次的主人身份) -> (成功, 文本或组件回执)
+ToolCallback = Callable[[str, dict, str, "dict | None"], Awaitable[tuple[bool, str | ComponentReceipt]]]
 # 握手后随 ready 一起下发的工具清单
 ToolsProvider = Callable[[], dict]
 # 语音能力：同步返回 bool，或返回 {ready, provider}（也可以 async）
@@ -959,7 +961,12 @@ class BridgeServer:
                 note = "工具执行失败，详情见插件日志"
         payload: dict[str, Any] = {"t": "tool-ack", "rid": rid, "ok": ok}
         if ok:
-            payload["result"] = text[:MAX_TOOL_RESULT]
+            if isinstance(text, ComponentReceipt):
+                payload["result"] = text.text[:MAX_TOOL_RESULT]
+                if text.images and self.capabilities.get("component_media"):
+                    payload["images"] = text.images
+            else:
+                payload["result"] = text[:MAX_TOOL_RESULT]
         else:
             # ack.error 只放稳定 code；业务原因（权限/白名单/超时）放 note。
             payload["error"] = code or codes.TOOL_FAILED

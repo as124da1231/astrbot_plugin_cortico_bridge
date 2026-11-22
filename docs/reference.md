@@ -252,18 +252,20 @@ World 收到这些码会记一条「桥拒绝了这次连接」，并按退避�
 
 | 帧 | 方向 | 字段 |
 |---|---|---|
-| `hello` | World → 插件 | `v`、`token`（兼容）、`capabilities.images` |
+| `hello` | World → 插件 | `v`、`token`（兼容）、`capabilities.images`、`capabilities.message_segments`、`capabilities.component_media` |
 | `ready` | 插件 → World | `v: 1`、`channel`、`self {id,name}`、`admins[]`、`tts {ready,provider}`、`conversations[] {key,umo,platform,kind,id,name,age_sec}`（最多 20 条，按最近出现排序） |
-| `msg` | 插件 → World | `channel`、`id`、`umo`、`ts`、`conv {kind,id,name}`、`sender {id,name}`、`text`、`mentioned`、`platform`、`role`、`owner`、`can`、`images[]`、`image_errors[]` |
+| `msg` | 插件 → World | `channel`、`id`、`umo`、`ts`、`conv {kind,id,name}`、`sender {id,name}`、`text`、`mentioned`、`platform`、`role`、`owner`、`can`、`images[]`、`image_errors[]`、`segments[]` |
 | `msg`（通知） | 插件 → World | 同上，`kind: "notice"`、`ref`，`can.screenshot=false` |
 | `tick` | 插件 → World | `ts`（epoch 秒） |
 | `send` | World → 插件 | `rid`、`umo`（必填）、`conv`、`text`、`replyTo`、`platform`、`image {mime,base64}`、`voice`、`at[]` |
 | `ack` | 插件 → World | `rid`、`ok`、`voice`、`error`、`note`、`uncertain` |
 | `tools` | 插件 → World | `items[] {name,risk,desc,sig}` |
 | `tool` | World → 插件 | `rid`、`name`、`args`、`turn` 或 `actor {kind:"owner",id}` |
-| `tool-ack` | 插件 → World | `rid`、`ok`、`result`（成功）或 `error` / `note`（失败） |
+| `tool-ack` | 插件 → World | `rid`、`ok`、`result`（成功）或 `error` / `note`（失败）。读取组件时可附 `images[]` |
 
 `send` 只认 `umo`；`conv` 是投影，可省略。通知不单独发 `notice` 帧，统一走 `msg` + `kind: "notice"`。
+
+`message_segments` 启用有序组件树。组件 `{type, fields, children?}` 的 `fields.attachment` 是同一帧图片数组的零基索引，查看组件的 `path` 则是从 1 开始的组件编号。仅声明 `component_media` 的客户端会收到工具回执图片，原有 `result` 文字字段仍保留。
 
 `ready.conversations` 是桥记得的最近会话（含重启前恢复的），World 用它支持主动发送。最多 20 条，按最近出现排序；要发到没列出的会话，先在目标会话说一句，让桥记下它并进入快照，再发。
 

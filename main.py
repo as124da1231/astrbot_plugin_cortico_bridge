@@ -29,9 +29,11 @@ import mimetypes
 import os
 import secrets
 import sys
+import tempfile
 import time
 from collections import OrderedDict, deque
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
@@ -63,6 +65,19 @@ from .bridge import (
     matches_command,
 )
 from .deliver import Delivery
+from .message_segments import (
+    LABELS,
+    READ_COMPONENT_TOOL,
+    ComponentReceipt,
+    ComponentPage,
+    annotate_images,
+    audio_suffix,
+    download_qq_media,
+    event_segments,
+    fetch_forward,
+    forward_id,
+    render_detail,
+)
 from .tools import ToolRegistry
 
 PLUGIN_NAME = "astrbot_plugin_cortico_bridge"
@@ -72,14 +87,7 @@ _ACTIVE_SERVER_ATTR = "_cortico_bridge_active_server"
 
 # 非文字消息的占位说法，避免 B 模式下丢掉上下文
 COMPONENT_LABELS = {
-    "Image": "图片",
-    "Face": "表情",
-    "Record": "语音",
-    "Video": "视频",
-    "File": "文件",
-    "Forward": "转发消息",
-    "Json": "卡片",
-    "Poke": "戳一戳",
+    kind: label for kind, label in LABELS.items() if kind not in ("plain", "at")
 }
 
 # 单条消息最多转述/打包几张图；正文与帧必须用同一个上限。
@@ -147,6 +155,8 @@ def _apply_image_marks(text: str, marks: list[str]) -> str:
     out = text
     pos = 0
     for mark in marks:
+        if not mark:
+            continue
         # 不能简单用 replace：第一个 mark 可能就是 `[图片]`，替换后下一轮会
         # 又命中同一个位置，后面的标记就整体前移了。
         idx = out.find("[图片]", pos)
@@ -192,6 +202,8 @@ class CorticoBridge(Star):
         self._tool_log: deque[dict] = deque(maxlen=12)
         # 消息 id → (时间, 事件)：工具用触发这一轮的那条消息的身份执行。
         self._turns: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+        self._message_segments: dict[str, ComponentPage] = {}
+        self._forward_pages: OrderedDict[tuple[str, str], ComponentPage] = OrderedDict()
         # 去重：同一条消息被管线重复处理时只推一次
         self._seen: OrderedDict[str, float] = OrderedDict()
         # 没有平台 message_id 的适配器：短窗口内防重复投递，不参与 120s 去重。
@@ -701,7 +713,7 @@ class CorticoBridge(Star):
 
     async def _on_tool_call(
         self, name: str, args: dict, turn: str, actor: dict | None = None
-    ) -> tuple[bool, str]:
+    ) -> tuple[bool, str | ComponentReceipt]:
         """执行一个 AstrBot 工具。
 
         QQ 轮次用触发消息的身份；Coo 对话轮次用连接页里指定的主人 QQ。
@@ -716,6 +728,7 @@ class CorticoBridge(Star):
             stamp, event = hit
             if time.time() - stamp > 600:
                 self._turns.pop(turn, None)
+                self._message_segments.pop(turn, None)
                 return False, "这一轮的消息已经过期，请重新说一次"
             # T-001：只按 AstrBot 管理员名单判断；不信任 World 帧里的 role/owner。
             trusted = bool(self.server.tool_owner) and _s(event.get_sender_id()) in self._admin_ids()
@@ -730,6 +743,8 @@ class CorticoBridge(Star):
                 return False, f"{owner_id} 不在 AstrBot 的管理员名单里"
             if owner_id != self.server.tool_owner:
                 return False, "未获该主人 QQ 的工具授权"
+            if name == READ_COMPONENT_TOOL:
+                return await self._read_message_component(args)
             trusted = True
             platform = (self._bridge_platforms() or ["default"])[0]
             try:
@@ -747,6 +762,8 @@ class CorticoBridge(Star):
                 )
                 return False, "主人事件构造失败，已跳过"
             who = f"主人 {owner_id}"
+        if name == READ_COMPONENT_TOOL:
+            return await self._read_message_component(args, event)
         logger.info("Cortico Bridge: 执行工具 %s（来自 %s）" % (name, who))
         ok, text = await self.tools.execute(name, args, event, trusted=trusted)
         try:
@@ -771,6 +788,129 @@ class CorticoBridge(Star):
         self._tool_log.appendleft(entry)
         self._broadcast({"type": "tool", **entry})
         return ok, text
+
+    async def _read_message_component(self, args: dict, actor_event=None) -> tuple[bool, str | ComponentReceipt]:
+        message_id = _s(args.get("message_id"))
+        path = args.get("path")
+        if not isinstance(path, list) or not 1 <= len(path) <= 6 or any(
+            type(index) is not int or not 1 <= index <= 120 for index in path
+        ):
+            return False, "组件位置无效"
+        hit = self._turns.get(message_id)
+        if not hit or time.time() - hit[0] > 600:
+            return False, "桥端消息索引已过期，可继续查看 Coo 已保存的部分"
+        source = hit[1]
+        if actor_event is not None and _s(actor_event.unified_msg_origin) != _s(source.unified_msg_origin):
+            return False, "这条组件属于其他 QQ 会话"
+        allowed = self._private_allowed(source) if source.is_private_chat() else self._group_allowed(source)
+        if not allowed or not self._platform_allowed(source):
+            return False, "消息所在会话已停用"
+        page = self._message_segments.get(message_id)
+        if not page:
+            return False, "这条消息没有组件记录"
+        segments, deferred_media = page.segments, page.media
+        node_message_id = ""
+        for depth, index in enumerate(path):
+            if index > len(segments):
+                return False, "该位置没有组件"
+            segment = segments[index - 1]
+            segments = segment.get("children", [])
+            total = len(segments)
+            if segment["type"] == "node":
+                node_message_id = segment["fields"].get("id", "")
+            reference = forward_id(segment)
+            if reference and not segments:
+                if segment["type"] == "json":
+                    # JSON cards are user-editable. Ask the adapter about the QQ
+                    # message already observed, never about a card-supplied ID.
+                    reference = node_message_id if depth else _s(
+                        getattr(source.message_obj, "message_id", "")
+                        or getattr(source.message_obj, "id", "")
+                    )
+                if not reference or not hasattr(source, "bot"):
+                    return False, "适配器没有提供可查看的转发内容"
+                key = (message_id, reference)
+                if key not in self._forward_pages:
+                    try:
+                        self._forward_pages[key] = await fetch_forward(
+                            source.bot, reference, source.get_self_id()
+                        )
+                    except Exception:  # noqa: BLE001
+                        return False, "QQ 暂时取不到这条转发，可能已过期或适配器不支持"
+                page = self._forward_pages[key]
+                segments, total, deferred_media = page.segments, page.total, page.media
+                self._forward_pages.move_to_end(key)
+                while len(self._forward_pages) > 8:
+                    self._forward_pages.popitem(last=False)
+
+        if not segments:
+            if media_url := deferred_media.get(id(segment)):
+                return True, await self._read_deferred_media(segment, media_url, source)
+            return True, render_detail(segment)
+        start = args.get("offset", 0)
+        start = max(0, start) if type(start) is int else 0
+        if start >= len(segments):
+            return True, "已读到本次可获取内容的末尾"
+        lines = []
+        size = 0
+        for index, item in enumerate(segments[start:start + 8], start + 1):
+            entry = render_detail(item, (*path, index))[:2300]
+            if size + len(entry) > 3450:
+                break
+            lines.append(entry)
+            size += len(entry) + 1
+        seen = start + len(lines)
+        footer = f"第 {start + 1}–{seen} 条，共 {total} 条"
+        if seen < len(segments):
+            footer += f"。下一页 offset={seen}"
+        if len(segments) < total:
+            footer += f"。QQ 内容读取上限为 {len(segments)} 条"
+        return True, "\n".join([footer, *lines])
+
+    async def _read_deferred_media(self, segment: dict, url: str, source) -> str | ComponentReceipt:
+        if segment["type"] == "record":
+            if not self._stt_enabled():
+                return "[语音] AstrBot 当前未开启语音转写。"
+            try:
+                data = await download_qq_media(url, 6 * 1024 * 1024)
+                suffix = audio_suffix(data)
+                if not suffix:
+                    return "[语音] QQ 返回了暂不支持的音频格式。"
+                with tempfile.TemporaryDirectory(prefix="cortico-voice-") as directory:
+                    path = Path(directory, f"voice{suffix}")
+                    path.write_bytes(data)
+                    text = await self._transcribe(SimpleNamespace(file=str(path)), _s(source.unified_msg_origin))
+            except Exception:  # noqa: BLE001
+                return "[语音] QQ 音频暂时取不到，可能已过期。"
+            return f"[语音] {text}" if text else "[语音] AstrBot 未返回转写。"
+
+        plan = self.image_plan(source)
+        if not plan["native"] and not plan["describe"]:
+            reason = _IMAGE_NO_VISION if plan["reason"] == "peer_text_only" else "已关闭图片处理"
+            return f"[图片] {reason}。"
+        if plan["native"] and not (self.server.capabilities or {}).get("component_media"):
+            return "[图片] 当前 Coo 不支持从组件回执读取图片。"
+        try:
+            raw = await download_qq_media(url, 6 * 1024 * 1024)
+            if not (raw.startswith((b"\xFF\xD8\xFF", b"\x89PNG\r\n\x1A\n", b"GIF87a", b"GIF89a"))
+                    or raw.startswith(b"RIFF") and raw[8:12] == b"WEBP"):
+                return "[图片] QQ 返回了暂不支持的图片格式。"
+            from astrbot.api.message_components import Image
+
+            component = Image.fromBase64(base64.b64encode(raw).decode())
+            if plan["describe"]:
+                return await self._image_description_mark(component, 0)
+            b64, montage, reason = await asyncio.wait_for(self._native_image(component, attempts=1), timeout=6)
+        except Exception:  # noqa: BLE001
+            return "[图片] QQ 原图暂时取不到，可能已过期。"
+        if not b64:
+            return f"[图片] {reason or 'QQ 暂未返回原图'}。"
+        if len(b64) > MAX_IMAGE_B64:
+            return "[图片] 原图超过读取大小上限。"
+        return ComponentReceipt(
+            "[图片：动图已按 3×3 帧拼图]" if montage else "[QQ 转发图片]",
+            [{"mime": _sniff_image_mime(b64), "base64": b64}],
+        )
 
     # ---------- 从 Cortico 来的发送请求 ----------
 
@@ -968,11 +1108,6 @@ class CorticoBridge(Star):
         if not self._platform_allowed(event):
             return False
 
-        if text is None:
-            text = await self._message_text(event)
-        if not text:
-            return False
-
         conv_kind = "private" if event.is_private_chat() else "group"
         conv_id = (
             _s(event.get_group_id())
@@ -993,6 +1128,22 @@ class CorticoBridge(Star):
             if self._private_deny() == "ignore":
                 event.stop_event()
             return False
+
+        media_text: dict[int, str] = {}
+        supports_segments = bool((self.server.capabilities or {}).get("message_segments"))
+        quoted_images = [] if supports_segments else None
+        quoted_records = [] if supports_segments else None
+        deferred_media = {}
+        if text is None:
+            text = await self._message_text(event, media_text)
+        segments = event_segments(
+            event, self._raw_message(event), media_text, quoted_images, quoted_records,
+            deferred_media if supports_segments else None,
+        )
+        if not text and not segments:
+            return False
+        if not text:
+            text = " ".join(f"[{LABELS[part['type']]}]" for part in segments[:8])
 
         platform_id = _s(event.get_platform_id())
         is_admin = self._is_admin(event)
@@ -1036,16 +1187,40 @@ class CorticoBridge(Star):
             "can": {"screenshot": is_admin},
         }
 
-        images, image_errors, image_marks = await self._image_payloads(event)
+        for fields, record in (quoted_records or [])[:2]:
+            if fields.get("text"):
+                continue
+            if not self._stt_enabled():
+                fields["media_state"] = "disabled"
+                continue
+            transcript = await self._transcribe(record, frame["umo"])
+            if transcript:
+                fields["text"] = transcript[:1600]
+                fields["media_state"] = "described"
+
+        images, image_errors, image_marks = await self._image_payloads(event, quoted_images or ())
         if images:
             frame["images"] = images
         if image_errors:
             frame["image_errors"] = image_errors
         if image_marks:
-            frame["text"] = _apply_image_marks(text, image_marks)
+            direct_marks = image_marks[:len(image_marks) - len(quoted_images or ())]
+            frame["text"] = _apply_image_marks(text, direct_marks)
 
+        if segments and supports_segments:
+            annotate_images(segments, images, image_errors, image_marks, enabled=self._image_mode() != "off")
+            frame["segments"] = segments
+            if self.image_plan(event)["native"] and any(part["type"] == "reply" for part in segments):
+                frame["quote_image_history"] = True
+
+        # A fast Coo turn can call back before push() has finished. Stage the
+        # lookup with the frame and remove it if delivery failed.
+        self._turns[msg_id] = (time.time(), event)
+        self._message_segments[msg_id] = ComponentPage(segments, len(segments), deferred_media)
         if not await self.server.push(frame):
             logger.warning("Cortico Bridge: 推送失败，本轮交给 AstrBot")
+            self._turns.pop(msg_id, None)
+            self._message_segments.pop(msg_id, None)
             if has_platform_id and msg_id:
                 self._seen.pop(msg_id, None)
             elif fallback_key:
@@ -1056,7 +1231,7 @@ class CorticoBridge(Star):
         # on_llm_request 都不会再推一次；push=False 时没有置位，允许它重试。
         event.set_extra("_cortico_pushed", True)
         self.stats["pushed"] += 1
-        preview = _apply_image_marks(text, image_marks) if image_marks else text
+        preview = frame["text"]
         entry = {
             "ts": frame["ts"],
             "dir": "in",
@@ -1086,16 +1261,16 @@ class CorticoBridge(Star):
         )
 
         event.stop_event()
-        if msg_id:
-            self._turns[msg_id] = (time.time(), event)
+        if msg_id in self._turns:
             self._turns.move_to_end(msg_id)
             while len(self._turns) > 100:
-                self._turns.popitem(last=False)
+                oldest, _ = self._turns.popitem(last=False)
+                self._message_segments.pop(oldest, None)
         return True
 
     # ---------- 小工具 ----------
 
-    async def _message_text(self, event: AstrMessageEvent) -> str:
+    async def _message_text(self, event: AstrMessageEvent, media_text: dict[int, str] | None = None) -> str:
         """取消息正文。
 
         文字直接用；语音交给 AstrBot 的 STT provider 转写；图片按 `image_plan()`
@@ -1108,12 +1283,14 @@ class CorticoBridge(Star):
 
         plan = self.image_plan()
         image_index = 0
-        for comp in event.get_messages():
+        for index, comp in enumerate(event.get_messages()):
             name = type(comp).__name__
             if name == "Record":
                 spoken = await self._transcribe(
                     comp, _s(getattr(event, "unified_msg_origin", ""))
                 )
+                if spoken and media_text is not None:
+                    media_text[index] = spoken
                 parts.append(f"[语音] {spoken}" if spoken else "[语音]")
                 continue
             if name == "Image":
@@ -1123,23 +1300,16 @@ class CorticoBridge(Star):
                     # 原图会随帧发过去，正文只留占位；取图失败由 image_marks 改写。
                     parts.append("[图片]")
                 elif plan["describe"]:
-                    if slot < MAX_IMAGES:
-                        desc, reason = await self._describe_image(comp)
-                        if desc:
-                            parts.append(f"[图片：{desc}]")
-                        elif reason:
-                            parts.append(f"[图片|转述失败：{reason}]")
-                        else:
-                            parts.append(f"[图片|{_IMAGE_NO_VISION}]")
-                    else:
-                        parts.append("[图片|超出单次上限，未转述]")
+                    parts.append(await self._image_description_mark(comp, slot))
                 elif plan["reason"] == "peer_text_only":
                     parts.append(f"[图片|{_IMAGE_NO_VISION}]")
                 else:
                     # off：不转述、不传原图，只保留占位。
                     parts.append("[图片]")
+                if media_text is not None:
+                    media_text[index] = parts[-1]
                 continue
-            label = COMPONENT_LABELS.get(name)
+            label = COMPONENT_LABELS.get(name.lower())
             if label and f"[{label}]" not in parts:
                 parts.append(f"[{label}]")
 
@@ -1281,6 +1451,16 @@ class CorticoBridge(Star):
 
     # ---------- 入站图片（对端能收图时才传） ----------
 
+    async def _image_description_mark(self, comp, slot: int) -> str:
+        if slot >= MAX_IMAGES:
+            return "[图片|超出单次上限，未转述]"
+        desc, reason = await self._describe_image(comp)
+        if desc:
+            return f"[图片：{desc}]"
+        if reason:
+            return f"[图片|转述失败：{reason}]"
+        return f"[图片|{_IMAGE_NO_VISION}]"
+
     def _image_max_size(self) -> int:
         """对齐 AstrBot 的 provider_settings.image_compress_options.max_size。"""
         try:
@@ -1349,8 +1529,26 @@ class CorticoBridge(Star):
                     os.remove(prepared_path)
         return base64.b64encode(data).decode(), is_montage, ""
 
+    async def _native_image(self, comp, attempts: int) -> tuple[str, bool, str]:
+        b64, is_montage, reason = await self._prepare_native_image(comp)
+        if b64 or reason:
+            return b64, is_montage, reason
+        for attempt in range(attempts):
+            try:
+                b64 = await asyncio.wait_for(comp.convert_to_base64(), timeout=10)
+                return b64, is_montage, "" if b64 else reason
+            except asyncio.TimeoutError:
+                reason = "下载超时"
+                logger.debug("Cortico Bridge: 取图超时（第 %d 次）" % (attempt + 1), exc_info=True)
+            except Exception:  # noqa: BLE001
+                reason = "下载失败"
+                logger.warning("Cortico Bridge: 取图失败（第 %d 次）" % (attempt + 1), exc_info=True)
+            if attempt + 1 < attempts:
+                await asyncio.sleep(0.4 * (attempt + 1))
+        return "", is_montage, reason
+
     async def _image_payloads(
-        self, event: AstrMessageEvent
+        self, event: AstrMessageEvent, quoted=()
     ) -> tuple[list[dict], list[dict], list[str]]:
         """把消息里的图片打包进帧；返回 (图片, 失败清单, 每张图的占位标记)。
 
@@ -1361,52 +1559,45 @@ class CorticoBridge(Star):
         images = [
             comp for comp in event.get_messages() if type(comp).__name__ == "Image"
         ]
+        direct_count = len(images)
+        images.extend(quoted)
         if not plan["native"]:
             if plan["describe"]:
                 # 转述不算“没取到”：正文里已经有 [图片：描述]，不再往
                 # image_errors 里塞，否则日志/模型会误以为这张图失败了。
-                return [], [], []
+                marks = [""] * direct_count if quoted else []
+                for slot, comp in enumerate(quoted, direct_count):
+                    marks.append(await self._image_description_mark(comp, slot))
+                return [], [], marks
             if plan["reason"] == "peer_text_only":
                 errors = [
                     {"index": i, "reason": "peer_text_only"} for i in range(len(images))
                 ]
-                return [], errors, []
-            return [], [], []
+                marks = [""] * direct_count + [f"[图片|{_IMAGE_NO_VISION}]"] * len(quoted) if quoted else []
+                return [], errors, marks
+            marks = [""] * direct_count + ["[图片|已关闭图片处理]"] * len(quoted) if quoted else []
+            return [], [], marks
 
         payloads: list[dict] = []
         errors: list[dict] = []
         marks: list[str] = []
-        index = 0
         total_b64 = 0
-        for comp in images:
-            slot = index
-            index += 1
-            # QQ 图片 CDN 偶尔会断连；隔一会儿重试通常就好。每次最多等 10 秒，
-            # 免得一次卡死的下载把这一轮回复也拖住。
-            b64, is_montage, last_error = await self._prepare_native_image(comp)
-            if not b64 and not last_error:
-                # AstrBot 预处理不可用/失败时回退到旧路径；重试仍只在下载阶段。
-                for attempt in range(3):
-                    try:
-                        b64 = await asyncio.wait_for(
-                            comp.convert_to_base64(), timeout=10
-                        )
-                        break
-                    except asyncio.TimeoutError:
-                        last_error = "下载超时"
-                        logger.debug(
-                            "Cortico Bridge: 取图超时（第 %d 次）" % (attempt + 1),
-                            exc_info=True,
-                        )
-                    except Exception:  # noqa: BLE001
-                        # 异常原文常带 CDN URL/签名，只进日志；正文和帧里只放固定原因。
-                        last_error = "下载失败"
-                        logger.warning(
-                            "Cortico Bridge: 取图失败（第 %d 次）" % (attempt + 1),
-                            exc_info=True,
-                        )
-                    if attempt < 2:
-                        await asyncio.sleep(0.4 * (attempt + 1))
+        for slot, comp in enumerate(images):
+            if len(payloads) >= MAX_IMAGES or slot >= direct_count + MAX_IMAGES:
+                errors.append({"index": slot, "reason": "超过单次上限"})
+                marks.append("[图片|超出单次上限，没传]")
+                continue
+            if slot < direct_count:
+                b64, is_montage, last_error = await self._native_image(comp, attempts=3)
+            else:
+                # An expired quoted URL is common. Try briefly and allow Coo to use
+                # an attachment already saved in the same conversation.
+                try:
+                    b64, is_montage, last_error = await asyncio.wait_for(
+                        self._native_image(comp, attempts=1), timeout=6
+                    )
+                except asyncio.TimeoutError:
+                    b64, is_montage, last_error = "", False, "引用图片下载超时"
             if not b64:
                 reason = last_error or "空数据"
                 errors.append({"index": slot, "reason": reason})
@@ -1420,10 +1611,6 @@ class CorticoBridge(Star):
                     "Cortico Bridge: 图片太大 %d KB（上限 %d KB），没有传给 Cortico"
                     % (len(b64) // 1024, MAX_IMAGE_B64 // 1024)
                 )
-                continue
-            if len(payloads) >= MAX_IMAGES:
-                errors.append({"index": slot, "reason": "超过单次上限"})
-                marks.append("[图片|超出单次上限，没传]")
                 continue
             if total_b64 + len(b64) > MAX_IMAGE_TOTAL_B64:
                 errors.append({"index": slot, "reason": "超过单次总大小"})

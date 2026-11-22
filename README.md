@@ -2,7 +2,7 @@
 
 <img src="./logo.png" width="88" alt="Cortico 桥" align="right">
 
-**当前版本：1.3.7**
+**当前版本 1.3.8**
 
 把 AstrBot 收到的 QQ 消息转给 [Cortico](https://github.com/Pal-AI-Lab/Cortico) 的人格，再把它的回复发回群里。  
 *Bridge QQ messages from AstrBot to [Cortico](https://github.com/Pal-AI-Lab/Cortico) persona and send replies back to QQ.*
@@ -14,11 +14,11 @@ Cortico 侧还有一个配套扩展 [`cortico-world-astrbot`](https://github.com
 
 项目地址：[as124da1231/astrbot_plugin_cortico_bridge](https://github.com/as124da1231/astrbot_plugin_cortico_bridge)。
 
-**1.3.7 验证范围**。新版已在 AstrBot 4.29.1 上加载，两个 OneBot 适配器和 Coo 连接均已恢复。工具授权通过隔离回环验证。真实 QQ 点名、Coo 回复回群的往返仍待实测。
+1.3.8 保留 AstrBot 的 21 种消息组件，并按 QQ 的原始顺序交给配套 Coo 扩展。引用会带上适配器取到的原文，合并转发可按需逐层查看。文件、视频、音乐等组件提供适配器返回的可展示信息。新桥会继续给旧版 Coo 传递原有正文及图片。
 
 ### 从旧版升级
 
-备份插件配置及 `plugin_data/astrbot_plugin_cortico_bridge` 后，将两端更新到 1.3.7。旧群名单会继续生效。新旧群范围设置有冲突时，在插件「群聊」页检查实际范围并保存。旧会话表备份成功后才会写回新格式。
+备份插件配置及 `plugin_data/astrbot_plugin_cortico_bridge` 后，将两端更新到 1.3.8。旧群名单会继续生效。新旧群范围设置有冲突时，在插件「群聊」页检查实际范围并保存。旧会话表备份成功后才会写回新格式。
 
 已有工具名单可以沿用。若工具供普通 QQ 会话使用，请在插件配置中按实际行为补充 `tools_risks`。从 Coo 本地对话调用工具需要按下文配置独立授权。
 

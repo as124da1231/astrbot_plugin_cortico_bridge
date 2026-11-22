@@ -336,6 +336,8 @@ def make_bridge(
     bridge._recent = deque(maxlen=40)
     bridge._tool_log = deque(maxlen=12)
     bridge._turns = OrderedDict()
+    bridge._message_segments = {}
+    bridge._forward_pages = OrderedDict()
     bridge._seen = OrderedDict()
     bridge._fallback_seen = OrderedDict()
     bridge._msg_seq = 0
@@ -643,6 +645,173 @@ class CommitConfigTests(unittest.IsolatedAsyncioTestCase):
         bridge = make_bridge({"bridge_platforms": ["default", "qq2"]})
         out = bridge._normalize_scope_items(["123"], "group", "qq2")
         self.assertEqual(out, ["qq2:GroupMessage:123"])
+
+
+class MessageComponentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_forward_media_uses_the_selected_path_without_exposing_urls(self):
+        bridge = make_bridge()
+        bridge.server.capabilities.update(message_segments=True, component_media=True)
+        url = "https://multimedia.nt.qq.com.cn/download?token=fixture"
+        event = FakeEvent("看看这段", message_id="outer", raw={"message": [
+            {"type": "forward", "data": {"id": "forward"}},
+        ]})
+        event.bot = types.SimpleNamespace(call_action=mock.AsyncMock(return_value={"messages": [{
+            "sender": {"nickname": "转发作者"},
+            "message": [
+                {"type": "image", "data": {"url": url}},
+                {"type": "record", "data": {"url": "http://127.0.0.1/private"}},
+            ],
+        }]}))
+        bridge._read_deferred_media = mock.AsyncMock(return_value=main_mod.ComponentReceipt(
+            "[图片]", [{"mime": "image/png", "base64": "AQID"}]
+        ))
+        await bridge._push_event(event)
+        async def read(path):
+            return await bridge._on_tool_call(
+                main_mod.READ_COMPONENT_TOOL, {"message_id": "outer", "path": path}, "outer"
+            )
+
+        ok, page = await read([1])
+        self.assertTrue(ok)
+        self.assertIn("1.1.1 [图片]", page)
+        self.assertIn("1.1.2 [语音]", page)
+        self.assertNotIn(url, page)
+        self.assertNotIn("127.0.0.1", page)
+        bridge._read_deferred_media.assert_not_called()
+        ok, image = await read([1, 1, 1])
+        self.assertTrue(ok)
+        self.assertEqual(image.images[0]["base64"], "AQID")
+        self.assertEqual(bridge._read_deferred_media.await_args.args[1], url)
+        ok, audio = await read([1, 1, 2])
+        self.assertTrue(ok)
+        self.assertIn("没有可读的媒体内容", audio)
+        self.assertEqual(bridge._read_deferred_media.await_count, 1)
+
+    async def test_quoted_record_provides_transcript_in_its_own_component(self):
+        class Record:
+            pass
+
+        bridge = make_bridge({"stt_enabled": True})
+        bridge.server.capabilities["message_segments"] = True
+        bridge._transcribe = mock.AsyncMock(return_value="原语音的内容")
+        quote = Reply("100")
+        quote.id = "earlier"
+        voice = Record()
+        quote.chain = [Plain("之前"), voice]
+        event = FakeEvent("这段语音", messages=[quote, Plain("这段语音")])
+        self.assertTrue(await bridge._push_event(event))
+        audio = bridge.server.pushed[0]["segments"][0]["children"][1]
+        self.assertEqual(audio["type"], "record")
+        self.assertEqual(audio["fields"]["text"], "原语音的内容")
+        self.assertEqual(audio["fields"]["media_state"], "described")
+
+    async def test_quoted_image_uses_delivery_plan_and_attachment_slot(self):
+        for mode in ("image", "describe", "off"):
+            with self.subTest(mode=mode):
+                bridge = make_bridge({"image_mode": mode})
+                bridge.server.capabilities.update(images=True, message_segments=True)
+                bridge._describe_image = mock.AsyncMock(return_value=("识别到图片里的猫", ""))
+                quote = Reply("100")
+                quote.id = "earlier"
+                quote.chain = [Image("https://example.com/quoted.png")]
+                event = FakeEvent("看看这张", messages=[quote, Plain("看看这张")], raw={"message": [
+                    {"type": "reply", "data": {"id": "earlier"}},
+                    {"type": "text", "data": {"text": "看看这张"}},
+                ]})
+                self.assertTrue(await bridge._push_event(event))
+                packet = bridge.server.pushed[0]
+                fields = packet["segments"][0]["children"][0]["fields"]
+                if mode == "image":
+                    self.assertEqual(fields["attachment"], "0")
+                    self.assertEqual(packet["images"][0]["mime"], "image/png")
+                    self.assertTrue(packet["quote_image_history"])
+                else:
+                    self.assertNotIn("images", packet)
+                    self.assertNotIn("quote_image_history", packet)
+                    self.assertNotIn("attachment", fields)
+                    self.assertIn("图片里的猫" if mode == "describe" else "已关闭", fields["text"])
+
+    async def test_image_slots_keep_direct_image_first_and_quote_rest(self):
+        bridge = make_bridge({"image_mode": "image"})
+        bridge.server.capabilities.update(images=True, message_segments=True)
+        direct = Image("https://example.com/direct.png")
+        quote = Reply("100")
+        quote.id = "earlier"
+        quote.chain = [Image("https://example.com/first.png"), Image("https://example.com/second.png")]
+        event = FakeEvent("Coo 看图", messages=[quote, direct, Plain("Coo 看图")])
+        self.assertTrue(await bridge._push_event(event))
+        packet = bridge.server.pushed[0]
+        self.assertEqual(len(packet["images"]), 2)
+        self.assertEqual(packet["segments"][1]["fields"]["attachment"], "0")
+        children = packet["segments"][0]["children"]
+        self.assertEqual(children[0]["fields"]["attachment"], "1")
+        self.assertNotIn("attachment", children[1]["fields"])
+        self.assertIn("上限", children[1]["fields"]["text"])
+
+    async def test_all_component_kinds_and_forward_scope(self):
+        from importlib import import_module
+
+        components = import_module(f"{main_mod.__package__}.message_segments")
+        from unittest.mock import AsyncMock
+
+        bridge = make_bridge()
+        bridge.server.capabilities["message_segments"] = True
+        chain = [
+            {"type": kind, "data": (
+                {"id": "forward-123"} if kind == "forward" else {"text": "fixture"}
+            )}
+            for kind in components.LABELS
+        ]
+        event = FakeEvent("fixture", message_id="outer", raw={"message": chain})
+        event.bot = types.SimpleNamespace(call_action=AsyncMock(return_value={
+            "messages": [{
+                "sender": {"nickname": "转发人", "user_id": 42},
+                "message": [{"type": "text", "data": {"text": "转发正文"}}],
+            }] * 9,
+        }))
+        self.assertTrue(await bridge._push_event(event))
+        packet = bridge.server.pushed[0]
+        self.assertEqual([part["type"] for part in packet["segments"]], list(components.LABELS))
+
+        args = {"message_id": "outer", "path": [list(components.LABELS).index("forward") + 1]}
+        other = FakeEvent("other", group_id="2", message_id="other")
+        self.assertTrue(await bridge._push_event(other))
+        denied, _ = await bridge._on_tool_call(components.READ_COMPONENT_TOOL, args, "other")
+        self.assertFalse(denied)
+        event.bot.call_action.assert_not_called()
+
+        ok, result = await bridge._on_tool_call(components.READ_COMPONENT_TOOL, args, "outer")
+        self.assertTrue(ok)
+        self.assertIn("转发正文", result)
+        self.assertIn("offset=8", result)
+        ok, result = await bridge._on_tool_call(
+            components.READ_COMPONENT_TOOL, {**args, "offset": 8}, "outer"
+        )
+        self.assertTrue(ok)
+        self.assertIn("第 9–9 条", result)
+        event.bot.call_action.assert_awaited_once_with(
+            "get_forward_msg", id="forward-123", message_id="forward-123", self_id=999
+        )
+
+    async def test_join_original_order_with_resolved_quote_and_failed_files(self):
+        bridge = make_bridge()
+        bridge.server.capabilities["message_segments"] = True
+        quote = types.SimpleNamespace(
+            type="Reply", id="42", sender_nickname="引用作者", chain=[Plain("旧正文")],
+        )
+        event = FakeEvent("当前正文", messages=[quote, Plain("当前正文")], raw={"message": [
+            {"type": "reply", "data": {"id": "42"}},
+            {"type": "file", "data": {"name": r"C:\private\示例.zip", "url": "https://example.com/token"}},
+            {"type": "text", "data": {"text": "当前正文"}},
+            {"type": "new_type", "data": {"alt": "未知组件"}},
+        ]})
+        self.assertTrue(await bridge._push_event(event))
+        parts = bridge.server.pushed[0]["segments"]
+        self.assertEqual([part["type"] for part in parts], ["reply", "file", "plain", "unknown"])
+        self.assertEqual(parts[0]["children"][0]["fields"]["text"], "旧正文")
+        self.assertEqual(parts[0]["fields"]["name"], "引用作者")
+        self.assertEqual(parts[1]["fields"], {"name": "示例.zip", "media_state": "metadata"})
+        self.assertEqual(parts[3]["fields"]["kind"], "new_type")
 
 
 class ListenHostTests(unittest.IsolatedAsyncioTestCase):
