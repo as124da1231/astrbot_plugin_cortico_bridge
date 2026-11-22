@@ -14,7 +14,13 @@ Cortico 侧还有一个配套扩展 [`cortico-world-astrbot`](https://github.com
 
 项目地址：[as124da1231/astrbot_plugin_cortico_bridge](https://github.com/as124da1231/astrbot_plugin_cortico_bridge)。
 
-已在 **AstrBot 4.29.1 + aiocqhttp** 上实机验证：文字、图片、撤回与戳一戳通知、主人身份、断线重连。
+**1.3.7 验证范围**。新版已在 AstrBot 4.29.1 上加载，两个 OneBot 适配器和 Coo 连接均已恢复。工具授权通过隔离回环验证。真实 QQ 点名、Coo 回复回群的往返仍待实测。
+
+### 从旧版升级
+
+备份插件配置及 `plugin_data/astrbot_plugin_cortico_bridge` 后，将两端更新到 1.3.7。旧群名单会继续生效。新旧群范围设置有冲突时，在插件「群聊」页检查实际范围并保存。旧会话表备份成功后才会写回新格式。
+
+已有工具名单可以沿用。若工具供普通 QQ 会话使用，请在插件配置中按实际行为补充 `tools_risks`。从 Coo 本地对话调用工具需要按下文配置独立授权。
 
 ## 群聊与私聊
 
@@ -246,7 +252,7 @@ node --check views/status/app.js
 
 ## 问题解答
 
-QQ：**1136066256**
+交流 QQ 群 **1136066256**
 
 ## 许可
 
