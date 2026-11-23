@@ -228,7 +228,7 @@ WebSocket 单帧       16MB
 ```text
 Authorization: Bearer <token>     首选
 hello.token                       兼容保留
-hello.v                           必须是 1
+hello.v                           必须是 2
 ```
 
 只给帧内 token 会记提示日志。token 建议 ASCII：HTTP 头放不了非 ASCII，
@@ -264,7 +264,7 @@ hello.token                     兼容保留
 版本：
 
 ```text
-hello.v 必须是 1
+hello.v 必须是 2
 缺省按 1，其他值 close 4004
 ```
 

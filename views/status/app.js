@@ -513,6 +513,11 @@ function initToken() {
 function applyStatus(s) {
   s = { ...(state.status || {}), ...s };
   state.status = s;
+  const mode = s.mode === 'safe' ? '安全模式' : '完整模式';
+  $('bridgeMode').textContent = s.connected ? `${mode} · 已与 Coo 同步` : `${mode} · 等待双端同步`;
+  const toolsNav = document.querySelector('[data-panel="tools"]');
+  if (toolsNav) toolsNav.hidden = s.mode === 'safe';
+  if (s.mode === 'safe' && state.panel === 'tools') toolsNav?.parentElement?.querySelector('[data-panel="status"]')?.click();
 
   const cls = lampClass(s);
   $('railLamp').className = 'lamp ' + cls;
@@ -965,6 +970,10 @@ function connectStream() {
           if (state.toolLog.length > 12) state.toolLog.length = 12;
           renderToolLog();
           if (state.panel === 'tools' && state.loaded) renderTools();
+          return;
+        }
+        if (d.type === 'mode') {
+          refresh().catch(() => {});
           return;
         }
         if (d.type === 'connected' || d.type === 'disconnected' || d.type === 'listening' || d.type === 'info') {

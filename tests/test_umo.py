@@ -417,7 +417,7 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
 
         server._refresh_ready_later = no_refresh
         ws = self._FakeWs(
-            [json.dumps({"t": "hello", "v": 1, "token": "s3cret"})],
+            [json.dumps({"t": "hello", "v": 2, "token": "s3cret"})],
             headers={"authorization": "Bearer s3cret"},
         )
         await server._handle_client(ws)

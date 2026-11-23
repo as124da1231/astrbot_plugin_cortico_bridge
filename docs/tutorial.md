@@ -57,11 +57,11 @@ bridge_platforms default
 ### 跨机（Coo 在另一台机器）
 
 ```text
-listen_host      0.0.0.0
+listen_host      127.0.0.1（TLS 代理和桥同机时）
 token            必填
 ```
 
-在插件控制台「概览」的设置表里点「生成（轮换）」，新 token 会一次性显示，复制后填到 Coo 的 `worlds.astrbot.token`。
+通过支持 WebSocket 的 TLS 反向代理访问监听端口。插件控制台「概览」可生成或复制访问 token，复制后填到 Coo「连接」页的「桥接令牌（Token）」。
 也可以自己填一串，两边保持一致。`GET /status` 不会回 token 明文，复制 / 轮换 / 清除都走 `/token`。
 
 ---
@@ -74,13 +74,13 @@ World 配置：
 
 ```text
 wsUrl   同机：ws://127.0.0.1:17999
-        跨机：ws://<AstrBot 机器地址>:17999
+        跨机：wss://<TLS 代理域名>/<桥接路径>
 token   和插件一致（同机可空）
 ```
 
 World 只负责连接和展示；群/私聊策略、工具白名单都在插件里。
 
-如果要在 Coo 对话里直接调 AstrBot 工具，先在 World 的连接设置里填「主人 QQ」；这个 QQ 必须出现在 AstrBot 的 `admins_id` 里，否则工具调用会被拒绝。
+两端用同一版本，点击 Coo「连接」页的「保存并应用」。如果需要在 Coo 本地对话调用 AstrBot 工具，在两端配置相同的主人 QQ 和独立工具令牌。该 QQ 必须出现在 AstrBot 管理员名单里。
 
 ---
 

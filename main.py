@@ -63,6 +63,7 @@ from .bridge import (
     is_loopback_host,
     looks_like_command,
     matches_command,
+    parse_umo,
 )
 from .deliver import Delivery
 from .message_segments import (
@@ -195,15 +196,17 @@ class CorticoBridge(Star):
             tools_frame=self.tools.frame,
             tts_available=self._tts_info,
             conversations=self.delivery.known_conversations,
+            mode=_s(self.config.get("bridge_mode", "full")),
+            save_mode=self._save_bridge_mode,
         )
         # 最近推送的消息，给面板看
         self._recent: deque[dict] = deque(maxlen=40)
         # 最近的工具调用（谁、成没成、返回了什么），给面板看
         self._tool_log: deque[dict] = deque(maxlen=12)
         # 消息 id → (时间, 事件)：工具用触发这一轮的那条消息的身份执行。
-        self._turns: OrderedDict[str, tuple[float, Any]] = OrderedDict()
-        self._message_segments: dict[str, ComponentPage] = {}
-        self._forward_pages: OrderedDict[tuple[str, str], ComponentPage] = OrderedDict()
+        self._turns: OrderedDict[tuple[str, str], tuple[float, Any]] = OrderedDict()
+        self._message_segments: dict[tuple[str, str], ComponentPage] = {}
+        self._forward_pages: OrderedDict[tuple[str, str, str], ComponentPage] = OrderedDict()
         # 去重：同一条消息被管线重复处理时只推一次
         self._seen: OrderedDict[str, float] = OrderedDict()
         # 没有平台 message_id 的适配器：短窗口内防重复投递，不参与 120s 去重。
@@ -711,8 +714,26 @@ class CorticoBridge(Star):
 
     # ---------- 从 Cortico 来的工具调用 ----------
 
+    def _save_bridge_mode(self, mode: str) -> None:
+        if not self._commit_config({"bridge_mode": mode}):
+            raise ValueError("Could not save bridge mode")
+
+    def _target_allowed(self, umo: str) -> bool:
+        target = parse_umo(umo)
+        if not target or not self.delivery.has_umo(umo):
+            return False
+        platform, kind, target_id, _ = target
+        if platform not in self._bridge_platforms():
+            return False
+        if kind == "group":
+            return self._group_scope() == "all" or bool({umo, target_id}.intersection(self._group_allow()))
+        mode = self._private_mode()
+        return mode == "all" or (mode == "allowlist" and (
+            bool({umo, target_id}.intersection(self._private_allow())) or (
+                self._private_admin_bypass() and target_id in self._admin_ids())))
+
     async def _on_tool_call(
-        self, name: str, args: dict, turn: str, actor: dict | None = None
+        self, name: str, args: dict, turn: str, actor: dict | None = None, *, scope: str = ""
     ) -> tuple[bool, str | ComponentReceipt]:
         """执行一个 AstrBot 工具。
 
@@ -721,15 +742,22 @@ class CorticoBridge(Star):
         if not self.config.get("enabled", False):
             return False, "桥未启用，工具调用被拒绝"
         trusted = False
+        read_scope = _s(args.get("umo")).strip()
         if turn:
-            hit = self._turns.get(turn)
+            key = (scope, turn)
+            hit = self._turns.get(key)
             if hit is None:
                 return False, "这一轮的消息已经过期，请重新说一次"
             stamp, event = hit
             if time.time() - stamp > 600:
-                self._turns.pop(turn, None)
-                self._message_segments.pop(turn, None)
+                self._turns.pop(key, None)
+                self._message_segments.pop(key, None)
                 return False, "这一轮的消息已经过期，请重新说一次"
+            if not self._platform_allowed(event) or not (self._private_allowed(event) if event.is_private_chat() else self._group_allowed(event)):
+                return False, "触发该轮的 QQ 会话已停用"
+            if read_scope and read_scope != scope and name in (READ_COMPONENT_TOOL, "cortico_authorize_history"):
+                return False, "读取目标超出当前 QQ 会话"
+            read_scope = scope
             # T-001：只按 AstrBot 管理员名单判断；不信任 World 帧里的 role/owner。
             trusted = bool(self.server.tool_owner) and _s(event.get_sender_id()) in self._admin_ids()
             who = f"消息 {turn}"
@@ -744,7 +772,12 @@ class CorticoBridge(Star):
             if owner_id != self.server.tool_owner:
                 return False, "未获该主人 QQ 的工具授权"
             if name == READ_COMPONENT_TOOL:
-                return await self._read_message_component(args)
+                if not self._target_allowed(read_scope):
+                    return False, "该 QQ 会话未获授权"
+                return await self._read_message_component(args, scope=read_scope)
+            if name == "cortico_authorize_history":
+                allowed = self._target_allowed(read_scope)
+                return allowed, "" if allowed else "该 QQ 会话未获授权"
             trusted = True
             platform = (self._bridge_platforms() or ["default"])[0]
             try:
@@ -763,7 +796,9 @@ class CorticoBridge(Star):
                 return False, "主人事件构造失败，已跳过"
             who = f"主人 {owner_id}"
         if name == READ_COMPONENT_TOOL:
-            return await self._read_message_component(args, event)
+            return await self._read_message_component(args, scope=read_scope)
+        if name == "cortico_authorize_history":
+            return True, ""
         logger.info("Cortico Bridge: 执行工具 %s（来自 %s）" % (name, who))
         ok, text = await self.tools.execute(name, args, event, trusted=trusted)
         try:
@@ -789,14 +824,16 @@ class CorticoBridge(Star):
         self._broadcast({"type": "tool", **entry})
         return ok, text
 
-    async def _read_message_component(self, args: dict, actor_event=None) -> tuple[bool, str | ComponentReceipt]:
+    async def _read_message_component(self, args: dict, actor_event=None, *, scope: str = "") -> tuple[bool, str | ComponentReceipt]:
         message_id = _s(args.get("message_id"))
         path = args.get("path")
         if not isinstance(path, list) or not 1 <= len(path) <= 6 or any(
             type(index) is not int or not 1 <= index <= 120 for index in path
         ):
             return False, "组件位置无效"
-        hit = self._turns.get(message_id)
+        scope = scope or (self._umo_of(actor_event) if actor_event is not None else "")
+        message_key = (scope, message_id)
+        hit = self._turns.get(message_key)
         if not hit or time.time() - hit[0] > 600:
             return False, "桥端消息索引已过期，可继续查看 Coo 已保存的部分"
         source = hit[1]
@@ -805,7 +842,7 @@ class CorticoBridge(Star):
         allowed = self._private_allowed(source) if source.is_private_chat() else self._group_allowed(source)
         if not allowed or not self._platform_allowed(source):
             return False, "消息所在会话已停用"
-        page = self._message_segments.get(message_id)
+        page = self._message_segments.get(message_key)
         if not page:
             return False, "这条消息没有组件记录"
         segments, deferred_media = page.segments, page.media
@@ -829,7 +866,7 @@ class CorticoBridge(Star):
                     )
                 if not reference or not hasattr(source, "bot"):
                     return False, "适配器没有提供可查看的转发内容"
-                key = (message_id, reference)
+                key = (scope, message_id, reference)
                 if key not in self._forward_pages:
                     try:
                         self._forward_pages[key] = await fetch_forward(
@@ -845,7 +882,11 @@ class CorticoBridge(Star):
 
         if not segments:
             if media_url := deferred_media.get(id(segment)):
+                if segment["type"] == "record":
+                    return True, await self._read_voice(segment, media_url, source, file_only=args.get("audio_file") is True)
                 return True, await self._read_deferred_media(segment, media_url, source)
+            if segment["type"] == "record" and args.get("audio_file") is True:
+                return False, "QQ 未提供这条语音的可读取原件"
             return True, render_detail(segment)
         start = args.get("offset", 0)
         start = max(0, start) if type(start) is int else 0
@@ -867,23 +908,42 @@ class CorticoBridge(Star):
             footer += f"。QQ 内容读取上限为 {len(segments)} 条"
         return True, "\n".join([footer, *lines])
 
-    async def _read_deferred_media(self, segment: dict, url: str, source) -> str | ComponentReceipt:
-        if segment["type"] == "record":
-            if not self._stt_enabled():
-                return "[语音] AstrBot 当前未开启语音转写。"
+    async def _read_voice(self, segment: dict, url: str, source, *, file_only: bool) -> str | ComponentReceipt:
+        attachment = (self.server.capabilities or {}).get("component_audio") is True
+        if file_only and not attachment:
+            return "[语音] 当前 Coo 未声明接收语音原件的能力。"
+        if not attachment and not self._stt_enabled():
+            return "[语音] AstrBot 当前未开启语音转写。"
+
+        try:
+            data = await download_qq_media(url, 6 * 1024 * 1024)
+        except Exception:  # noqa: BLE001 - never return a signed QQ URL in the receipt
+            return "[语音] QQ 音频暂时取不到，可能已过期或超过 6 MiB。"
+        suffix = audio_suffix(data)
+        mime = {".silk": "audio/silk", ".amr": "audio/amr", ".ogg": "audio/ogg",
+                ".wav": "audio/wav", ".mp3": "audio/mpeg"}.get(suffix)
+        if not mime:
+            return "[语音] QQ 返回了暂不支持的音频格式。"
+
+        text = _s(segment["fields"].get("text")).strip()
+        if not text and not file_only and self._stt_enabled():
             try:
-                data = await download_qq_media(url, 6 * 1024 * 1024)
-                suffix = audio_suffix(data)
-                if not suffix:
-                    return "[语音] QQ 返回了暂不支持的音频格式。"
                 with tempfile.TemporaryDirectory(prefix="cortico-voice-") as directory:
                     path = Path(directory, f"voice{suffix}")
                     path.write_bytes(data)
                     text = await self._transcribe(SimpleNamespace(file=str(path)), _s(source.unified_msg_origin))
-            except Exception:  # noqa: BLE001
-                return "[语音] QQ 音频暂时取不到，可能已过期。"
+            except OSError:
+                logger.warning("Cortico Bridge: 转写用的临时音频无法写入")
+        if not attachment:
             return f"[语音] {text}" if text else "[语音] AstrBot 未返回转写。"
+        note = "[语音] QQ 原件已下载。"
+        if text:
+            note += f" 转写：{text}"
+        elif not file_only:
+            note += " AstrBot 未返回转写。" if self._stt_enabled() else " AstrBot 当前未开启语音转写。"
+        return ComponentReceipt(note, audio={"mime": mime, "base64": base64.b64encode(data).decode("ascii")})
 
+    async def _read_deferred_media(self, segment: dict, url: str, source) -> str | ComponentReceipt:
         plan = self.image_plan(source)
         if not plan["native"] and not plan["describe"]:
             reason = _IMAGE_NO_VISION if plan["reason"] == "peer_text_only" else "已关闭图片处理"
@@ -928,6 +988,8 @@ class CorticoBridge(Star):
     ) -> tuple[bool, str, bool, bool, str]:
         if not self.config.get("enabled", False):
             return False, "桥未启用，发送门是关的", False, False, codes.DOOR_CLOSED
+        if not self._target_allowed(umo):
+            return False, "该 QQ 会话未获授权", False, False, "scope_denied"
         ok, note, used_voice, uncertain, error_code = await self.delivery.send(
             platform, conv_kind, conv_id, text, reply_to, image, voice, umo, at=at or []
         )
@@ -1159,7 +1221,8 @@ class CorticoBridge(Star):
             logger.debug(f"Cortico Bridge: 重复投递已跳过 key={fallback_key}")
             event.stop_event()
             return False
-        if self._is_duplicate(msg_id):
+        seen_key = (self._umo_of(event), msg_id)
+        if self._is_duplicate(seen_key):
             self.stats["skipped"] += 1
             logger.debug(f"Cortico Bridge: 重复消息已跳过 id={msg_id}")
             event.stop_event()
@@ -1215,14 +1278,15 @@ class CorticoBridge(Star):
 
         # A fast Coo turn can call back before push() has finished. Stage the
         # lookup with the frame and remove it if delivery failed.
-        self._turns[msg_id] = (time.time(), event)
-        self._message_segments[msg_id] = ComponentPage(segments, len(segments), deferred_media)
+        message_key = (frame["umo"], msg_id)
+        self._turns[message_key] = (time.time(), event)
+        self._message_segments[message_key] = ComponentPage(segments, len(segments), deferred_media)
         if not await self.server.push(frame):
             logger.warning("Cortico Bridge: 推送失败，本轮交给 AstrBot")
-            self._turns.pop(msg_id, None)
-            self._message_segments.pop(msg_id, None)
+            self._turns.pop(message_key, None)
+            self._message_segments.pop(message_key, None)
             if has_platform_id and msg_id:
-                self._seen.pop(msg_id, None)
+                self._seen.pop(seen_key, None)
             elif fallback_key:
                 self._fallback_seen.pop(fallback_key, None)
             return False
@@ -1261,8 +1325,8 @@ class CorticoBridge(Star):
         )
 
         event.stop_event()
-        if msg_id in self._turns:
-            self._turns.move_to_end(msg_id)
+        if message_key in self._turns:
+            self._turns.move_to_end(message_key)
             while len(self._turns) > 100:
                 oldest, _ = self._turns.popitem(last=False)
                 self._message_segments.pop(oldest, None)
@@ -1782,7 +1846,7 @@ class CorticoBridge(Star):
             logger.debug(f"Cortico Bridge: 语音转写失败 —— {exc}")
             return ""
 
-    def _is_duplicate(self, msg_id: str) -> bool:
+    def _is_duplicate(self, msg_id: str | tuple[str, str]) -> bool:
         if not msg_id:
             return False
         now = time.time()
@@ -2010,6 +2074,7 @@ class CorticoBridge(Star):
             {
                 "version": PLUGIN_VERSION,
                 "connected": self.server.connected,
+                "mode": self.server.mode,
                 "listening": self.server.listening,
                 "listenError": self.server.listen_error,
                 "client": self.server.client_address,
@@ -2098,6 +2163,7 @@ class CorticoBridge(Star):
         return {
             "type": "snapshot",
             "connected": self.server.connected,
+            "mode": self.server.mode,
             "listening": self.server.listening,
             "client": self.server.client_address,
             "connectedFor": int(now - connected_at) if connected_at else 0,

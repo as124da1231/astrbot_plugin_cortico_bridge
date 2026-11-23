@@ -2,7 +2,7 @@
 
 <img src="./logo.png" width="88" alt="Cortico 桥" align="right">
 
-**当前版本 1.3.8**
+**当前版本 1.3.9**
 
 把 AstrBot 收到的 QQ 消息转给 [Cortico](https://github.com/Pal-AI-Lab/Cortico) 的人格，再把它的回复发回群里。  
 *Bridge QQ messages from AstrBot to [Cortico](https://github.com/Pal-AI-Lab/Cortico) persona and send replies back to QQ.*
@@ -10,17 +10,19 @@
 **分工**：AstrBot 保留 QQ 连接、账号、白名单和所有已有插件；Cortico 只负责「说什么」。  
 ***Division of work***: *AstrBot maintains QQ connections, accounts, whitelists, and all existing plugins; Cortico is only responsible for what to say.*
 
-Cortico 侧还有一个配套扩展 [`cortico-world-astrbot`](https://github.com/as124da1231/cortico-world-astrbot)，两个包按协议 v1 对接，**必须都装**。
+Cortico 侧的配套扩展是 [`cortico-world-astrbot`](https://github.com/as124da1231/cortico-world-astrbot)，两端使用协议 v2。模式从 Coo「连接」页确认切换，AstrBot 面板显示同步结果。
 
 项目地址：[as124da1231/astrbot_plugin_cortico_bridge](https://github.com/as124da1231/astrbot_plugin_cortico_bridge)。
 
-1.3.8 保留 AstrBot 的 21 种消息组件，并按 QQ 的原始顺序交给配套 Coo 扩展。引用会带上适配器取到的原文，合并转发可按需逐层查看。文件、视频、音乐等组件提供适配器返回的可展示信息。新桥会继续给旧版 Coo 传递原有正文及图片。
+QQ 消息组件按原始顺序交给配套 Coo 扩展。引用可带适配器取到的原文，合并转发可逐层查看。Coo 可按需读取授权会话里仍能下载的语音原文件，文字转写由 AstrBot 的语音设置控制。
 
 ### 从旧版升级
 
-备份插件配置及 `plugin_data/astrbot_plugin_cortico_bridge` 后，将两端更新到 1.3.8。旧群名单会继续生效。新旧群范围设置有冲突时，在插件「群聊」页检查实际范围并保存。旧会话表备份成功后才会写回新格式。
+备份插件配置及 `plugin_data/astrbot_plugin_cortico_bridge` 后，将两端一起更新到 1.3.9。它使用协议 v2，旧版对端会被拒绝，升级窗口内 QQ 由 AstrBot 原流程处理。旧群名单会继续生效。存在新旧群设置冲突时，在插件「群聊」页检查实际范围并保存。
 
 已有工具名单可以沿用。若工具供普通 QQ 会话使用，请在插件配置中按实际行为补充 `tools_risks`。从 Coo 本地对话调用工具需要按下文配置独立授权。
+
+完整模式沿用 Coo 主对话，QQ 回复可能引用控制台里的内容。安全模式依赖 Coo 宿主的独立轮次接口，原版 Coopanion 0.2.23 使用完整模式。模式切换由 Coo「连接」页确认，两端同步后生效。
 
 ## 群聊与私聊
 
@@ -126,7 +128,7 @@ AstrBot 自己的模型不参与这些轮次；桥没连上时插件什么都不
 1. 在 AstrBot 插件市场搜索「Cortico 桥」，或把本仓库放进 `data/plugins/`。
 2. 重启 AstrBot，打开插件配置。
 3. 打开「接管对话」。同机 Coo 用默认的 `127.0.0.1`，不需要填 token。
-4. Coo 在另一台机器上时，把 `listen_host` 改成 `0.0.0.0` 并设置 `token`，两端保持一致；Cortico 侧填 `ws://<服务器地址>:17999`。
+4. 跨机连接时设置桥接令牌并限制监听访问范围。使用支持 WebSocket 的 TLS 反向代理，在 Coo 填 `wss://` 地址和同一个令牌。桥和代理同机可保持回环监听。
 
 依赖 `websockets >= 13`（AstrBot 官方镜像已自带）。
 
@@ -220,7 +222,7 @@ token 的复制 / 生成 / 清除都走 `POST /token`：
 
 ## 协议帧
 
-协议 v1，`hello.v` 必须是 1（缺省按 1，其他值 close 4004）。完整字段和错误码见 [参考](docs/reference.md)。
+协议 v2，`hello.v` 必须是 2。模式同步后，读写请求还需匹配连接的模式代次和 QQ 会话授权。完整字段和错误码见 [参考](docs/reference.md)。
 
 | 帧 | 方向 | 关键字段 |
 |---|---|---|

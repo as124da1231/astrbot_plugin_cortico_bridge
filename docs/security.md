@@ -20,7 +20,7 @@
 | 非回环 + 有 token | 校验 token |
 | 带 `Origin` 的连接 | 一律拒绝，close 4403 |
 | URL 携带 `token` / `access_token` | 一律拒绝，close 4401 |
-| `hello` 的 `v` 不是 1 | 拒绝，close 4004 |
+| `hello` 的 `v` 不是 2 | 拒绝，close 4004 |
 | `Authorization` 与帧内 token 不一致 | 拒绝，close 4003 |
 | `enabled=false` | 不开放监听；发送与工具调用返回 `door_closed` |
 
@@ -40,14 +40,13 @@ token 建议用 ASCII（控制台生成的 `token_urlsafe` 就是）。HTTP 头�
 ## 协议版本
 
 ```text
-World 在 hello 里发 v: 1
-插件只接受 1
-缺省按 1 处理；其他值 close 4004
+World 在 hello 里发 v: 2
+插件只接受 2
+缺省或其他值 close 4004
 同一连接重复 hello 也会重新校验 token 和版本
 ```
 
-版本不匹配时宁可断开，也不让「能连上但行为不对」的错配继续跑。  
-将来升到 v2 时，旧 World 会收到明确的 4004，而不是静默发错消息。
+1.3.9 两端都使用 v2，混装 1.3.8 或更早版本会收到 4004。模式协商完成前，消息继续走 AstrBot 的常规处理。
 
 ## 关闭码
 

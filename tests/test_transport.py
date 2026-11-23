@@ -96,6 +96,71 @@ def _server(on_send=None, on_tool=None, token=""):
     )
 
 
+class ScopedModeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_voice_receipt_negotiates_audio_and_does_not_cache_bytes(self):
+        async def read(*_args, **_scope):
+            return True, bridge.ComponentReceipt("voice", audio={"mime": "audio/silk", "base64": "AQID"})
+
+        for supported in (False, True):
+            server = _server(on_tool=read)
+            ws = _Ws()
+            server.capabilities = {"component_audio": supported}
+            await server._handle_tool(ws, {"t": "tool", "rid": "voice", "name": "cortico_read_message_component", "turn": "incoming"})
+            receipt = ws.last()
+            self.assertEqual("audio" in receipt, supported)
+            self.assertNotIn("audio", server._cached_ack("voice") or {})
+
+    async def test_switch_pauses_delivery_and_invalidates_previous_turn(self):
+        applied = []
+        sent = []
+        async def deliver(*args):
+            sent.append(args)
+            return await _ok_send()
+
+        server = bridge.BridgeServer(host="127.0.0.1", port=0, token="", on_send=deliver, save_mode=applied.append)
+        ws = _Ws()
+        server._client = ws
+        server.capabilities = {"isolated_turns": True}
+        old = (await server.ready_frame())["modeRevision"]
+        group = "default:GroupMessage:123456"
+        other = "default:GroupMessage:234567"
+        frame = {"t": "msg", "umo": group, "id": "same-id"}
+        self.assertFalse(await server.push(frame))
+        await server._on_frame(ws, {"t": "mode-accept", "modeRevision": old})
+        self.assertTrue(server.connected)
+        self.assertTrue(await server.push(frame))
+        self.assertEqual(ws.last()["modeRevision"], old)
+        await server._handle_send(ws, {**SEND_FRAME, "rid": "wrong", "conv": {}, "umo": other, "turn": "same-id"})
+        self.assertFalse(ws.last()["ok"])
+        await server._handle_send(ws, {**SEND_FRAME, "umo": group, "turn": "same-id"})
+        self.assertTrue(ws.last()["ok"])
+        await server._handle_send(ws, {**SEND_FRAME, "umo": group, "turn": "same-id"})
+        self.assertEqual(len(sent), 1)
+
+        await server._on_frame(ws, {"t": "mode-change", "rid": "m", "mode": "safe", "modeRevision": old})
+        new = ws.last()["modeRevision"]
+        self.assertEqual(applied, ["safe"])
+        self.assertFalse(server.connected)
+        self.assertFalse(await server.push(frame))
+        await server._on_frame(ws, {"t": "mode-accept", "modeRevision": new})
+        self.assertTrue(server.connected)
+        await server._handle_send(ws, {**SEND_FRAME, "rid": "stale", "umo": group, "turn": "same-id"})
+        self.assertFalse(ws.last()["ok"])
+        self.assertEqual(len(sent), 1)
+
+    async def test_scope_required_and_host_without_isolation_cannot_select_safe(self):
+        server = bridge.BridgeServer(host="127.0.0.1", port=0, token="", on_send=_ok_send, save_mode=lambda _: None)
+        ws = _Ws()
+        server._client = ws
+        revision = (await server.ready_frame())["modeRevision"]
+        await server._on_frame(ws, {"t": "mode-accept", "modeRevision": revision})
+        await server._on_frame(ws, {"t": "mode-change", "rid": "m", "mode": "safe", "modeRevision": revision})
+        self.assertTrue(ws.last()["error"])
+        self.assertEqual(server.mode, "full")
+        await server._handle_send(ws, {**SEND_FRAME, "umo": "default:GroupMessage:123456"})
+        self.assertEqual(ws.last()["error"], "scope_denied")
+
+
 class EpochTests(unittest.IsolatedAsyncioTestCase):
     """E-001：旧连接的慢任务不能把 ack 写进新连接。"""
 
@@ -165,7 +230,7 @@ class SendLockTests(unittest.IsolatedAsyncioTestCase):
             return None
 
         server._refresh_ready_later = no_refresh
-        ws = _FakeWs([json.dumps({"t": "hello", "v": 1})])
+        ws = _FakeWs([json.dumps({"t": "hello", "v": 2})])
         await server._handle_client(ws)
         return ws
 
@@ -220,7 +285,7 @@ class InflightTests(unittest.IsolatedAsyncioTestCase):
 
             server._refresh_ready_later = no_refresh
             frames = [
-                json.dumps({"t": "hello", "v": 1}),
+                json.dumps({"t": "hello", "v": 2}),
                 json.dumps(dict(SEND_FRAME, rid="s-1")),
                 json.dumps(dict(SEND_FRAME, rid="s-2")),
             ]
@@ -265,7 +330,7 @@ class HelloTests(unittest.IsolatedAsyncioTestCase):
         server = _server(token="口令")
         ws = _Ws()
         ok = await server._check_hello(
-            ws, None, {"t": "hello", "token": "口令"}, "addr"
+            ws, None, {"t": "hello", "v": 2, "token": "口令"}, "addr"
         )
         self.assertTrue(ok)
         self.assertEqual(ws.closed, [])
@@ -284,7 +349,7 @@ class HelloTests(unittest.IsolatedAsyncioTestCase):
         server = _server(token="s3cret")
         ws = _Ws()
         ok = await server._check_hello(
-            ws, {"authorization": "Bearer s3cret"}, {"t": "hello", "v": 1}, "addr"
+            ws, {"authorization": "Bearer s3cret"}, {"t": "hello", "v": 2}, "addr"
         )
         self.assertTrue(ok)
         self.assertEqual(ws.closed, [])
@@ -295,7 +360,7 @@ class HelloTests(unittest.IsolatedAsyncioTestCase):
         ok = await server._check_hello(
             ws,
             {"authorization": "Bearer s3cret"},
-            {"t": "hello", "v": 1, "token": "other"},
+            {"t": "hello", "v": 2, "token": "other"},
             "addr",
         )
         self.assertFalse(ok)
@@ -309,7 +374,7 @@ class HelloTests(unittest.IsolatedAsyncioTestCase):
         server.connected_at = 123.0
         server.client_address = "old-addr"
 
-        await server._on_frame(ws, {"t": "hello", "v": 1, "capabilities": {"images": True}})
+        await server._on_frame(ws, {"t": "hello", "v": 2, "capabilities": {"images": True}})
 
         self.assertIs(server._client, ws)
         self.assertEqual(server._epoch, 3)

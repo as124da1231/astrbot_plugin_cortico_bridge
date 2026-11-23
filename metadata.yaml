@@ -2,9 +2,9 @@ name: astrbot_plugin_cortico_bridge
 display_name: Cortico 桥
 short_desc: 让 Cortico 的 Persona 在 QQ 群和私聊里说话，AstrBot 只当手脚 / Bridge QQ groups and private chats to a Cortico persona while AstrBot handles plugins
 desc: >-
-  把 AstrBot 的 QQ 群聊和私聊接到 Cortico。支持引用、合并转发、图片、语音转写、语音回复和通知。AstrBot 管理接管范围与工具授权，Coo 本地对话借用主人身份时须使用独立工具令牌。
-  / Bridge QQ conversations to a Cortico persona. Supports quotes, merged forwards, images, voice transcription and replies, notices, and owner-scoped tool calls.
-version: 1.3.8
+  把 AstrBot 的 QQ 群聊和私聊接到 Coo。支持引用、合并转发、图片、按需读取语音原文件、语音转写和语音回复。AstrBot 管理接管范围与工具授权。
+  / Bridges QQ groups and private chats to Coo, with quotes, merged forwards, images, on-demand voice files, transcription, and voice replies.
+version: 1.3.9
 author: as124da1231
 repo: https://github.com/as124da1231/astrbot_plugin_cortico_bridge
 entry: main.py
@@ -17,6 +17,6 @@ tags:
   - agent
   - cortico
 help: >-
-  同机部署保持 listen_host=127.0.0.1、token 留空即可；跨机再把 listen_host 改成 0.0.0.0 并设置 token。
-  再到 Cortico 侧装配套扩展 cortico-world-astrbot，填同一个 ws://<地址>:17999 和 token。
+  同机部署可使用 ws://127.0.0.1:17999。跨机使用 wss:// 地址并设置桥接令牌。
+  在 Coo 安装同版本的 cortico-world-astrbot，于「连接」页填写地址与桥接令牌。
   插件详情页的「控制台」分「概览 / 群聊 / 私聊 / 工具 / 语音」：看连接与流水、管理群聊和私聊范围、给 Coo 授权工具、开关语音并试听。

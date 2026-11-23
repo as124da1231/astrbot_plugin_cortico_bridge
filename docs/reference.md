@@ -231,7 +231,7 @@ umos.v1.json   600，迁移时只备份一次
 ```text
 第一帧必须是 hello，10 秒超时
 token 优先读 Authorization: Bearer，帧内 token 兼容
-hello.v 必须是 1；缺省按 1，其他值 close 4004
+hello.v 必须是 2；缺省或其他值 close 4004
 同一连接重复 hello 会重新校验 token 与版本，只刷新能力并重推 ready
 ```
 

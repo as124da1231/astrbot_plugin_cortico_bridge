@@ -25,6 +25,7 @@ READ_COMPONENT_TOOL = "cortico_read_message_component"
 class ComponentReceipt:
     text: str
     images: list[dict] = field(default_factory=list)
+    audio: dict[str, str] | None = None
 
 
 @dataclass(slots=True)
@@ -207,11 +208,14 @@ def normalize_segments(
             segment = {"type": kind, "fields": fields}
             if inside_reply and kind == "record" and quoted_records is not None and type(item).__name__ == "Record":
                 quoted_records.append((fields, item))
-            if deferred_media is not None and kind in ("image", "record") and fields["media_state"] != "described":
+            if deferred_media is not None and (kind == "record" or kind == "image" and fields["media_state"] != "described"):
                 url = qq_media_url(_read(data, "url"))
+                if not url and kind == "record":
+                    url = qq_media_url(_read(data, "file"))
                 if url:
                     deferred_media[id(segment)] = url
-                    fields["media_state"] = "deferred"
+                    if fields["media_state"] != "described":
+                        fields["media_state"] = "deferred"
             if children:
                 segment["children"] = children
             if isinstance(nested, (list, tuple)) and len(children) < len(nested):
@@ -258,6 +262,11 @@ def event_segments(
                         target["fields"][key] = value
                 if kind == "record" and target["fields"].get("text"):
                     target["fields"]["media_state"] = "described"
+                if kind == "record" and deferred_media is not None:
+                    if url := deferred_media.get(id(source)):
+                        deferred_media.setdefault(id(target), url)
+                        if not target["fields"].get("text"):
+                            target["fields"]["media_state"] = "deferred"
         elif kind == "image":
             for target in targets:
                 target["fields"].pop("slot", None)

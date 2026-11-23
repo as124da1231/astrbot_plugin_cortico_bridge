@@ -4,6 +4,7 @@ main.py 依赖较多 AstrBot 层；这里和 test_images 一样只 stub 到 impo
 部分，再用 object.__new__ 绕开插件完整初始化。
 """
 
+import base64
 import contextlib
 import importlib.util
 import json
@@ -203,6 +204,7 @@ class FakeEvent:
 
 
 class FakeServer:
+    mode = "full"
     def __init__(self, connected=True, push_ok=True):
         self.connected = connected
         self.push_ok = push_ok
@@ -248,6 +250,9 @@ class FakeDelivery:
 
     def known_conversations(self):
         return self.conversations
+
+    def has_umo(self, umo):
+        return any(row.get("umo") == umo for row in self.conversations)
 
     def remember(self, *args, **kwargs):
         return None
@@ -648,6 +653,40 @@ class CommitConfigTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MessageComponentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_voice_file_is_returned_without_transcription(self):
+        bridge = make_bridge({"stt_enabled": False})
+        bridge.server.capabilities.update(message_segments=True, component_audio=True)
+        source_url = "https://multimedia.nt.qq.com.cn/voice?token=fixture"
+        event = FakeEvent("", message_id="voice", raw={"message": [
+            {"type": "record", "data": {"url": source_url}},
+        ]})
+        voice = b"\x02#!SILK_V3\x00\x00"
+        bridge._transcribe = mock.AsyncMock()
+        self.assertTrue(await bridge._push_event(event))
+        with mock.patch.object(main_mod, "download_qq_media", new_callable=mock.AsyncMock, return_value=voice) as download:
+            ok, result = await bridge._on_tool_call(
+                main_mod.READ_COMPONENT_TOOL, {"message_id": "voice", "path": [1]},
+                "voice", scope=event.unified_msg_origin,
+            )
+        self.assertTrue(ok)
+        download.assert_awaited_once_with(source_url, 6 * 1024 * 1024)
+        bridge._transcribe.assert_not_awaited()
+        self.assertIn("未开启语音转写", result.text)
+        self.assertNotIn(source_url, result.text)
+        self.assertEqual(result.audio["mime"], "audio/silk")
+        self.assertEqual(base64.b64decode(result.audio["base64"]), voice)
+
+    async def test_voice_file_only_preserves_a_transcript_without_new_transcription(self):
+        bridge = make_bridge({"stt_enabled": True})
+        bridge.server.capabilities["component_audio"] = True
+        bridge._transcribe = mock.AsyncMock()
+        event = FakeEvent("声音")
+        with mock.patch.object(main_mod, "download_qq_media", new_callable=mock.AsyncMock, return_value=b"#!AMR\nfixture"):
+            result = await bridge._read_voice({"fields": {"text": "已经转写"}}, "fixture", event, file_only=True)
+        self.assertIn("已经转写", result.text)
+        self.assertEqual(result.audio["mime"], "audio/amr")
+        bridge._transcribe.assert_not_awaited()
+
     async def test_forward_media_uses_the_selected_path_without_exposing_urls(self):
         bridge = make_bridge()
         bridge.server.capabilities.update(message_segments=True, component_media=True)
@@ -668,7 +707,7 @@ class MessageComponentTests(unittest.IsolatedAsyncioTestCase):
         await bridge._push_event(event)
         async def read(path):
             return await bridge._on_tool_call(
-                main_mod.READ_COMPONENT_TOOL, {"message_id": "outer", "path": path}, "outer"
+                main_mod.READ_COMPONENT_TOOL, {"message_id": "outer", "path": path}, "outer", scope=event.unified_msg_origin
             )
 
         ok, page = await read([1])
@@ -776,16 +815,16 @@ class MessageComponentTests(unittest.IsolatedAsyncioTestCase):
         args = {"message_id": "outer", "path": [list(components.LABELS).index("forward") + 1]}
         other = FakeEvent("other", group_id="2", message_id="other")
         self.assertTrue(await bridge._push_event(other))
-        denied, _ = await bridge._on_tool_call(components.READ_COMPONENT_TOOL, args, "other")
+        denied, _ = await bridge._on_tool_call(components.READ_COMPONENT_TOOL, args, "other", scope=other.unified_msg_origin)
         self.assertFalse(denied)
         event.bot.call_action.assert_not_called()
 
-        ok, result = await bridge._on_tool_call(components.READ_COMPONENT_TOOL, args, "outer")
+        ok, result = await bridge._on_tool_call(components.READ_COMPONENT_TOOL, args, "outer", scope=event.unified_msg_origin)
         self.assertTrue(ok)
         self.assertIn("转发正文", result)
         self.assertIn("offset=8", result)
         ok, result = await bridge._on_tool_call(
-            components.READ_COMPONENT_TOOL, {**args, "offset": 8}, "outer"
+            components.READ_COMPONENT_TOOL, {**args, "offset": 8}, "outer", scope=event.unified_msg_origin
         )
         self.assertTrue(ok)
         self.assertIn("第 9–9 条", result)
@@ -861,23 +900,24 @@ class TrustedToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_qq_admin_without_tool_authorization_is_not_trusted(self):
         bridge = make_bridge(context=FakeContext(admins=["111"]))
         bridge.server.tool_owner = ""
-        bridge._turns["t1"] = (time.time(), FakeEvent(sender_id="111"))
-        await bridge._on_tool_call("test_tool", {}, "t1")
+        event = FakeEvent(sender_id="111")
+        bridge._turns[(event.unified_msg_origin, "t1")] = (time.time(), event)
+        await bridge._on_tool_call("test_tool", {}, "t1", scope=event.unified_msg_origin)
         self.assertFalse(bridge.tools.executed[-1][2])
 
     async def test_qq_admin_sender_is_trusted(self):
         bridge = make_bridge(context=FakeContext(admins=["111"]))
         event = FakeEvent(sender_id="111")
-        bridge._turns["t1"] = (time.time(), event)
-        ok, _text = await bridge._on_tool_call("run_shell", {}, "t1")
+        bridge._turns[(event.unified_msg_origin, "t1")] = (time.time(), event)
+        ok, _text = await bridge._on_tool_call("run_shell", {}, "t1", scope=event.unified_msg_origin)
         self.assertTrue(ok)
         self.assertEqual(bridge.tools.executed[-1][2], True)
 
     async def test_qq_member_sender_is_not_trusted(self):
         bridge = make_bridge(context=FakeContext(admins=["111"]))
         event = FakeEvent(sender_id="222")
-        bridge._turns["t1"] = (time.time(), event)
-        await bridge._on_tool_call("run_shell", {}, "t1")
+        bridge._turns[(event.unified_msg_origin, "t1")] = (time.time(), event)
+        await bridge._on_tool_call("run_shell", {}, "t1", scope=event.unified_msg_origin)
         self.assertEqual(bridge.tools.executed[-1][2], False)
 
     async def test_owner_actor_must_be_in_admins(self):
@@ -926,7 +966,7 @@ class SendPassThroughTests(unittest.IsolatedAsyncioTestCase):
             result=(False, "发送失败，详情见插件日志", False, False, "send_failed")
         )
         result = await bridge._on_send_from_cortico(
-            "group", "1", "hi", "", "default"
+            "group", "1", "hi", "", "default", umo="default:GroupMessage:1"
         )
         self.assertEqual(len(result), 5)
         self.assertFalse(result[0])
