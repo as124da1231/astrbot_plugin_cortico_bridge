@@ -302,7 +302,7 @@ class PermissionResultTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertNotIn("SECRET", text)
         self.assertNotIn("C:/secret", text)
-        self.assertTrue(any("SECRET" in item for _lvl, item in logger.records))
+        self.assertFalse(any("SECRET" in item for _lvl, item in logger.records))
 
 
 if __name__ == "__main__":

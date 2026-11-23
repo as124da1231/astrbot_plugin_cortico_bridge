@@ -383,14 +383,14 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ok)
         self.assertEqual(ws.closed, [(4003, "bad token")])
 
-    async def test_authorize_accepts_frame_token_for_compat(self):
+    async def test_authorize_rejects_frame_token(self):
         server = await self._server("127.0.0.1", token="s3cret")
         ws = self._Ws()
         ok = await server._authorize(
             ws, None, {"t": "hello", "token": "s3cret"}, "1.2.3.4:1"
         )
-        self.assertTrue(ok)
-        self.assertEqual(ws.closed, [])
+        self.assertFalse(ok)
+        self.assertEqual(ws.closed, [(4003, "bad token")])
 
     async def test_authorize_rejects_wrong_token(self):
         server = await self._server("127.0.0.1", token="s3cret")
@@ -417,7 +417,7 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
 
         server._refresh_ready_later = no_refresh
         ws = self._FakeWs(
-            [json.dumps({"t": "hello", "v": 2, "token": "s3cret"})],
+            [json.dumps({"t": "hello", "v": bridge.PROTOCOL_VERSION})],
             headers={"authorization": "Bearer s3cret"},
         )
         await server._handle_client(ws)

@@ -226,13 +226,11 @@ WebSocket 单帧       16MB
 ## 6. 握手
 
 ```text
-Authorization: Bearer <token>     首选
-hello.token                       兼容保留
-hello.v                           必须是 2
+Authorization: Bearer <token>
+hello.v 必须是 3
 ```
 
-只给帧内 token 会记提示日志。token 建议 ASCII：HTTP 头放不了非 ASCII，
-自定义中文 token 时 World 只发帧内 token。
+跨机使用一枚 ASCII 桥接令牌。WS 直接连接，WSS 使用可验证的 TLS 入口。
 
 ---
 
@@ -256,15 +254,14 @@ URL 带 token/access_token → close 4401
 凭据：
 
 ```text
-Authorization: Bearer <token>   首选
-hello.token                     兼容保留
-两者都有时必须一致
+Authorization: Bearer <token>
+hello 帧不携带令牌
 ```
 
 版本：
 
 ```text
-hello.v 必须是 2
+hello.v 必须是 3
 缺省按 1，其他值 close 4004
 ```
 
@@ -302,11 +299,11 @@ token 生成：
   → 桥层身份校验
        turn 和 actor 都没有   → missing_identity
        turn 和 actor 同时有   → ambiguous_identity
-       actor 不是 owner+id    → bad_actor
+       actor 不是 {kind:'desktop'}    → bad_actor
   → 插件 _on_tool_call
        QQ 轮次: turn → _turns 里的 event
-       Coo 轮次: turn 空 + actor {kind:'owner', id}
-         → id 必须在 admins_id
+       Coo 桌面轮次: turn 空 + actor {kind:'desktop'}
+         → 通过桥接令牌鉴权，授权的主人 QQ 须在 admins_id
          → 合成主人私聊事件（role=admin）
          → event.send 落到主人私聊
        1. enabled

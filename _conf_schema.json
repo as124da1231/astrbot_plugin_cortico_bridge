@@ -5,6 +5,12 @@
     "default": false,
     "hint": "打开后，QQ 消息交给 Cortico 想，AstrBot 自己的模型不再参与这一轮。Cortico 没连上时自动退回 AstrBot 原有行为。"
   },
+  "bridge_mode": {
+    "description": "当前已批准的桥接模式",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
   "bridge_platforms": {
     "description": "接管的 AstrBot 平台",
     "type": "list",
@@ -51,13 +57,13 @@
     "description": "桥的监听端口",
     "type": "int",
     "default": 17999,
-    "hint": "Cortico 从这里连进来。需要在云服务器安全组里放行这个端口，否则连不上。"
+    "hint": "WS 直连使用此端口。使用 WSS 代理时，Coo 填代理的端口，桥的监听端口可留在回环或私网。"
   },
   "listen_host": {
     "description": "桥的监听地址",
     "type": "string",
     "default": "127.0.0.1",
-    "hint": "默认只允许本机连；未配置时也按 127.0.0.1 启动。同机 Coo 填 127.0.0.1；Coo 在另一台机器上才需要填 0.0.0.0，并且必须同时设置 token。"
+    "hint": "默认监听 127.0.0.1。跨机直连或代理在独立容器时，填写对端可达的监听地址。非回环监听必须设置桥接令牌。"
   },
   "token": {
     "description": "校验 token",
@@ -74,18 +80,41 @@
     "hint": "防止 Cortico 失控刷屏。0 表示不限。"
   },
   "owner_tool_qq": {
-    "description": "可从 Coo 调用工具的主人 QQ",
+    "description": "主人 QQ",
     "type": "string",
     "default": "",
-    "hint": "填写一个已在 AstrBot 管理员名单里的 QQ 号，并在 Coo 连接页选择同一个账号。"
+    "hint": "用于安全模式的主人私聊。若为桌面对话启用主人工具，该 QQ 还须在 AstrBot 管理员名单内。"
+  },
+  "owner_platform": {
+    "description": "主人 QQ 所在平台实例",
+    "type": "string",
+    "default": "",
+    "hint": "多个平台时选择主人所在的 QQ 平台实例。也可在插件概览页设定。"
+  },
+  "desktop_tools_enabled": {
+    "description": "允许 Coo 桌面使用主人工具",
+    "type": "bool",
+    "default": false,
+    "hint": "完整模式且桥接令牌已鉴权时生效。仍受 AstrBot 工具名单和主人权限约束。"
+  },
+  "desktop_send_targets": {
+    "description": "允许 Coo 桌面主动发送的会话",
+    "type": "list",
+    "default": [],
+    "hint": "完整模式下才生效。每项填写一个完整的 QQ 会话 UMO，机器人身份发送。"
+  },
+  "desktop_auth_reviewed": {
+    "description": "桌面权限迁移已确认",
+    "type": "bool",
+    "default": false,
+    "invisible": true
   },
   "owner_tool_token": {
-    "description": "主人工具令牌",
+    "description": "旧版桌面凭据，仅供迁移识别及回退",
     "type": "string",
     "default": "",
     "secret": true,
-    "obvious_hint": true,
-    "hint": "用于 Coo 对话借主人身份调用工具。桥 token 须已设置；此处另填一个不同的独立随机令牌，使用可打印 ASCII 字符。"
+    "invisible": true
   },
   "image_vision_provider": {
     "description": "群里的图片用哪个模型看",

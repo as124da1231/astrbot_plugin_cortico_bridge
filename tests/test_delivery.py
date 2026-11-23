@@ -291,7 +291,7 @@ class SendFallbackTests(unittest.TestCase):
         self.assertEqual(error_code, "send_failed")
         self.assertNotIn("SECRET", note)
         self.assertEqual(ctx.calls, 1)
-        self.assertTrue(any("SECRET" in text for _lvl, text in logger.records))
+        self.assertFalse(any("SECRET" in text for _lvl, text in logger.records))
 
     def test_timeout_is_not_retried_and_is_uncertain(self):
         delivery, ctx = _delivery(exc=asyncio.TimeoutError())
@@ -339,6 +339,45 @@ class SendFallbackTests(unittest.TestCase):
         self.assertFalse(used_voice)
         self.assertFalse(uncertain)
         self.assertEqual(error_code, "tts_unavailable")
+        self.assertEqual(ctx.calls, 0)
+
+    def test_rejected_voice_test_never_retries_with_text(self):
+        delivery, ctx = _delivery(results=[False, True], config={"tts_enabled": True})
+
+        async def get_audio(_text):
+            return "fixture-audio.mp3"
+
+        async def provider(_umo):
+            return types.SimpleNamespace(get_audio=get_audio)
+
+        delivery._tts_provider = provider
+        ok, _note, _voice, uncertain, error_code = asyncio.run(delivery.send(
+            "", "", "", "hello", voice=True, umo=UMO, allow_text_fallback=False,
+        ))
+        self.assertFalse(ok)
+        self.assertFalse(uncertain)
+        self.assertEqual(error_code, "platform_missing")
+        self.assertEqual(ctx.sent, [["Record"]])
+
+    def test_send_checks_permission_again_after_composing_voice(self):
+        delivery, ctx = _delivery(config={"tts_enabled": True})
+        allowed = True
+
+        async def get_audio(_text):
+            nonlocal allowed
+            allowed = False
+            return "fixture-audio.mp3"
+
+        async def provider(_umo):
+            return types.SimpleNamespace(get_audio=get_audio)
+
+        delivery._tts_provider = provider
+        ok, _note, _voice, uncertain, error_code = asyncio.run(delivery.send(
+            "", "", "", "hello", voice=True, umo=UMO, may_dispatch=lambda: allowed,
+        ))
+        self.assertFalse(ok)
+        self.assertFalse(uncertain)
+        self.assertEqual(error_code, "scope_denied")
         self.assertEqual(ctx.calls, 0)
 
     def test_plain_send_still_works(self):

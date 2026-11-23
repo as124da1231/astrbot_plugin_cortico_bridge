@@ -18,6 +18,7 @@ import json
 import time
 from collections import OrderedDict
 from typing import Any, Awaitable, Callable
+from urllib.parse import parse_qsl, urlsplit
 
 from astrbot.api import logger
 
@@ -97,8 +98,12 @@ def _header(headers, name: str) -> str:
 def connection_refusal(headers, path: str) -> str:
     if _header(headers, "origin").strip():
         return "origin"
-    target = _s(path)
-    if "token=" in target or "access_token=" in target:
+    try:
+        query = urlsplit(_s(path)).query
+    except ValueError:
+        return "query_token"
+    if any(key.lower() in {"token", "access_token", "password", "auth", "authorization", "api_key", "apikey"}
+           for key, _ in parse_qsl(query, keep_blank_values=True)):
         return "query_token"
     return ""
 
@@ -168,7 +173,7 @@ MAX_TOOL_RESULT = 4000
 HELLO_TIMEOUT = 10.0
 
 # 桥协议版本：World 在 hello 里声明，插件不认就断开，避免版本错配后「能连上但行为不对」。
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 # 同一个会话的发送排队上限：前面的语音/大图还没发完时，后面的别无限等。
 SEND_QUEUE_TIMEOUT = 5.0
@@ -183,6 +188,7 @@ SEND_LOCK_MAX = 256
 
 # 发送回执缓存：同一个 rid 重发时直接回上一次的结果，别把消息发两遍。
 ACK_CACHE_TTL = 300.0
+MESSAGE_RECEIPT_TIMEOUT = 2.0
 ACK_CACHE_MAX = 200
 
 
@@ -256,7 +262,9 @@ class BridgeServer:
         on_event: EventCallback | None = None,
         admin_ids: Callable[[], list[str]] | None = None,
         on_tool: ToolCallback | None = None,
-        owner_credentials: Callable[[], tuple[str, str]] | None = None,
+        desktop_owner: Callable[[], str] | None = None,
+        desktop_targets: Callable[[], list[str]] | None = None,
+        owner_umo: Callable[[], str] | None = None,
         tools_frame: ToolsProvider | None = None,
         tts_available: TtsInfoProvider | None = None,
         conversations: Callable[[], list[dict]] | None = None,
@@ -270,7 +278,9 @@ class BridgeServer:
         self._on_event = on_event
         self._admin_ids = admin_ids or (lambda: [])
         self._on_tool = on_tool
-        self._owner_credentials = owner_credentials or (lambda: ("", ""))
+        self._desktop_owner = desktop_owner or (lambda: "")
+        self._desktop_targets = desktop_targets or (lambda: [])
+        self._owner_umo = owner_umo or (lambda: "")
         self._tools_frame = tools_frame
         self._tts_available = tts_available or (lambda: False)
         self._conversations = conversations or (lambda: [])
@@ -278,6 +288,7 @@ class BridgeServer:
         self._save_mode = save_mode
         self._mode_revision = uuid4().hex
         self._mode_ready = False
+        self._pending_full: tuple[str, int, str, float] | None = None
         self._turn_scopes: OrderedDict[tuple[str, str], float] = OrderedDict()
         self._active_requests: set[tuple[int, str]] = set()
         self._server = None
@@ -293,6 +304,7 @@ class BridgeServer:
         self._epoch = 0
         # 正在跑的 send/tool 任务数；上限见 MAX_INFLIGHT。
         self._inflight = 0
+        self._message_receipts: dict[str, tuple[int, str, asyncio.Future[bool]]] = {}
         # 给状态面板看的信息
         self.client_address = ""
         self.connected_at: float | None = None
@@ -374,7 +386,10 @@ class BridgeServer:
                 continue
             try:
                 await self._client.send(
-                    json.dumps({"t": "tick", "ts": time.time()}, ensure_ascii=False)
+                    json.dumps({
+                        "t": "tick", "ts": time.time(),
+                        "modeApprovalPending": bool(self.pending_mode_approval()),
+                    }, ensure_ascii=False)
                 )
                 self.last_frame_at = time.time()
             except Exception:  # noqa: BLE001 - 发不出去就等 close 接手
@@ -408,7 +423,38 @@ class BridgeServer:
     def connected(self) -> bool:
         return self._client is not None and (self._save_mode is None or self._mode_ready)
 
+    @property
+    def has_client(self) -> bool:
+        return self._client is not None
+
+    @property
+    def operations_active(self) -> bool:
+        return self._inflight > 0
+
     # ---------- 帧 ----------
+
+    async def offer_message(self, frame: dict) -> str:
+        """只在明确拒收时交还 AstrBot。提交后没等到回执，可能已经接管。"""
+        if not self.connected:
+            return "declined"
+        if self.capabilities.get("message_delivery_ack") is not True:
+            return "accepted" if await self.push(frame) else "declined"
+        if len(self._message_receipts) >= 64:
+            return "declined"
+        delivery_id = uuid4().hex
+        receipt = asyncio.get_running_loop().create_future()
+        self._message_receipts[delivery_id] = (self._epoch, self._mode_revision, receipt)
+        try:
+            if not await self.push({**frame, "deliveryId": delivery_id}):
+                return "declined"
+            accepted = await asyncio.wait_for(receipt, timeout=MESSAGE_RECEIPT_TIMEOUT)
+            if not accepted:
+                self._turn_scopes.pop((_s(frame.get("umo")), _s(frame.get("id"))), None)
+            return "accepted" if accepted else "declined"
+        except asyncio.TimeoutError:
+            return "unknown"
+        finally:
+            self._message_receipts.pop(delivery_id, None)
 
     async def push(self, obj: dict) -> bool:
         """往当前客户端发一帧；没连上时返回 False。"""
@@ -420,6 +466,8 @@ class BridgeServer:
         key = None
         if self._save_mode is not None and obj.get("t") == "msg":
             if not self._mode_ready:
+                return False
+            if self.mode == "safe" and (not self._owner_umo() or obj.get("umo") != self._owner_umo()):
                 return False
             obj = {**obj, "modeRevision": self._mode_revision}
             if obj.get("kind") != "notice":
@@ -481,12 +529,15 @@ class BridgeServer:
             # 第一条 QQ 事件到达后由上层补上；早期为空。
             "self": {"id": self.self_id, "name": self.self_name},
             # 谁是 AstrBot 的管理员；当前约定这就是 QQ 上的「主人」。
-            "admins": list(self._admin_ids()) if self.token else [],
-            "ownerTools": bool(self.tool_owner),
+            "admins": list(self._admin_ids()) if self.token and self.mode == "full" else [],
+            "ownerTools": self.mode == "full" and bool(self.tool_owner),
+            "desktopSend": self.mode == "full" and self._has_credentials(self._client) and bool(self._desktop_targets()),
+            "ownerBound": bool(self._owner_umo()),
+            "modeApprovalPending": bool(self.pending_mode_approval()),
             # 桥这边能不能发语音，以及会用哪个 provider（World 可据此少试一次）。
             "tts": await self._tts_info(),
             # 桥记得的会话（含重启前恢复的），World 用它来支持主动发送。
-            "conversations": self._conversations()[:20],
+            "conversations": self._conversations()[:20] if self.mode == "full" else [],
             "v": PROTOCOL_VERSION,
             **({"mode": self.mode, "modeRevision": self._mode_revision} if self._save_mode else {}),
         }
@@ -496,14 +547,13 @@ class BridgeServer:
         return self._authorized_owner(self._client)
 
     def _authorized_owner(self, websocket) -> str:
-        owner_id, owner_token = self._owner_credentials()
-        if not self.token or not owner_token or token_equal(self.token, owner_token):
-            return ""
+        owner_id = self._desktop_owner()
+        return owner_id if self._has_credentials(websocket) and owner_id in self._admin_ids() else ""
+
+    def _has_credentials(self, websocket) -> bool:
         headers = getattr(getattr(websocket, "request", None), "headers", None)
-        presented = _header(headers, "x-cortico-owner-token")
-        if not presented or not token_equal(presented, owner_token):
-            return ""
-        return owner_id if owner_id in self._admin_ids() else ""
+        presented = bearer_token(headers)
+        return bool(self.token and presented and token_equal(presented, self.token))
 
     async def push_ready(self) -> None:
         """重推一次 ready：握手时 provider 可能还没就绪，语音设置变了也要刷新。"""
@@ -515,6 +565,50 @@ class BridgeServer:
         await asyncio.sleep(2)
         if self._client is not None:
             await self.push_ready()
+
+    def pending_mode_approval(self) -> str:
+        request = self._pending_full
+        if request is not None:
+            rid, epoch, revision, deadline = request
+            if self._client is not None and epoch == self._epoch and revision == self._mode_revision and time.monotonic() < deadline:
+                return rid
+            self._pending_full = None
+        return ""
+
+    def revise_permissions(self) -> None:
+        self._pending_full = None
+        self._mode_ready = False
+        self._mode_revision = uuid4().hex
+        self._turn_scopes.clear()
+        self._acks.clear()
+
+    def _apply_mode(self, mode: str) -> None:
+        if self.operations_active:
+            raise ValueError("桥正在执行上一轮，请稍后确认")
+        if self._save_mode is None:
+            raise ValueError("当前桥无法保存模式")
+        self._save_mode(mode)
+        self.mode = mode
+        self.revise_permissions()
+
+    async def approve_mode(self, request: str) -> None:
+        if not request or request != self.pending_mode_approval():
+            raise ValueError("切换请求已过期或权限配置已更新，请在 Coo 重新发起")
+        self._apply_mode("full")
+        await self.push_ready()
+
+    async def reject_mode(self, request: str) -> None:
+        if not request or request != self.pending_mode_approval():
+            raise ValueError("切换请求已过期或权限配置已更新")
+        self._pending_full = None
+        await self.push_ready()
+
+    async def narrow_mode(self) -> None:
+        if self.mode == "full":
+            self._apply_mode("safe")
+        else:
+            self._pending_full = None
+        await self.push_ready()
 
     def _refuse_connection(self, reason: str, address: str) -> None:
         if reason == "origin":
@@ -529,44 +623,23 @@ class BridgeServer:
             )
 
     async def _authorize(self, websocket, headers, frame: dict, address: str) -> bool:
-        """校验 hello 的凭据；不通过就断开并返回 False。
-
-        凭据优先认 `Authorization: Bearer`（和 OneBot v11 一致，凭据不进帧）。
-        帧内 `token` 保留一个版本的兼容期，给还没升级的 World 用。
-        """
-        header_token = bearer_token(headers)
-        frame_token = _s(frame.get("token")).strip()
-        if header_token and frame_token and not token_equal(header_token, frame_token):
-            self.bad_token_refused += 1
-            logger.warning(
-                f"Cortico Bridge: {address} Header 与握手帧里的 token 不一致，已断开"
-            )
-            with contextlib.suppress(Exception):
-                await websocket.close(code=4003, reason="bad token")
-            return False
-        presented = header_token or frame_token
-        if not presented or not token_equal(presented, self.token):
+        """凭据只从 WebSocket Upgrade 请求头获取。"""
+        presented = bearer_token(headers)
+        if "token" in frame or (self.token and (not presented or not token_equal(presented, self.token))):
             self.bad_token_refused += 1
             logger.warning(f"Cortico Bridge: {address} token 不匹配，已断开")
             with contextlib.suppress(Exception):
                 await websocket.close(code=4003, reason="bad token")
             return False
-        if not header_token:
-            logger.info(
-                f"Cortico Bridge: {address} 仍在使用帧内 token；升级 World 后可只走 Authorization 头"
-            )
         return True
 
     async def _check_hello(self, websocket, headers, frame: dict, address: str) -> bool:
         """初次握手和同一连接上的重复 hello 共用同一套校验。
 
-        - token：`Authorization` 与帧内 token 同时出现时必须一致；
-          `token_equal` 按 UTF-8 比较，中文 token 不会 TypeError。
+        - token：只接受 `Authorization: Bearer` 请求头。
         - 版本：重复 hello 也要重查，不能靠第一次握手的结果。
         不通过时按原因 close（4003/4004），返回 False。
         """
-        if self.token and not await self._authorize(websocket, headers, frame, address):
-            return False
         version = hello_version(frame)
         if version != PROTOCOL_VERSION:
             self.version_refused += 1
@@ -577,7 +650,7 @@ class BridgeServer:
             with contextlib.suppress(Exception):
                 await websocket.close(code=4004, reason="unsupported protocol version")
             return False
-        return True
+        return await self._authorize(websocket, headers, frame, address)
 
     async def _handle_client(self, websocket) -> None:
         remote = getattr(websocket, "remote_address", None)
@@ -653,6 +726,7 @@ class BridgeServer:
                 # 连接清空：旧任务可能还持有它，清了会让同群发送并发。
                 self._acks.clear()
                 self._mode_ready = False
+                self._pending_full = None
                 self._turn_scopes.clear()
                 self._epoch += 1
                 epoch = self._epoch
@@ -729,8 +803,7 @@ class BridgeServer:
                         self.client_address = ""
                         self.capabilities = {}
                 logger.info(
-                    "Cortico Bridge: Cortico 已断开（code=%s reason=%s）"
-                    % (getattr(websocket, "close_code", None), getattr(websocket, "close_reason", None))
+                    "Cortico Bridge: Cortico 已断开（code=%s）" % getattr(websocket, "close_code", None)
                 )
                 self._emit("disconnected")
 
@@ -762,7 +835,7 @@ class BridgeServer:
             "rid": _s(frame.get("rid")), "ok": False, "error": error, "note": note,
         })
 
-    def _authorize_turn(self, websocket, frame: dict, umo: str) -> str:
+    def _authorize_turn(self, websocket, frame: dict, umo: str, *, sending: bool = False) -> str:
         if self._save_mode is None:
             return ""
         turn = _s(frame.get("turn"))
@@ -771,9 +844,11 @@ class BridgeServer:
             stamp = self._turn_scopes.get((umo, turn))
             if stamp is not None and time.monotonic() - stamp <= 600:
                 return ""
-        elif not turn and self.mode == "full" and isinstance(actor, dict) and actor.get("kind") == "owner":
-            owner = self._authorized_owner(websocket)
-            if owner and actor.get("id") == owner:
+        elif not turn and self.mode == "full" and actor == {"kind": "desktop"}:
+            if sending:
+                if self._has_credentials(websocket) and umo in self._desktop_targets():
+                    return ""
+            elif self._authorized_owner(websocket):
                 return ""
         return "会话、消息或操作者未获本轮授权"
 
@@ -908,7 +983,9 @@ class BridgeServer:
             ok, code, err = False, codes.VOICE_AT_CONFLICT, "语音和 @ 不能是同一条消息"
         elif conv_kind not in ("group", "private") or not conv_id:
             ok, code, err = False, codes.BAD_SESSION, "会话参数不合法"
-        elif (denied := self._authorize_turn(websocket, frame, umo)):
+        elif self._save_mode and self.mode == "safe" and (conv_kind != "private" or image is not None or at):
+            ok, code, err = False, "scope_denied", "安全模式仅允许回复已授权的主人私聊"
+        elif (denied := self._authorize_turn(websocket, frame, umo, sending=True)):
             ok, code, err = False, "scope_denied", denied
         elif self._save_mode and reply_to and (umo, reply_to) not in self._turn_scopes:
             ok, code, err = False, "scope_denied", "引用须使用本会话中已核实的消息"
@@ -926,8 +1003,8 @@ class BridgeServer:
                 )
             else:
                 try:
-                    denied = self._authorize_turn(websocket, frame, umo)
-                    if epoch != self._epoch or denied:
+                    denied = self._authorize_turn(websocket, frame, umo, sending=True)
+                    if epoch != self._epoch or (self._save_mode and frame.get("modeRevision") != self._mode_revision) or denied:
                         ok, note, used_voice, uncertain, raw_code = False, denied or "桥已重新连接", False, False, "scope_denied"
                     else:
                         ok, note, used_voice, uncertain, raw_code = await self._on_send(
@@ -935,11 +1012,8 @@ class BridgeServer:
                         )
                     code = _s(raw_code).strip()
                     err = _s(note)
-                except Exception:  # noqa: BLE001 - 发送层异常也要回执
-                    # 异常原文可能带 provider key / URL / 本机路径：只进 debug，
-                    # 回执给稳定 code + 中文短句。
-                    logger.debug("Cortico Bridge: 发送层异常", exc_info=True)
-                    logger.warning("Cortico Bridge: 发送层异常（详情见 debug 日志）")
+                except Exception as exc:  # noqa: BLE001 - 发送层异常也要回执
+                    logger.warning("Cortico Bridge: 发送层异常（%s）", type(exc).__name__)
                     ok, err, used_voice, uncertain, code = (
                         False,
                         "发送失败，详情见插件日志",
@@ -993,13 +1067,9 @@ class BridgeServer:
             identity_code = codes.MISSING_IDENTITY
         elif turn and has_actor:
             identity_code = codes.AMBIGUOUS_IDENTITY
-        elif has_actor and (
-            actor is None
-            or _s(actor.get("kind")) != "owner"
-            or not _s(actor.get("id")).strip()
-        ):
+        elif has_actor and actor != {"kind": "desktop"}:
             identity_code = codes.BAD_ACTOR
-        elif actor is not None and self._authorized_owner(websocket) != _s(actor.get("id")).strip():
+        elif actor is not None and not self._authorized_owner(websocket):
             identity_code = codes.OWNER_AUTH_REQUIRED
         elif self._authorize_turn(websocket, frame, _s(frame.get("umo"))):
             identity_code = "scope_denied"
@@ -1009,7 +1079,7 @@ class BridgeServer:
         if identity_code:
             payload = {"t": "tool-ack", "rid": rid, "ok": False, "error": identity_code}
             if identity_code == codes.OWNER_AUTH_REQUIRED:
-                payload["note"] = "请在 AstrBot 配置主人 QQ 和独立工具令牌，并在 Coo 连接页填入相同值。"
+                payload["note"] = "请在 AstrBot 管理页授权桌面对话使用主人 QQ 和工具。"
             await self._send_to(websocket, payload)
             return
 
@@ -1023,11 +1093,8 @@ class BridgeServer:
             try:
                 scope = {"scope": _s(frame.get("umo"))} if self._save_mode else {}
                 ok, text = await self._on_tool(name, args, turn, actor, **scope)
-            except Exception:  # noqa: BLE001
-                # 回调异常可能带 URL/路径；原文只进日志，回执只给稳定 code + 中文。
-                logger.error(
-                    "Cortico Bridge: 工具执行失败 name=%s" % name, exc_info=True
-                )
+            except Exception as exc:  # noqa: BLE001 - 异常原文可能包含媒体地址或凭据
+                logger.error("Cortico Bridge: 工具执行失败 name=%s（%s）", name, type(exc).__name__)
                 ok, text = False, ""
                 # errors.py 扩容前先在本层保留稳定 code；World 对未知 code 有兜底。
                 code = codes.TOOL_FAILED
@@ -1057,14 +1124,23 @@ class BridgeServer:
             return
         kind = _s(frame.get("t"))
 
+        if kind == "msg-ack":
+            pending = self._message_receipts.get(_s(frame.get("deliveryId")))
+            accepted = frame.get("accepted")
+            if pending is not None and pending[:2] == (self._epoch, self._mode_revision) and isinstance(accepted, bool):
+                receipt = pending[2]
+                if not receipt.done():
+                    receipt.set_result(accepted)
+            return
+
         if self._save_mode and kind == "mode-accept":
             if frame.get("modeRevision") != self._mode_revision:
                 await self.push_ready()
                 return
-            self._mode_ready = self.mode == "full" or self.capabilities.get("isolated_turns") is True
+            self._mode_ready = True
             await self._send_to(websocket, {
                 "t": "mode-status", "mode": self.mode, "modeRevision": self._mode_revision,
-                "active": self._mode_ready, "rid": _s(frame.get("rid")),
+                "active": True, "rid": _s(frame.get("rid")), "pending": bool(self.pending_mode_approval()),
             })
             if self._mode_ready and self.mode == "full" and self._tools_frame is not None:
                 await self.push(self._tools_frame())
@@ -1075,32 +1151,29 @@ class BridgeServer:
             rid = _s(frame.get("rid"))
             mode = frame.get("mode")
             error = ""
-            if frame.get("modeRevision") != self._mode_revision or mode not in ("full", "safe"):
+            pending = False
+            if not rid or not self._mode_ready or frame.get("modeRevision") != self._mode_revision or mode not in ("full", "safe"):
                 error = "模式状态已变化，请刷新"
-            elif mode == "safe" and self.capabilities.get("isolated_turns") is not True:
-                error = "当前 Coo 宿主尚未提供独立上下文"
-            elif self._inflight:
-                error = "桥正在执行上一轮，请稍后"
-            if not error and mode != self.mode:
+            elif mode == "full" and self.mode == "safe":
+                if not self.pending_mode_approval():
+                    self._pending_full = (uuid4().hex, self._epoch, self._mode_revision, time.monotonic() + 180)
+                pending = True
+                self._emit("mode", mode=self.mode, synced=self._mode_ready)
+            elif mode != self.mode:
                 try:
-                    self._save_mode(mode)
+                    self._apply_mode(mode)
+                except ValueError as exc:
+                    error = str(exc)
                 except Exception:
                     error = "AstrBot 保存模式失败"
-                else:
-                    self.mode = mode
-                    self._mode_ready = False
-                    self._mode_revision = uuid4().hex
-                    self._turn_scopes.clear()
-                    self._acks.clear()
             await self._send_to(websocket, {
-                "t": "mode-prepare", "rid": rid, "error": error,
+                "t": "mode-prepare", "rid": rid, "error": error, "pending": pending,
                 "mode": self.mode, "modeRevision": self._mode_revision,
             })
             return
 
         if kind == "hello":
-            # 同一连接重复握手：和初次握手用同一套校验（header/帧 token +
-            # 协议版本）；成功只刷新能力并重推 ready，不重复注册、不换 client。
+            # 重复握手沿用请求头鉴权及协议版本，成功后只刷新能力并重推 ready。
             address = self.client_address
             if not await self._check_hello(websocket, headers, frame, address):
                 return

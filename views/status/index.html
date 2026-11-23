@@ -46,14 +46,14 @@
         <span class="lbl">概览</span>
         <span class="navdot" id="railDot" hidden aria-hidden="true"></span>
       </button>
-      <button class="navitem" type="button" data-panel="groups">
+      <button class="navitem" type="button" data-panel="groups" hidden>
         <span class="tag" aria-hidden="true"></span>
         <svg class="navicon" viewBox="0 0 20 20" aria-hidden="true">
           <path d="M3 6.5h14M3 10h14M3 13.5h9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
         </svg>
         <span class="lbl">群聊</span>
       </button>
-      <button class="navitem" type="button" data-panel="private">
+      <button class="navitem" type="button" data-panel="private" hidden>
         <span class="tag" aria-hidden="true"></span>
         <svg class="navicon" viewBox="0 0 20 20" aria-hidden="true">
           <circle cx="10" cy="7" r="3" fill="none" stroke="currentColor" stroke-width="1.4" />
@@ -61,7 +61,7 @@
         </svg>
         <span class="lbl">私聊</span>
       </button>
-      <button class="navitem" type="button" data-panel="tools">
+      <button class="navitem" type="button" data-panel="tools" hidden>
         <span class="tag" aria-hidden="true"></span>
         <svg class="navicon" viewBox="0 0 20 20" aria-hidden="true">
           <path d="M4 15l7-7M12.5 3.5l1.6 1.6-1.1 1.1 1.8 1.8-2.4 2.4-1.8-1.8-1.1 1.1-1.6-1.6z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
@@ -145,7 +145,7 @@
               <div class="v mono" id="mFailed">0</div>
               <small>发送没有成功</small>
             </article>
-            <button class="stat link accent" type="button" id="metricTools" title="去工具设置">
+            <button class="stat link accent" type="button" id="metricTools" title="去工具设置" hidden>
               <div class="k">已授权</div>
               <div class="v mono" id="mTools">0</div>
               <small>可调用工具</small>
@@ -156,9 +156,46 @@
         <section class="sheet security">
           <div class="sheethead">
             <div class="sheethead-text">
+              <div class="sh-kicker">模式与授权</div>
+              <h2>谁能使用 Coo</h2>
+              <div class="sh-desc">安全模式只接入指定主人的 QQ 私聊。完整模式按群、私聊和工具的现有配置接入。</div>
+            </div>
+          </div>
+          <div id="modeApproval" class="tokenonce" hidden>
+            <strong>完整模式将开放</strong>
+            <ul id="modeApprovalScope"></ul>
+            <small>如需缩小范围，可先在 AstrBot 的插件配置中保存，再从 Coo 发起切换。</small>
+            <label class="cortico-switchrow"><input type="checkbox" id="modeRisk" /> 我知道已放行的群或私聊可能收到包含桌面对话内容的回复。</label>
+            <div class="token-actions">
+              <button class="btn sm" type="button" id="modeApprove" disabled>批准完整模式</button>
+              <button class="btn sm" type="button" id="modeReject">驳回</button>
+            </div>
+          </div>
+          <div class="tokenonce-row">
+            <label for="accessOwner">主人 QQ</label>
+            <input class="kvselect mono" id="accessOwner" type="text" inputmode="numeric" maxlength="20" />
+            <label for="accessPlatform">平台实例</label>
+            <select class="kvselect" id="accessPlatform"></select>
+          </div>
+          <div id="accessDesktop" hidden>
+            <p id="legacyDesktopReview" hidden>已保留旧版主人配置。请确认是否允许当前桥接令牌使用主人工具，并逐项选择桌面主动发送目标。</p>
+            <label class="cortico-switchrow"><input type="checkbox" id="accessTools" /> 允许 Coo 桌面对话以主人身份调用已授权的工具</label>
+            <label for="accessTargets">允许桌面主动发送的 QQ 会话 UMO，每行一个</label>
+            <textarea class="kvselect" id="accessTargets" rows="3" spellcheck="false" placeholder="default:FriendMessage:123456789"></textarea>
+            <label class="cortico-switchrow" id="accessRiskRow" hidden><input type="checkbox" id="accessRisk" /> 确认允许当前桥接令牌使用这次新增的桌面权限</label>
+          </div>
+          <div class="token-actions">
+            <button class="btn sm" id="accessSave" type="button" disabled>保存授权</button>
+            <button class="btn sm" id="modeNarrow" type="button" hidden>切换为安全模式</button>
+          </div>
+        </section>
+
+        <section class="sheet security">
+          <div class="sheethead">
+            <div class="sheethead-text">
               <div class="sh-kicker">接入安全</div>
               <h2>谁能连进来</h2>
-              <div class="sh-desc">本机默认免密；离开本机必须带 token。浏览器页面会被 Origin 拦住。</div>
+              <div class="sh-desc">本机回环的基础聊天默认免密。跨机支持 WS 和 WSS，两种连接都使用一枚桥接令牌。</div>
             </div>
             <div class="token-actions">
               <button class="btn sm" type="button" id="btnTokenCopy" title="把当前 token 复制到剪贴板">复制</button>

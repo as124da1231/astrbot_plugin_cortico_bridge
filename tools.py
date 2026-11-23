@@ -276,9 +276,9 @@ class ToolRegistry:
         except asyncio.TimeoutError:
             return False, f"{name} 超过 {int(timeout)} 秒没有返回"
         except Exception as exc:  # noqa: BLE001
-            # D-005：异常原文可能带路径/凭据，只进日志；回执给短句。
+            # 插件异常可能包含服务地址和凭据，只记录异常类型。
             logger.warning(
-                "Cortico Bridge: 工具 %s 执行失败 —— %s", name, exc, exc_info=True
+                "Cortico Bridge: 工具 %s 执行失败（%s）", name, type(exc).__name__
             )
             return False, f"工具 {name} 执行失败，详情见插件日志"
 

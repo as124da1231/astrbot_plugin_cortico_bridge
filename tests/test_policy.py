@@ -205,6 +205,9 @@ class FakeEvent:
 
 class FakeServer:
     mode = "full"
+    has_client = False
+    operations_active = False
+
     def __init__(self, connected=True, push_ok=True):
         self.connected = connected
         self.push_ok = push_ok
@@ -224,10 +227,26 @@ class FakeServer:
         self.query_token_refused = 0
         self.bad_token_refused = 0
         self.version_refused = 0
+        self.approval = ""
+        self.approved = []
+
+    def pending_mode_approval(self):
+        return self.approval
+
+    def revise_permissions(self):
+        self.approval = ""
+
+    async def approve_mode(self, approval):
+        if not approval or approval != self.approval:
+            raise ValueError("切换请求已过期")
+        self.approved.append(approval)
 
     async def push(self, frame):
         self.pushed.append(frame)
         return self.push_ok
+
+    async def offer_message(self, frame):
+        return "accepted" if await self.push(frame) else "declined"
 
     async def push_ready(self):
         return True
@@ -895,15 +914,35 @@ class VoiceTestTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bridge.delivery.sent[0][1]["allow_text_fallback"])
         self.assertIn("TTS 失败", result["error"])
 
+    async def test_safe_voice_test_selects_only_owner_and_rechecks_before_send(self):
+        owner = "default:FriendMessage:111"
+        bridge = make_bridge({"tts_enabled": True, "owner_tool_qq": "111"}, delivery=FakeDelivery([
+            {"key": "group:1", "umo": "default:GroupMessage:1"}, {"key": "private:111", "umo": owner},
+        ]))
+        bridge.server.mode = "safe"
+        bridge._voice_provider = mock.AsyncMock(return_value=object())
+        with fake_responses(), fake_request("POST", {"text": "你好"}):
+            result = await bridge.page_voice_test()
+        self.assertEqual(result["status"], 200)
+        args, kwargs = bridge.delivery.sent[0]
+        self.assertEqual(args[-1], owner)
+        self.assertTrue(kwargs["may_dispatch"]())
+        bridge.config["owner_tool_qq"] = "222"
+        self.assertFalse(kwargs["may_dispatch"]())
+        with fake_responses(), fake_request("POST", {"text": "你好"}):
+            result = await bridge.page_voice_test()
+        self.assertEqual(result["status"], 400)
+        self.assertEqual(len(bridge.delivery.sent), 1)
+
 
 class TrustedToolTests(unittest.IsolatedAsyncioTestCase):
-    async def test_qq_admin_without_tool_authorization_is_not_trusted(self):
+    async def test_qq_admin_does_not_depend_on_desktop_authorization(self):
         bridge = make_bridge(context=FakeContext(admins=["111"]))
         bridge.server.tool_owner = ""
         event = FakeEvent(sender_id="111")
         bridge._turns[(event.unified_msg_origin, "t1")] = (time.time(), event)
         await bridge._on_tool_call("test_tool", {}, "t1", scope=event.unified_msg_origin)
-        self.assertFalse(bridge.tools.executed[-1][2])
+        self.assertTrue(bridge.tools.executed[-1][2])
 
     async def test_qq_admin_sender_is_trusted(self):
         bridge = make_bridge(context=FakeContext(admins=["111"]))
@@ -920,13 +959,13 @@ class TrustedToolTests(unittest.IsolatedAsyncioTestCase):
         await bridge._on_tool_call("run_shell", {}, "t1", scope=event.unified_msg_origin)
         self.assertEqual(bridge.tools.executed[-1][2], False)
 
-    async def test_owner_actor_must_be_in_admins(self):
-        bridge = make_bridge(context=FakeContext(admins=["111"]))
+    async def test_desktop_actor_uses_astrbot_bound_identity(self):
+        bridge = make_bridge({"owner_tool_qq": "111"}, context=FakeContext(admins=["111"]))
         event = FakeEvent(sender_id="111")
-        with mock.patch.object(owner_event, "build_owner_event", return_value=event):
-            await bridge._on_tool_call(
-                "run_shell", {}, "", {"kind": "owner", "id": "111"}
-            )
+        with mock.patch.object(owner_event, "build_owner_event", return_value=event) as build:
+            ok, _ = await bridge._on_tool_call("run_shell", {}, "", {"kind": "desktop"})
+        self.assertTrue(ok)
+        self.assertIn("111", build.call_args.args)
         self.assertEqual(bridge.tools.executed[-1][2], True)
 
     async def test_owner_event_construction_failure_does_not_leak_exception(self):
@@ -938,7 +977,7 @@ class TrustedToolTests(unittest.IsolatedAsyncioTestCase):
             side_effect=RuntimeError(secret),
         ):
             ok, text = await bridge._on_tool_call(
-                "run_shell", {}, "", {"kind": "owner", "id": "111"}
+                "run_shell", {}, "", {"kind": "desktop"}
             )
         self.assertFalse(ok)
         self.assertIn("主人事件构造失败", text)
@@ -952,10 +991,10 @@ class TrustedToolTests(unittest.IsolatedAsyncioTestCase):
             "run_shell",
             {},
             "",
-            {"kind": "owner", "id": "222", "role": "admin", "owner": True},
+            {"kind": "desktop", "id": "222", "role": "admin", "owner": True},
         )
         self.assertFalse(ok)
-        self.assertIn("不在 AstrBot 的管理员名单", text)
+        self.assertIn("未获得 AstrBot", text)
         self.assertEqual(bridge.tools.executed, [])
 
 
@@ -975,6 +1014,23 @@ class SendPassThroughTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfigCompatibilityTests(unittest.TestCase):
+    def test_modes_preserve_enabled_legacy_deployments_and_fresh_install_is_safe(self):
+        self.assertEqual(make_bridge()._initial_bridge_mode(), "full")
+        self.assertEqual(make_bridge({"enabled": False})._initial_bridge_mode(), "safe")
+        self.assertEqual(make_bridge({"bridge_mode": "safe"})._initial_bridge_mode(), "safe")
+
+    def test_schema_preserves_admin_mode_and_migration_state_on_reload(self):
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        previous = {"enabled": True, "bridge_mode": "safe", "desktop_auth_reviewed": True,
+                    "owner_tool_qq": "111", "owner_tool_token": "fixture-old-token"}
+        # AstrBot 的配置加载器只留下 schema 中声明的键。
+        loaded = {key: previous.get(key, field["default"]) for key, field in schema.items()}
+        bridge = make_bridge(loaded)
+        self.assertEqual(bridge._initial_bridge_mode(), "safe")
+        self.assertFalse(bridge._legacy_desktop_needs_review())
+        self.assertTrue(schema["owner_tool_token"]["secret"])
+        self.assertTrue(schema["owner_tool_token"]["invisible"])
+
     def test_schema_defaults_preserve_legacy_group_policy(self):
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         defaults = {key: value["default"] for key, value in schema.items()}
@@ -1001,6 +1057,51 @@ class ConfigCompatibilityTests(unittest.TestCase):
 
 
 class PageBackendTests(unittest.IsolatedAsyncioTestCase):
+    async def test_full_approval_requires_the_reviewed_scope(self):
+        bridge = make_bridge()
+        bridge.server.approval = "pending-fixture"
+        reviewed = bridge._approval_scope_version(bridge._full_mode_scope())
+        payload = {"action": "approve", "approval": bridge.server.approval, "scopeVersion": reviewed, "confirmed": True}
+        # Tool inventory can change independently of the bridge plugin configuration.
+        bridge.tools.active_rows = [{"name": "weather", "risk": "read"}]
+        with fake_responses(), fake_request("POST", payload):
+            self.assertEqual((await bridge.page_access())["status"], 400)
+        self.assertEqual(bridge.server.approved, [])
+        payload["scopeVersion"] = bridge._approval_scope_version(bridge._full_mode_scope())
+        with fake_responses(), fake_request("POST", payload):
+            self.assertEqual((await bridge.page_access())["status"], 200)
+        self.assertEqual(bridge.server.approved, ["pending-fixture"])
+
+    async def test_legacy_owner_is_carried_over_without_giving_shared_token_desktop_rights(self):
+        bridge = make_bridge({"owner_tool_qq": "111", "owner_tool_token": "fixture-legacy-token"})
+        with fake_responses(), fake_request("GET"):
+            info = (await bridge.page_access())["data"]
+        self.assertEqual(info["ownerPlatform"], "default")
+        self.assertTrue(info["legacyDesktopNeedsReview"])
+        self.assertFalse(info["desktopTools"])
+        self.assertNotIn("fixture-legacy-token", repr(info))
+        updates = {"action": "save", "ownerQQ": "111", "ownerPlatform": "default", "desktopTools": True,
+                   "desktopTargets": ["default:GroupMessage:1"]}
+        with fake_responses(), fake_request("POST", updates):
+            self.assertEqual((await bridge.page_access())["status"], 400)
+        self.assertFalse(bridge.config.get("desktop_tools_enabled"))
+        with fake_responses(), fake_request("POST", {**updates, "confirmed": True}):
+            updated = (await bridge.page_access())["data"]
+        self.assertTrue(updated["desktopTools"])
+        self.assertFalse(updated["legacyDesktopNeedsReview"])
+        self.assertEqual(updated["desktopTargets"], ["default:GroupMessage:1"])
+
+    async def test_safe_mode_binding_preserves_stored_full_mode_targets(self):
+        bridge = make_bridge({"owner_tool_qq": "111", "desktop_tools_enabled": True,
+                              "desktop_send_targets": ["default:GroupMessage:1"]})
+        bridge.server.mode = "safe"
+        updates = {"action": "save", "ownerQQ": "222", "ownerPlatform": "default", "desktopTools": True,
+                   "desktopTargets": [], "confirmed": True}
+        with fake_responses(), fake_request("POST", updates):
+            updated = (await bridge.page_access())["data"]
+        self.assertEqual(updated["desktopTargets"], ["default:GroupMessage:1"])
+        self.assertFalse(updated["desktopTools"])
+
     async def test_status_has_token_set_but_no_plaintext(self):
         bridge = make_bridge({"token": "secret"})
         bridge.server.host = "127.0.0.1"

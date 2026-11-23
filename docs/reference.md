@@ -28,7 +28,9 @@
 | `tools_allow` | list | `[]` | 工具许可名单，通配项只包含已审查的读写工具 |
 | `tools_risks` | list | `[]` | 管理员逐项配置工具名与风险，未标注按 exec |
 | `owner_tool_qq` | string | 空 | 获授权的 AstrBot 管理员 QQ |
-| `owner_tool_token` | string | 空 | 主人工具独立令牌 |
+| `owner_platform` | string | 空 | 主人 QQ 绑定的平台实例 |
+| `desktop_tools_enabled` | bool | false | 完整模式的桌面主人工具授权 |
+| `desktop_send_targets` | list | 空 | 桌面主动发送目标 UMO |
 | `private_mode` | string | `all` | `off` / `allowlist` / `all` |
 | `private_allow` | list | `[]` | 私聊白名单 |
 | `private_admin_bypass` | bool | `true` | 管理员即使不在名单也能私聊 |
@@ -58,7 +60,7 @@
 工具身份：
 
 - QQ 轮次：用触发消息的发言者身份；
-- Coo 轮次：`actor {kind:"owner", id}` 的账号必须匹配服务端主人 QQ，同时经独立工具令牌授权；
+- 桌面轮次以 `actor {kind:"desktop"}` 声明来源，AstrBot 校验服务端主人绑定及桥接令牌。
 - World 帧里的 `role` / `owner` 不参与判定。
 
 ---
@@ -109,7 +111,7 @@
 |---|---|
 | `missing_identity` | `turn` 和 `actor` 都没有 |
 | `ambiguous_identity` | `turn` 和 `actor` 同时存在 |
-| `bad_actor` | `actor` 不是 `{kind:"owner", id:非空}` |
+| `bad_actor` | `actor` 不是 `{kind:"desktop"}` |
 | `owner_auth_required` | 当前连接未获得这个主人账号的工具授权 |
 | `tool_failed` | 工具回调抛错；异常原文只进日志 |
 
@@ -230,8 +232,8 @@ umos.v1.json   600，迁移时只备份一次
 
 ```text
 第一帧必须是 hello，10 秒超时
-token 优先读 Authorization: Bearer，帧内 token 兼容
-hello.v 必须是 2；缺省或其他值 close 4004
+令牌只读 Authorization: Bearer 请求头
+hello.v 必须是 3；缺省或其他值 close 4004
 同一连接重复 hello 会重新校验 token 与版本，只刷新能力并重推 ready
 ```
 
@@ -252,15 +254,16 @@ World 收到这些码会记一条「桥拒绝了这次连接」，并按退避�
 
 | 帧 | 方向 | 字段 |
 |---|---|---|
-| `hello` | World → 插件 | `v`、`token`（兼容）、`capabilities.images`、`capabilities.message_segments`、`capabilities.component_media` |
-| `ready` | 插件 → World | `v: 1`、`channel`、`self {id,name}`、`admins[]`、`tts {ready,provider}`、`conversations[] {key,umo,platform,kind,id,name,age_sec}`（最多 20 条，按最近出现排序） |
+| `hello` | World → 插件 | `v: 3`、`capabilities.images`、`capabilities.message_segments`、`capabilities.component_media` |
+| `ready` | 插件 → World | `v: 3`、`mode`、`modeRevision`、`channel`、`self {id,name}`、`admins[]`、`tts {ready,provider}`、`conversations[] {key,umo,platform,kind,id,name,age_sec}`（最多 20 条，按最近出现排序） |
 | `msg` | 插件 → World | `channel`、`id`、`umo`、`ts`、`conv {kind,id,name}`、`sender {id,name}`、`text`、`mentioned`、`platform`、`role`、`owner`、`can`、`images[]`、`image_errors[]`、`segments[]` |
 | `msg`（通知） | 插件 → World | 同上，`kind: "notice"`、`ref`，`can.screenshot=false` |
+| `msg-ack` | World → 插件 | 回复 `msg.deliveryId` 和 `accepted`。明确拒收可交还 AstrBot，收不到回执视为可能已接管 |
 | `tick` | 插件 → World | `ts`（epoch 秒） |
 | `send` | World → 插件 | `rid`、`umo`（必填）、`conv`、`text`、`replyTo`、`platform`、`image {mime,base64}`、`voice`、`at[]` |
 | `ack` | 插件 → World | `rid`、`ok`、`voice`、`error`、`note`、`uncertain` |
 | `tools` | 插件 → World | `items[] {name,risk,desc,sig}` |
-| `tool` | World → 插件 | `rid`、`name`、`args`、`turn` 或 `actor {kind:"owner",id}` |
+| `tool` | World → 插件 | `rid`、`name`、`args`、`turn` 或 `actor {kind:"desktop"}` |
 | `tool-ack` | 插件 → World | `rid`、`ok`、`result`（成功）或 `error` / `note`（失败）。读取组件时可附 `images[]` |
 
 `send` 只认 `umo`；`conv` 是投影，可省略。通知不单独发 `notice` 帧，统一走 `msg` + `kind: "notice"`。
@@ -271,7 +274,7 @@ World 收到这些码会记一条「桥拒绝了这次连接」，并按退避�
 
 `send.at` 只对群生效：QQ 号数组，最多 10 个，`["all"]` 表示 @全体（World 侧要先打开 `worlds.astrbot.allowAtAll`，面板暂无开关）。私聊里 `at` 被忽略并在回执里说明；`voice` 和 `at` 不能同一条，回 `voice_at_conflict`；格式不对或超量回 `bad_at`。
 
-发送权限（1.3.6）：QQ 轮次可以隐式回触发会话；**非 QQ 轮次**（桌宠、Coo 对话等）只有在「连接」里填了主人 QQ、该号是 AstrBot 管理员，并且用 `conv_id` / `reply_to` 显式指定一个已知会话时才允许主动发送。缺任何一条都在 World 侧本地拒绝，不发帧。
+QQ 轮次可以隐式回触发会话。桌面主动发送需要完整模式、桥接令牌和单独授予的目标会话，由机器人发送。
 
 ---
 

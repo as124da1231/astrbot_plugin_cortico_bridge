@@ -476,7 +476,7 @@ class Delivery:
                             used_voice = True
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
-                        "Cortico Bridge: TTS 失败 —— %s", exc, exc_info=True
+                        "Cortico Bridge: TTS 失败（%s）", type(exc).__name__
                     )
                     notes.append("TTS 失败，已改发文字")
 
@@ -519,7 +519,7 @@ class Delivery:
             )
             return "timeout", "平台发送超时，可能已发出"
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Cortico Bridge: 纯文字发送失败 —— %s", exc, exc_info=True)
+            logger.warning("Cortico Bridge: 纯文字发送失败（%s）", type(exc).__name__)
             return "error", "发送异常，可能已发出"
         if ok is False:
             return "false", "AstrBot 没有找到该会话对应的平台"
@@ -537,6 +537,8 @@ class Delivery:
         umo: str = "",
         allow_text_fallback: bool = True,
         at: list[str] | None = None,
+        *,
+        may_dispatch: Callable[[], bool] | None = None,
     ) -> tuple[bool, str, bool, bool, str]:
         """发一条消息。返回 (成功, 备注, 是否真的用了语音, 结果是否未知, 错误码)。
 
@@ -573,8 +575,10 @@ class Delivery:
             )
         except Exception as exc:  # noqa: BLE001
             # 构造阶段抛错 = 还没交给平台，确定没发。
-            logger.debug("Cortico Bridge: 附件构造失败 —— %s", exc, exc_info=True)
-            if text.strip():
+            logger.debug("Cortico Bridge: 附件构造失败（%s）", type(exc).__name__)
+            if text.strip() and allow_text_fallback:
+                if may_dispatch is not None and not may_dispatch():
+                    return False, "该 QQ 会话未获授权", False, False, "scope_denied"
                 status, why = await self._send_plain(umo, text)
                 if status == "ok":
                     return True, "附件构造失败，已改发纯文字", False, False, ""
@@ -594,6 +598,8 @@ class Delivery:
         had_attachment = reply_added or image_added or used_voice
         note = _join_notes(notes)
 
+        if may_dispatch is not None and not may_dispatch():
+            return False, "该 QQ 会话未获授权", False, False, "scope_denied"
         try:
             ok = await self._send_once(umo, chain)
         except asyncio.TimeoutError:
@@ -603,12 +609,14 @@ class Delivery:
             )
             return False, "平台发送超时，可能已发出", used_voice, True, codes.SEND_TIMEOUT
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Cortico Bridge: 发送失败 —— %s", exc, exc_info=True)
+            logger.warning("Cortico Bridge: 发送失败（%s）", type(exc).__name__)
             return False, "发送异常，可能已发出", used_voice, True, codes.SEND_FAILED
 
         if ok is False:
             # 平台明确说没发：有附件且还有正文时，降级重试一次纯文字。
-            if had_attachment and text.strip():
+            if had_attachment and text.strip() and allow_text_fallback:
+                if may_dispatch is not None and not may_dispatch():
+                    return False, "该 QQ 会话未获授权", False, False, "scope_denied"
                 status, why = await self._send_plain(umo, text)
                 if status == "ok":
                     notes.append("附件未发出，已改发纯文字")

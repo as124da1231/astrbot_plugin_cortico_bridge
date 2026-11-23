@@ -9,6 +9,7 @@ import sys
 import types
 import unittest
 import typing
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -97,6 +98,25 @@ def _server(on_send=None, on_tool=None, token=""):
 
 
 class ScopedModeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_message_offer_distinguishes_ack_rejection_and_timeout(self):
+        class AcknowledgingWs(_Ws):
+            async def send(self, data):
+                await super().send(data)
+                message = json.loads(data)
+                if accepted is not None:
+                    await server._on_frame(self, {
+                        "t": "msg-ack", "deliveryId": message["deliveryId"], "accepted": accepted,
+                    })
+
+        server = _server()
+        server._client = AcknowledgingWs()
+        server.capabilities = {"message_delivery_ack": True}
+        message = {"t": "msg", "id": "incoming", "umo": "default:GroupMessage:123456"}
+        for accepted, status in ((True, "accepted"), (False, "declined"), (None, "unknown")):
+            with self.subTest(status=status), mock.patch.object(bridge, "MESSAGE_RECEIPT_TIMEOUT", 0.01):
+                self.assertEqual(await server.offer_message(message), status)
+                self.assertEqual(server._message_receipts, {})
+
     async def test_voice_receipt_negotiates_audio_and_does_not_cache_bytes(self):
         async def read(*_args, **_scope):
             return True, bridge.ComponentReceipt("voice", audio={"mime": "audio/silk", "base64": "AQID"})
@@ -120,7 +140,6 @@ class ScopedModeTests(unittest.IsolatedAsyncioTestCase):
         server = bridge.BridgeServer(host="127.0.0.1", port=0, token="", on_send=deliver, save_mode=applied.append)
         ws = _Ws()
         server._client = ws
-        server.capabilities = {"isolated_turns": True}
         old = (await server.ready_frame())["modeRevision"]
         group = "default:GroupMessage:123456"
         other = "default:GroupMessage:234567"
@@ -130,11 +149,11 @@ class ScopedModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(server.connected)
         self.assertTrue(await server.push(frame))
         self.assertEqual(ws.last()["modeRevision"], old)
-        await server._handle_send(ws, {**SEND_FRAME, "rid": "wrong", "conv": {}, "umo": other, "turn": "same-id"})
+        await server._handle_send(ws, {**SEND_FRAME, "rid": "wrong", "conv": {}, "umo": other, "turn": "same-id", "modeRevision": old})
         self.assertFalse(ws.last()["ok"])
-        await server._handle_send(ws, {**SEND_FRAME, "umo": group, "turn": "same-id"})
+        await server._handle_send(ws, {**SEND_FRAME, "umo": group, "turn": "same-id", "modeRevision": old})
         self.assertTrue(ws.last()["ok"])
-        await server._handle_send(ws, {**SEND_FRAME, "umo": group, "turn": "same-id"})
+        await server._handle_send(ws, {**SEND_FRAME, "umo": group, "turn": "same-id", "modeRevision": old})
         self.assertEqual(len(sent), 1)
 
         await server._on_frame(ws, {"t": "mode-change", "rid": "m", "mode": "safe", "modeRevision": old})
@@ -148,17 +167,34 @@ class ScopedModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ws.last()["ok"])
         self.assertEqual(len(sent), 1)
 
-    async def test_scope_required_and_host_without_isolation_cannot_select_safe(self):
+    async def test_stock_host_can_select_safe_and_only_admin_approval_enables_full(self):
         server = bridge.BridgeServer(host="127.0.0.1", port=0, token="", on_send=_ok_send, save_mode=lambda _: None)
         ws = _Ws()
         server._client = ws
         revision = (await server.ready_frame())["modeRevision"]
         await server._on_frame(ws, {"t": "mode-accept", "modeRevision": revision})
         await server._on_frame(ws, {"t": "mode-change", "rid": "m", "mode": "safe", "modeRevision": revision})
-        self.assertTrue(ws.last()["error"])
-        self.assertEqual(server.mode, "full")
-        await server._handle_send(ws, {**SEND_FRAME, "umo": "default:GroupMessage:123456"})
+        self.assertFalse(ws.last()["error"])
+        self.assertEqual(server.mode, "safe")
+        revision = ws.last()["modeRevision"]
+        await server._on_frame(ws, {"t": "mode-accept", "modeRevision": revision})
+        await server._handle_send(ws, {**SEND_FRAME, "umo": "default:GroupMessage:123456", "modeRevision": revision})
         self.assertEqual(ws.last()["error"], "scope_denied")
+        await server._on_frame(ws, {"t": "mode-change", "rid": "full", "mode": "full", "modeRevision": revision})
+        self.assertTrue(ws.last()["pending"])
+        self.assertEqual(server.mode, "safe")
+        stale_request = server.pending_mode_approval()
+        server.revise_permissions()
+        with self.assertRaises(ValueError):
+            await server.approve_mode(stale_request)
+        revision = (await server.ready_frame())["modeRevision"]
+        await server._on_frame(ws, {"t": "mode-accept", "modeRevision": revision})
+        await server._on_frame(ws, {"t": "mode-change", "rid": "full", "mode": "full", "modeRevision": revision})
+        with self.assertRaises(ValueError):
+            await server.approve_mode("")
+        await server.approve_mode(server.pending_mode_approval())
+        self.assertEqual(server.mode, "full")
+        self.assertFalse(server.connected)
 
 
 class EpochTests(unittest.IsolatedAsyncioTestCase):
@@ -230,7 +266,7 @@ class SendLockTests(unittest.IsolatedAsyncioTestCase):
             return None
 
         server._refresh_ready_later = no_refresh
-        ws = _FakeWs([json.dumps({"t": "hello", "v": 2})])
+        ws = _FakeWs([json.dumps({"t": "hello", "v": bridge.PROTOCOL_VERSION})])
         await server._handle_client(ws)
         return ws
 
@@ -285,7 +321,7 @@ class InflightTests(unittest.IsolatedAsyncioTestCase):
 
             server._refresh_ready_later = no_refresh
             frames = [
-                json.dumps({"t": "hello", "v": 2}),
+                json.dumps({"t": "hello", "v": bridge.PROTOCOL_VERSION}),
                 json.dumps(dict(SEND_FRAME, rid="s-1")),
                 json.dumps(dict(SEND_FRAME, rid="s-2")),
             ]
@@ -324,16 +360,16 @@ async def _ok_tool(*_args, **_kwargs):
 
 
 class HelloTests(unittest.IsolatedAsyncioTestCase):
-    """B-001：重复 hello 复用完整校验（header+帧 token+版本）。"""
+    """重复 hello 同样校验请求头和协议版本。"""
 
-    async def test_repeat_hello_accepts_non_ascii_token(self):
-        server = _server(token="口令")
+    async def test_repeat_hello_rejects_frame_credentials(self):
+        server = _server(token="s3cret")
         ws = _Ws()
         ok = await server._check_hello(
-            ws, None, {"t": "hello", "v": 2, "token": "口令"}, "addr"
+            ws, None, {"t": "hello", "v": bridge.PROTOCOL_VERSION, "token": "s3cret"}, "addr"
         )
-        self.assertTrue(ok)
-        self.assertEqual(ws.closed, [])
+        self.assertFalse(ok)
+        self.assertEqual(ws.closed, [(4003, "bad token")])
 
     async def test_repeat_hello_rejects_bad_version(self):
         server = _server(token="s3cret")
@@ -349,7 +385,7 @@ class HelloTests(unittest.IsolatedAsyncioTestCase):
         server = _server(token="s3cret")
         ws = _Ws()
         ok = await server._check_hello(
-            ws, {"authorization": "Bearer s3cret"}, {"t": "hello", "v": 2}, "addr"
+            ws, {"authorization": "Bearer s3cret"}, {"t": "hello", "v": bridge.PROTOCOL_VERSION}, "addr"
         )
         self.assertTrue(ok)
         self.assertEqual(ws.closed, [])
@@ -360,7 +396,7 @@ class HelloTests(unittest.IsolatedAsyncioTestCase):
         ok = await server._check_hello(
             ws,
             {"authorization": "Bearer s3cret"},
-            {"t": "hello", "v": 2, "token": "other"},
+            {"t": "hello", "v": bridge.PROTOCOL_VERSION, "token": "s3cret"},
             "addr",
         )
         self.assertFalse(ok)
@@ -374,7 +410,7 @@ class HelloTests(unittest.IsolatedAsyncioTestCase):
         server.connected_at = 123.0
         server.client_address = "old-addr"
 
-        await server._on_frame(ws, {"t": "hello", "v": 2, "capabilities": {"images": True}})
+        await server._on_frame(ws, {"t": "hello", "v": bridge.PROTOCOL_VERSION, "capabilities": {"images": True}})
 
         self.assertIs(server._client, ws)
         self.assertEqual(server._epoch, 3)
@@ -461,7 +497,7 @@ class ReadyFrameTests(unittest.IsolatedAsyncioTestCase):
 class ToolIdentityTests(unittest.IsolatedAsyncioTestCase):
     """E-008：缺身份/身份冲突/actor 非法由桥层拒绝。"""
 
-    async def _call(self, frame, owner_token="", bridge_token="bridge-fixture"):
+    async def _call(self, frame, presented="", bridge_token="bridge-fixture", owner="100000001"):
         calls = []
 
         async def on_tool(name, args, turn, actor):
@@ -475,9 +511,9 @@ class ToolIdentityTests(unittest.IsolatedAsyncioTestCase):
             on_send=_ok_send,
             on_tool=on_tool,
             admin_ids=lambda: ["100000001", "100000002"],
-            owner_credentials=lambda: ("100000001", "owner-fixture"),
+            desktop_owner=lambda: owner,
         )
-        ws = _FakeWs([], headers={"X-Cortico-Owner-Token": owner_token})
+        ws = _FakeWs([], headers={"Authorization": f"Bearer {presented}"} if presented else {})
         await server._handle_tool(ws, frame)
         return ws.last(), calls
 
@@ -519,13 +555,13 @@ class ToolIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"], codes.BAD_ACTOR)
         self.assertEqual(calls, [])
 
-    async def test_empty_actor_id_is_refused(self):
+    async def test_actor_cannot_provide_an_identity(self):
         payload, calls = await self._call(
             {
                 "t": "tool",
                 "rid": "t-5",
                 "name": "x",
-                "actor": {"kind": "owner", "id": "  "},
+                "actor": {"kind": "desktop", "id": "100000001"},
             }
         )
         self.assertEqual(payload["error"], codes.BAD_ACTOR)
@@ -546,26 +582,26 @@ class ToolIdentityTests(unittest.IsolatedAsyncioTestCase):
                 "t": "tool",
                 "rid": "t-7",
                 "name": "x",
-                "actor": {"kind": "owner", "id": "100000001"},
+                "actor": {"kind": "desktop"},
             },
-            owner_token="owner-fixture",
+            presented="bridge-fixture",
         )
         self.assertTrue(payload["ok"])
-        self.assertEqual(calls[0][3], {"kind": "owner", "id": "100000001"})
+        self.assertEqual(calls[0][3], {"kind": "desktop"})
 
-    async def test_owner_actor_requires_separate_token_and_configured_id(self):
-        for account, owner_token, bridge_token in (
+    async def test_desktop_actor_requires_bridge_token_and_server_owned_admin(self):
+        for account, presented, bridge_token in (
             ("100000001", "", "bridge-fixture"),
-            ("100000001", "bridge-fixture", "bridge-fixture"),
-            ("100000002", "owner-fixture", "bridge-fixture"),
-            ("100000001", "owner-fixture", ""),
-            ("100000001", "owner-fixture", "owner-fixture"),
+            ("100000001", "incorrect", "bridge-fixture"),
+            ("100000003", "bridge-fixture", "bridge-fixture"),
+            ("100000001", "bridge-fixture", ""),
         ):
-            with self.subTest(account=account, separate_token=bool(bridge_token)):
+            with self.subTest(account=account, has_token=bool(bridge_token)):
                 payload, calls = await self._call(
-                    {"t": "tool", "rid": "t-8", "name": "x", "actor": {"kind": "owner", "id": account}},
-                    owner_token,
+                    {"t": "tool", "rid": "t-8", "name": "x", "actor": {"kind": "desktop"}},
+                    presented,
                     bridge_token,
+                    account,
                 )
                 self.assertEqual(payload["error"], codes.OWNER_AUTH_REQUIRED)
                 self.assertEqual(calls, [])

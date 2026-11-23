@@ -192,11 +192,13 @@ class CorticoBridge(Star):
             on_event=self._on_server_event,
             admin_ids=self._admin_ids,
             on_tool=self._on_tool_call,
-            owner_credentials=self._owner_tool_credentials,
+            desktop_owner=self._desktop_owner,
+            desktop_targets=self._desktop_targets,
+            owner_umo=self._owner_umo,
             tools_frame=self.tools.frame,
             tts_available=self._tts_info,
             conversations=self.delivery.known_conversations,
-            mode=_s(self.config.get("bridge_mode", "full")),
+            mode=self._initial_bridge_mode(),
             save_mode=self._save_bridge_mode,
         )
         # 最近推送的消息，给面板看
@@ -238,6 +240,7 @@ class CorticoBridge(Star):
         if HAS_WEB_API:
             for route, handler, methods, desc in (
                 ("status", self.page_status, ["GET"], "桥的状态与配置"),
+                ("access", self.page_access, ["GET", "POST"], "模式审批与桌面授权"),
                 ("groups", self.page_groups, ["GET", "POST"], "群聊接管设置"),
                 ("private", self.page_private, ["GET", "POST"], "私聊接管设置"),
                 ("tools", self.page_tools, ["GET", "POST"], "给 Cortico 用的工具设置"),
@@ -303,11 +306,47 @@ class CorticoBridge(Star):
         logger.warning("Cortico Bridge: 监听端口无效，使用 17999")
         return 17999
 
-    def _owner_tool_credentials(self) -> tuple[str, str]:
-        return (
-            _s(self.config.get("owner_tool_qq")).strip(),
-            _s(self.config.get("owner_tool_token")).strip(),
+    def _initial_bridge_mode(self) -> str:
+        mode = self.config.get("bridge_mode")
+        if mode in ("safe", "full"):
+            return mode
+        # 已启用的旧版部署继续使用原权限；新安装从主人私聊开始。
+        return "full" if self.config.get("enabled") else "safe"
+
+    def _owner_umo(self) -> str:
+        owner = _s(self.config.get("owner_tool_qq")).strip()
+        platforms = self._bridge_platforms()
+        platform = _s(self.config.get("owner_platform")).strip()
+        if not platform and len(platforms) == 1:
+            platform = platforms[0]
+        if platform not in platforms or len(owner) > 20 or not owner.isascii() or not owner.isdigit():
+            return ""
+        return f"{platform}:FriendMessage:{owner}"
+
+    def _is_owner_private(self, event: AstrMessageEvent) -> bool:
+        owner_umo = self._owner_umo()
+        return bool(owner_umo and event.is_private_chat() and self._umo_of(event) == owner_umo
+                    and _s(event.get_sender_id()) == owner_umo.rsplit(":", 1)[1])
+
+    def _event_allowed(self, event: AstrMessageEvent) -> bool:
+        if self.server.mode == "safe":
+            return self._is_owner_private(event)
+        return self._platform_allowed(event) and (
+            self._private_allowed(event) if event.is_private_chat() else self._group_allowed(event)
         )
+
+    def _desktop_owner(self) -> str:
+        owner_umo = self._owner_umo()
+        return owner_umo.rsplit(":", 1)[1] if owner_umo and self.config.get("desktop_tools_enabled") is True else ""
+
+    def _desktop_targets(self) -> list[str]:
+        targets = self.config.get("desktop_send_targets", [])
+        return [target for target in targets if isinstance(target, str)] if isinstance(targets, list) else []
+
+    def _legacy_desktop_needs_review(self) -> bool:
+        # 旧的独立令牌只用于识别待迁移配置，不能授权新版连接。
+        return bool(self.config.get("owner_tool_token") and self.config.get("owner_tool_qq")
+                    and not self.config.get("desktop_auth_reviewed"))
 
     def _listen_host(self) -> str:
         """监听地址缺省/留空一律回环；跨机必须显式写 0.0.0.0 并配 token。"""
@@ -586,7 +625,8 @@ class CorticoBridge(Star):
         try:
             provider = await self._voice_provider(kind)
         except Exception as exc:  # noqa: BLE001
-            return {"id": "", "type": "", "model": "", "error": str(exc)}
+            logger.debug("Cortico Bridge: 读取语音服务失败（%s）", type(exc).__name__)
+            return {"id": "", "type": "", "model": "", "error": "无法读取语音服务"}
         if provider is None:
             return {"id": "", "type": "", "model": ""}
         return self._provider_summary(provider)
@@ -653,6 +693,8 @@ class CorticoBridge(Star):
     # ---------- 生命周期 ----------
 
     async def initialize(self):
+        if self.config.get("bridge_mode") not in ("safe", "full"):
+            self._commit_config({"bridge_mode": self.server.mode})
         token = self._token_value()
         logger.info(
             "Cortico Bridge: 启动 —— enabled=%s, 监听=%s:%s, token=%s, "
@@ -716,9 +758,11 @@ class CorticoBridge(Star):
 
     def _save_bridge_mode(self, mode: str) -> None:
         if not self._commit_config({"bridge_mode": mode}):
-            raise ValueError("Could not save bridge mode")
+            raise ValueError("保存桥接模式失败")
 
     def _target_allowed(self, umo: str) -> bool:
+        if self.server.mode == "safe":
+            return bool(umo and umo == self._owner_umo())
         target = parse_umo(umo)
         if not target or not self.delivery.has_umo(umo):
             return False
@@ -737,7 +781,7 @@ class CorticoBridge(Star):
     ) -> tuple[bool, str | ComponentReceipt]:
         """执行一个 AstrBot 工具。
 
-        QQ 轮次用触发消息的身份；Coo 对话轮次用连接页里指定的主人 QQ。
+        QQ 轮次用触发消息的身份；Coo 桌面轮次用 AstrBot 管理页授权的主人 QQ。
         """
         if not self.config.get("enabled", False):
             return False, "桥未启用，工具调用被拒绝"
@@ -753,24 +797,18 @@ class CorticoBridge(Star):
                 self._turns.pop(key, None)
                 self._message_segments.pop(key, None)
                 return False, "这一轮的消息已经过期，请重新说一次"
-            if not self._platform_allowed(event) or not (self._private_allowed(event) if event.is_private_chat() else self._group_allowed(event)):
+            if not self._event_allowed(event):
                 return False, "触发该轮的 QQ 会话已停用"
             if read_scope and read_scope != scope and name in (READ_COMPONENT_TOOL, "cortico_authorize_history"):
                 return False, "读取目标超出当前 QQ 会话"
             read_scope = scope
             # T-001：只按 AstrBot 管理员名单判断；不信任 World 帧里的 role/owner。
-            trusted = bool(self.server.tool_owner) and _s(event.get_sender_id()) in self._admin_ids()
+            trusted = _s(event.get_sender_id()) in self._admin_ids()
             who = f"消息 {turn}"
         else:
-            owner_id = ""
-            if isinstance(actor, dict) and _s(actor.get("kind")) == "owner":
-                owner_id = _s(actor.get("id")).strip()
+            owner_id = self.server.tool_owner if actor == {"kind": "desktop"} and self.server.mode == "full" else ""
             if not owner_id:
-                return False, "这一轮没有 QQ 消息身份；要在这里调工具，先在 Coo 的连接设置里填主人 QQ"
-            if owner_id not in self._admin_ids():
-                return False, f"{owner_id} 不在 AstrBot 的管理员名单里"
-            if owner_id != self.server.tool_owner:
-                return False, "未获该主人 QQ 的工具授权"
+                return False, "桌面对话未获得 AstrBot 的主人工具授权"
             if name == READ_COMPONENT_TOOL:
                 if not self._target_allowed(read_scope):
                     return False, "该 QQ 会话未获授权"
@@ -779,20 +817,15 @@ class CorticoBridge(Star):
                 allowed = self._target_allowed(read_scope)
                 return allowed, "" if allowed else "该 QQ 会话未获授权"
             trusted = True
-            platform = (self._bridge_platforms() or ["default"])[0]
+            platform = self._owner_umo().split(":", 1)[0]
             try:
                 from .owner_event import build_owner_event
 
                 event = build_owner_event(
                     self.context, platform, owner_id, self.server.self_id
                 )
-            except Exception:  # noqa: BLE001
-                # 异常原文可能带路径/URL，只进日志；回给模型的是固定短句。
-                logger.error(
-                    "Cortico Bridge: 主人工具身份构造失败 platform=%s owner=%s"
-                    % (platform, owner_id),
-                    exc_info=True,
-                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Cortico Bridge: 主人工具身份构造失败（%s）", type(exc).__name__)
                 return False, "主人事件构造失败，已跳过"
             who = f"主人 {owner_id}"
         if name == READ_COMPONENT_TOOL:
@@ -839,8 +872,7 @@ class CorticoBridge(Star):
         source = hit[1]
         if actor_event is not None and _s(actor_event.unified_msg_origin) != _s(source.unified_msg_origin):
             return False, "这条组件属于其他 QQ 会话"
-        allowed = self._private_allowed(source) if source.is_private_chat() else self._group_allowed(source)
-        if not allowed or not self._platform_allowed(source):
+        if not self._event_allowed(source):
             return False, "消息所在会话已停用"
         page = self._message_segments.get(message_key)
         if not page:
@@ -991,7 +1023,8 @@ class CorticoBridge(Star):
         if not self._target_allowed(umo):
             return False, "该 QQ 会话未获授权", False, False, "scope_denied"
         ok, note, used_voice, uncertain, error_code = await self.delivery.send(
-            platform, conv_kind, conv_id, text, reply_to, image, voice, umo, at=at or []
+            platform, conv_kind, conv_id, text, reply_to, image, voice, umo, at=at or [],
+            may_dispatch=lambda: bool(self.config.get("enabled") and self._target_allowed(umo)),
         )
         if ok:
             self.stats["sent"] += 1
@@ -1070,6 +1103,8 @@ class CorticoBridge(Star):
         """
         if not self.config.get("enabled", False):
             return
+        if self.server.mode == "safe" and not self._is_owner_private(event):
+            return
         if not self._platform_allowed(event):
             umo = self._umo_of(event)
             platform = umo.split(":", 1)[0] if ":" in umo else _s(event.get_platform_id())
@@ -1109,7 +1144,7 @@ class CorticoBridge(Star):
         # 私聊和 B 模式群消息只做标记；真正推送留到 LLM 层。
         # 这样指令和「自己轮询」的插件可以先执行并 stop，Coo 不会抢在它们前面。
         if event.is_private_chat():
-            if not self._private_allowed(event):
+            if not self._event_allowed(event):
                 if self._private_deny() == "ignore":
                     event.stop_event()
                 return
@@ -1167,7 +1202,7 @@ class CorticoBridge(Star):
         """统一推送入口：策略、去重、图片、统计和会话记录只在这里做一次。"""
         if not self.server.connected:
             return False
-        if not self._platform_allowed(event):
+        if not self._platform_allowed(event) or (self.server.mode == "safe" and not self._is_owner_private(event)):
             return False
 
         conv_kind = "private" if event.is_private_chat() else "group"
@@ -1185,7 +1220,7 @@ class CorticoBridge(Star):
             if not self._group_allowed(event):
                 logger.debug(f"Cortico Bridge: 群 {conv_id} 不在接管名单里，本轮交给 AstrBot")
                 return False
-        elif not self._private_allowed(event):
+        elif not self._event_allowed(event):
             logger.debug(f"Cortico Bridge: 私聊 {conv_id} 不在允许名单里")
             if self._private_deny() == "ignore":
                 event.stop_event()
@@ -1281,7 +1316,8 @@ class CorticoBridge(Star):
         message_key = (frame["umo"], msg_id)
         self._turns[message_key] = (time.time(), event)
         self._message_segments[message_key] = ComponentPage(segments, len(segments), deferred_media)
-        if not await self.server.push(frame):
+        delivery = await self.server.offer_message(frame) if self._event_allowed(event) else "declined"
+        if delivery == "declined":
             logger.warning("Cortico Bridge: 推送失败，本轮交给 AstrBot")
             self._turns.pop(message_key, None)
             self._message_segments.pop(message_key, None)
@@ -1295,6 +1331,9 @@ class CorticoBridge(Star):
         # on_llm_request 都不会再推一次；push=False 时没有置位，允许它重试。
         event.set_extra("_cortico_pushed", True)
         self.stats["pushed"] += 1
+        if delivery == "unknown":
+            self.stats["delivery_unknown"] = self.stats.get("delivery_unknown", 0) + 1
+            logger.warning("Cortico Bridge: Coo 接管回执超时，可能已接管，本轮不再由 AstrBot 回复")
         preview = frame["text"]
         entry = {
             "ts": frame["ts"],
@@ -1309,6 +1348,7 @@ class CorticoBridge(Star):
             "sender": frame["sender"]["name"] or frame["sender"]["id"],
             "text": preview[:200],
             "mentioned": frame["mentioned"],
+            "deliveryState": delivery,
         }
         self._remember_in(entry)
         logger.info(
@@ -1493,10 +1533,8 @@ class CorticoBridge(Star):
             )
             desc = _s(getattr(resp, "completion_text", "")).strip()
         except Exception as exc:  # noqa: BLE001
-            # 超时类的异常 str() 是空的；异常原文只进日志，不进正文。
-            reason = str(exc).strip() or type(exc).__name__
             logger.warning(
-                "Cortico Bridge: 识图失败 provider=%s —— %s" % (provider_id, reason)
+                "Cortico Bridge: 识图失败 provider=%s（%s）", provider_id, type(exc).__name__
             )
             return "", "视觉模型调用失败"
 
@@ -1603,10 +1641,10 @@ class CorticoBridge(Star):
                 return b64, is_montage, "" if b64 else reason
             except asyncio.TimeoutError:
                 reason = "下载超时"
-                logger.debug("Cortico Bridge: 取图超时（第 %d 次）" % (attempt + 1), exc_info=True)
+                logger.debug("Cortico Bridge: 取图超时（第 %d 次）", attempt + 1)
             except Exception:  # noqa: BLE001
                 reason = "下载失败"
-                logger.warning("Cortico Bridge: 取图失败（第 %d 次）" % (attempt + 1), exc_info=True)
+                logger.warning("Cortico Bridge: 取图失败（第 %d 次）", attempt + 1)
             if attempt + 1 < attempts:
                 await asyncio.sleep(0.4 * (attempt + 1))
         return "", is_montage, reason
@@ -1759,7 +1797,7 @@ class CorticoBridge(Star):
         返回是否真的推出去了；调用方只在 True 时 stop_event，免得
         接管名单外的通知也被我们吞掉。
         """
-        if not self.server.connected:
+        if not self.server.connected or (self.server.mode == "safe" and not self._is_owner_private(event)):
             return False
 
         conv_kind = "private" if event.is_private_chat() else "group"
@@ -1843,7 +1881,7 @@ class CorticoBridge(Star):
             logger.warning("Cortico Bridge: 语音转写超过 20 秒，本条按无转写处理")
             return ""
         except Exception as exc:  # noqa: BLE001
-            logger.debug(f"Cortico Bridge: 语音转写失败 —— {exc}")
+            logger.debug("Cortico Bridge: 语音转写失败（%s）", type(exc).__name__)
             return ""
 
     def _is_duplicate(self, msg_id: str | tuple[str, str]) -> bool:
@@ -2070,11 +2108,17 @@ class CorticoBridge(Star):
         connected_at = self.server.connected_at
         last_frame = self.server.last_frame_at
         last = self._recent[-1] if self._recent else None
+        approval = self.server.pending_mode_approval()
+        approval_scope = self._full_mode_scope() if approval else None
         return json_response(
             {
                 "version": PLUGIN_VERSION,
                 "connected": self.server.connected,
                 "mode": self.server.mode,
+                "modeApproval": approval,
+                "modeApprovalScope": approval_scope,
+                "modeApprovalScopeVersion": self._approval_scope_version(approval_scope) if approval_scope else "",
+                "ownerBound": bool(self._owner_umo()),
                 "listening": self.server.listening,
                 "listenError": self.server.listen_error,
                 "client": self.server.client_address,
@@ -2189,10 +2233,17 @@ class CorticoBridge(Star):
             return False
         missing = object()
         old = {key: self.config.get(key, missing) for key in changes}
+        permission_keys = {
+            "owner_tool_qq", "owner_platform", "desktop_tools_enabled", "desktop_send_targets",
+            "bridge_platforms", "group_scope", "group_allow", "group_mode", "observe_all", "observe_groups",
+            "private_mode", "private_allow", "private_admin_bypass", "private_deny", "tools_allow", "tools_risks",
+        }
+        permissions_changed = any(key in permission_keys and old[key] != value for key, value in changes.items())
+        if permissions_changed and self.server.operations_active:
+            return False
         self.config.update(changes)
         try:
             save()
-            return True
         except Exception as exc:  # noqa: BLE001
             for key, value in old.items():
                 if value is missing:
@@ -2201,6 +2252,103 @@ class CorticoBridge(Star):
                     self.config[key] = value
             logger.warning(f"Cortico Bridge: 保存配置失败，已回滚 —— {exc}")
             return False
+
+        if permissions_changed:
+            self.server.revise_permissions()
+            if self.server.has_client:
+                asyncio.create_task(self.server.push_ready())
+        return True
+
+    def _full_mode_scope(self) -> dict:
+        return {
+            "platforms": self._bridge_platforms(),
+            "groupScope": self._group_scope(),
+            "groupAllow": self._group_allow(),
+            "groupMode": self._group_mode(),
+            "privateMode": self._private_mode(),
+            "privateAllow": self._private_allow(),
+            "privateAdminBypass": self._admin_ids() if self._private_admin_bypass() and self._private_mode() == "allowlist" else [],
+            "tools": [{"name": tool["name"], "risk": tool.get("risk", "")}
+                      for tool in self.tools.enabled_catalog() if tool.get("name")],
+            "desktopOwner": self._desktop_owner() if self._desktop_owner() in self._admin_ids() else "",
+            "desktopTargets": self._desktop_targets(),
+        }
+
+    @staticmethod
+    def _approval_scope_version(scope: dict) -> str:
+        return hashlib.sha256(json.dumps(scope, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    async def page_access(self):
+        """AstrBot 管理后台是绑定主人、配置桌面权限和批准扩权的唯一入口。"""
+        if request is not None and _s(request.method).upper() == "POST":
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求格式不正确。", status_code=400)
+            action = payload.get("action")
+            try:
+                if action == "approve":
+                    if payload.get("confirmed") is not True:
+                        raise ValueError("请确认完整模式会让已放行的 QQ 会话使用 Coo 主会话")
+                    if payload.get("scopeVersion") != self._approval_scope_version(self._full_mode_scope()):
+                        raise ValueError("开放范围已变化，请刷新后重新确认")
+                    await self.server.approve_mode(_s(payload.get("approval")))
+                elif action == "reject":
+                    await self.server.reject_mode(_s(payload.get("approval")))
+                elif action == "narrow":
+                    await self.server.narrow_mode()
+                elif action == "save":
+                    if self.server.operations_active:
+                        return error_response("桥正处理上一轮，请稍后保存授权。", status_code=409)
+                    owner = _s(payload.get("ownerQQ")).strip()
+                    platform = _s(payload.get("ownerPlatform")).strip()
+                    if owner and (not owner.isascii() or not owner.isdigit() or len(owner) > 20):
+                        raise ValueError("主人 QQ 应为 20 位以内的数字")
+                    if owner and platform not in self._bridge_platforms():
+                        raise ValueError("请选择已接入的 QQ 平台实例")
+                    owner_changed = self._owner_umo() != (f"{platform}:FriendMessage:{owner}" if owner else "")
+                    changes = {"owner_tool_qq": owner, "owner_platform": platform if owner else ""}
+                    if self.server.mode == "full" and "desktopTools" in payload and "desktopTargets" in payload:
+                        changes.update(self._desktop_config_changes(payload, owner, owner_changed))
+                    elif owner_changed and self.config.get("desktop_tools_enabled") is True:
+                        # 新绑定的主人需要单独获批桌面权限。已保存的发送目标仍保留。
+                        changes["desktop_tools_enabled"] = False
+                    if not self._commit_config(changes):
+                        return error_response("保存授权失败。", status_code=500)
+                else:
+                    return error_response("未知授权操作。", status_code=400)
+            except ValueError as exc:
+                return error_response(str(exc), status_code=400)
+        return json_response({
+            "mode": self.server.mode,
+            "modeApproval": self.server.pending_mode_approval(),
+            "ownerQQ": _s(self.config.get("owner_tool_qq")).strip(),
+            "ownerPlatform": _s(self.config.get("owner_platform")).strip() or self._owner_umo().split(":", 1)[0],
+            "platforms": self._bridge_platforms(),
+            "desktopTools": self.config.get("desktop_tools_enabled") is True,
+            "desktopTargets": self._desktop_targets(),
+            "legacyDesktopNeedsReview": self._legacy_desktop_needs_review(),
+        })
+
+    def _desktop_config_changes(self, payload: dict, owner: str, owner_changed: bool) -> dict:
+        owner_tools = payload.get("desktopTools") is True
+        if owner_tools and owner not in self._admin_ids():
+            raise ValueError("桌面使用主人工具时，主人 QQ 须在 AstrBot 管理员名单里")
+        targets = payload.get("desktopTargets")
+        if not isinstance(targets, list) or len(targets) > 100:
+            raise ValueError("桌面发送目标最多 100 条")
+        allow = []
+        for item in targets:
+            parsed = parse_umo(item) if isinstance(item, str) else None
+            if not parsed or parsed[0] not in self._bridge_platforms():
+                raise ValueError("桌面发送目标必须是已接入平台的完整 QQ 会话 UMO")
+            if parsed[3] not in allow:
+                allow.append(parsed[3])
+        if payload.get("confirmed") is not True and (
+            (owner_tools and (self.config.get("desktop_tools_enabled") is not True or owner_changed))
+            or set(allow).difference(self._desktop_targets())
+        ):
+            raise ValueError("请确认当前桥接令牌将获得新增的桌面权限")
+        return {"desktop_tools_enabled": owner_tools, "desktop_send_targets": allow, "desktop_auth_reviewed": True}
 
     async def page_groups(self):
         """群聊设置：范围、名单和消息范围。"""
@@ -2449,14 +2597,16 @@ class CorticoBridge(Star):
             except asyncio.TimeoutError:
                 return error_response("TTS 超过 30 秒没有返回。", status_code=500)
             except Exception as exc:  # noqa: BLE001
-                return error_response(f"TTS 失败：{exc}", status_code=500)
+                logger.warning("Cortico Bridge: TTS 试听失败（%s）", type(exc).__name__)
+                return error_response("TTS 试听失败。", status_code=500)
             if not path:
                 return error_response("TTS 没有返回音频文件。", status_code=500)
             try:
                 with open(path, "rb") as f:
                     data = f.read()
             except Exception as exc:  # noqa: BLE001
-                return error_response(f"读不到 TTS 音频：{exc}", status_code=500)
+                logger.warning("Cortico Bridge: 读取 TTS 试听音频失败（%s）", type(exc).__name__)
+                return error_response("读不到 TTS 试听音频。", status_code=500)
             if len(data) > 3 * 1024 * 1024:
                 return error_response("TTS 音频超过 3MB。", status_code=500)
             mime = mimetypes.guess_type(path)[0] or "audio/mpeg"
@@ -2495,15 +2645,16 @@ class CorticoBridge(Star):
                 "TTS Provider 现在不可用（tts_unavailable），已取消试听。",
                 status_code=400,
             )
-        convs = self.delivery.known_conversations()
-        if not convs:
-            return error_response("还没有收到过 QQ 消息，先让群里说一句再试。", status_code=400)
-        umo = _s(convs[0].get("umo") or convs[0].get("key"))
-        if not umo:
-            return error_response("最近的会话标识不完整。", status_code=400)
+        conversation = next((conv for conv in self.delivery.known_conversations()
+                             if self._target_allowed(_s(conv.get("umo")))), None)
+        if conversation is None:
+            message = "请先由已绑定的主人 QQ 发一条私聊。" if self.server.mode == "safe" else "还没有允许发送的 QQ 会话。"
+            return error_response(message, status_code=400)
+        umo = _s(conversation["umo"])
         # 试听失败只报错：allow_text_fallback=False 保证不会把文字发到最近会话。
         ok, note, used_voice, _uncertain, _error_code = await self.delivery.send(
-            "", "", "", text, "", None, True, umo, allow_text_fallback=False
+            "", "", "", text, "", None, True, umo, allow_text_fallback=False,
+            may_dispatch=lambda: bool(self.config.get("enabled") and self._target_allowed(umo)),
         )
         if not ok:
             return error_response(note or "发送失败", status_code=500)
@@ -2512,7 +2663,7 @@ class CorticoBridge(Star):
                 "sent": True,
                 "voice": used_voice,
                 "note": note,
-                "conv": convs[0].get("key", ""),
+                "conv": conversation.get("key", ""),
             }
         )
 

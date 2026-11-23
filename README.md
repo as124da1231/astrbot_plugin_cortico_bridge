@@ -10,7 +10,7 @@
 **分工**：AstrBot 保留 QQ 连接、账号、白名单和所有已有插件；Cortico 只负责「说什么」。  
 ***Division of work***: *AstrBot maintains QQ connections, accounts, whitelists, and all existing plugins; Cortico is only responsible for what to say.*
 
-Cortico 侧的配套扩展是 [`cortico-world-astrbot`](https://github.com/as124da1231/cortico-world-astrbot)，两端使用协议 v2。模式从 Coo「连接」页确认切换，AstrBot 面板显示同步结果。
+Cortico 侧的配套扩展是 [`cortico-world-astrbot`](https://github.com/as124da1231/cortico-world-astrbot)，两端使用协议 v3。在 Coo「连接」页发起切换，开放完整模式需要 AstrBot 管理员查看范围并确认。
 
 项目地址：[as124da1231/astrbot_plugin_cortico_bridge](https://github.com/as124da1231/astrbot_plugin_cortico_bridge)。
 
@@ -18,11 +18,11 @@ QQ 消息组件按原始顺序交给配套 Coo 扩展。引用可带适配器取
 
 ### 从旧版升级
 
-备份插件配置及 `plugin_data/astrbot_plugin_cortico_bridge` 后，将两端一起更新到 1.3.9。它使用协议 v2，旧版对端会被拒绝，升级窗口内 QQ 由 AstrBot 原流程处理。旧群名单会继续生效。存在新旧群设置冲突时，在插件「群聊」页检查实际范围并保存。
+备份插件配置及 `plugin_data/astrbot_plugin_cortico_bridge` 后，将两端一起更新到 1.3.9。旧协议对端会被拒绝，升级窗口内 QQ 由 AstrBot 原流程处理。旧群名单和已保存的桥地址继续生效。完整模式下可在插件「群聊」页检查实际范围。
 
-已有工具名单可以沿用。若工具供普通 QQ 会话使用，请在插件配置中按实际行为补充 `tools_risks`。从 Coo 本地对话调用工具需要按下文配置独立授权。
+已有主人 QQ 和记下的会话可沿用。旧版若使用独立主人工具令牌，在「概览」核对现有绑定，再确认一枚桥接令牌是否可以使用桌面主人工具。桌面主动发送可添加要授权的具体会话。已有工具名单可以沿用。
 
-完整模式沿用 Coo 主对话，QQ 回复可能引用控制台里的内容。安全模式依赖 Coo 宿主的独立轮次接口，原版 Coopanion 0.2.23 使用完整模式。模式切换由 Coo「连接」页确认，两端同步后生效。
+两种模式均使用原版 Coo 的主会话。安全模式允许指定主人在私聊中继续桌面对话。完整模式开放已授权的群和私聊，QQ 回复可能提到 Coo 桌面对话内容。
 
 ## 群聊与私聊
 
@@ -90,7 +90,7 @@ WebSocket 单帧上限          16MB
 工具身份有两条路径，**都不信任 World 帧里传来的 `role` / `owner`**：
 
 - **QQ 发言者**：这一轮由 QQ 消息触发时，用触发消息的事件执行，身份就是发言者；管理员工具由 AstrBot 权限层拦。
-- **Coo 主人**：在 AstrBot 插件配置里指定 `owner_tool_qq` 和 `owner_tool_token`，在 Coo「连接」填写相同的 QQ 和独立工具令牌。该账号须在 AstrBot 的管理员名单里，工具令牌须与桥 token 不同。远程连接在 Coo 使用 `wss://`。
+- **Coo 桌面**：在 AstrBot 插件「概览」绑定管理员 QQ，单独开启桌面主人工具。桌面主动发 QQ 使用机器人身份，另设目标。两项都使用同一枚桥接令牌。
 
 权限拒绝、工具停用、不在白名单、这一轮已过期，都会**如实失败**并说明原因，不会回「成功」。工具异常原文只进日志，回给模型的是固定短句。
 
@@ -128,7 +128,7 @@ AstrBot 自己的模型不参与这些轮次；桥没连上时插件什么都不
 1. 在 AstrBot 插件市场搜索「Cortico 桥」，或把本仓库放进 `data/plugins/`。
 2. 重启 AstrBot，打开插件配置。
 3. 打开「接管对话」。同机 Coo 用默认的 `127.0.0.1`，不需要填 token。
-4. 跨机连接时设置桥接令牌并限制监听访问范围。使用支持 WebSocket 的 TLS 反向代理，在 Coo 填 `wss://` 地址和同一个令牌。桥和代理同机可保持回环监听。
+4. 跨机连接时设置一枚桥接令牌。直连在 Coo 填 `ws://服务器IP:17999` 和同一个令牌。使用 TLS 代理时填 `wss://` 地址，代理与桥之间可走回环或私网。WS 本身是明文，两种连接均校验令牌。
 
 依赖 `websockets >= 13`（AstrBot 官方镜像已自带）。
 
@@ -144,15 +144,16 @@ AstrBot 自己的模型不参与这些轮次；桥没连上时插件什么都不
 | `group_allow` | 空 | 指定群名单，一行一个 UMO 或旧群号；只在 `group_scope=allowlist` 时生效，空名单不能保存 |
 | `group_mode` | `mention` | 群消息范围：`mention` 只交 @ / 回复 / 命中称呼的；`all` 每条群消息都交 |
 | `name_aliases` | 空 | 除 @ 之外算「叫到我」的称呼，例如 `Coo`、`库`；`mention` 下命中会唤醒并交给 Coo |
-| `listen_port` | `17999` | 桥监听的端口，需要在防火墙/安全组放行 |
-| `listen_host` | `127.0.0.1` | 默认只允许本机连。Coo 在另一台机器上才填 `0.0.0.0`，并且必须同时设置 token |
+| `listen_port` | `17999` | 桥监听的端口。WSS 代理场景下，公网只需访问代理入口 |
+| `listen_host` | `127.0.0.1` | 默认只允许本机连。直连时填写 Coo 可访问的地址，使用代理时填写代理可访问的地址 |
 | `token` | 空 | 握手校验。监听 `127.0.0.1` 时可以留空；监听任何非回环地址时必填，否则桥拒绝启动 |
 | `max_sends_per_minute` | `30` | 防止失控刷屏，`0` 表示不限 |
 | `image_mode` | `auto` | 见上文「图片」 |
 | `image_vision_provider` | 空 | 「转述」这条路用哪个视觉模型；留空自动挑一个带 vision / VL 的 |
 | `tools_allow` | 空 | 一行一个工具名；通配授权只覆盖已审查的读写工具 |
 | `tools_risks` | 空 | 一行一项 `工具名:read` 或 `工具名:write`；仅配置已确认行为的工具 |
-| `owner_tool_qq` / `owner_tool_token` | 空 | 配对 Coo 主人工具授权，独立于桥 token |
+| `owner_tool_qq` / `owner_platform` | 空 | 绑定安全模式的主人 QQ 与平台实例 |
+| `desktop_tools_enabled` / `desktop_send_targets` | 关闭 / 空 | 分别授权完整模式的桌面主人工具及主动发送目标 |
 | 语音设置 | 见参考 | [语音配置键](docs/reference.md#1-插件配置) |
 | `private_mode` | `all` | `off` / `allowlist` / `all` |
 | `private_allow` | 空 | 私聊白名单 |
@@ -222,7 +223,7 @@ token 的复制 / 生成 / 清除都走 `POST /token`：
 
 ## 协议帧
 
-协议 v2，`hello.v` 必须是 2。模式同步后，读写请求还需匹配连接的模式代次和 QQ 会话授权。完整字段和错误码见 [参考](docs/reference.md)。
+协议 v3，`hello.v` 必须是 3。令牌只放在 Upgrade 的 `Authorization: Bearer` 请求头。模式同步后，读写请求还需匹配连接的模式代次和 QQ 会话授权。完整字段和错误码见 [参考](docs/reference.md)。
 
 | 帧 | 方向 | 关键字段 |
 |---|---|---|
@@ -233,7 +234,7 @@ token 的复制 / 生成 / 清除都走 `POST /token`：
 | `send` | World → 插件 | `rid`、`umo`（必填）、`conv`（UMO 的投影，可省略）、`text`、`replyTo`、`image`、`voice`、`at`（群 @，最多 10 个，支持 `all`） |
 | `ack` | 插件 → World | `rid`、`ok`、`voice`、失败时 `error`（英文 code）+ `note`（中文）、结果未知时 `uncertain` |
 | `tools` | 插件 → World | `items[]`：`name`、`risk`、`desc`、`sig` |
-| `tool` | World → 插件 | `rid`、`name`、`args`、`turn` 或 `actor: {kind:"owner", id}`（二选一） |
+| `tool` | World → 插件 | `rid`、`name`、`args`、`modeRevision`、`umo`、`turn` 或 `actor: {kind:"desktop"}` |
 | `tool-ack` | 插件 → World | `rid`、`ok`、成功 `result`、失败 `error` + `note` |
 
 发送只认 `umo`：没有 `umo` 回 `missing_umo`，格式不对回 `invalid_umo`，桥没见过回 `unknown_umo`，与 `conv` 冲突回 `umo_conv_mismatch`。`ack` 的 `error` 只放 `errors.py` 里的英文 code，人看的中文放 `note`。`at` 只对群生效，最多 10 个，支持 `["all"]`（@全体，World 侧需先打开 `worlds.astrbot.allowAtAll`）；语音不能和 `at` 同条（`voice_at_conflict`），格式不对或超量回 `bad_at`。

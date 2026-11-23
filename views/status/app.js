@@ -254,7 +254,10 @@ function marked(text, needle) {
 
 /* ---------------- 分页 ---------------- */
 
+const fullModePanels = ['groups', 'private', 'tools'];
+
 function setPanel(name) {
+  if (fullModePanels.includes(name) && state.status?.mode !== 'full') return;
   state.panel = name;
   if (state.armClear && name !== 'tools') disarmClear();
   const meta = PANELS[name];
@@ -511,13 +514,42 @@ function initToken() {
 }
 
 function applyStatus(s) {
+  const previousApproval = state.status?.modeApproval;
+  const previousScope = state.status?.modeApprovalScopeVersion;
   s = { ...(state.status || {}), ...s };
   state.status = s;
   const mode = s.mode === 'safe' ? '安全模式' : '完整模式';
   $('bridgeMode').textContent = s.connected ? `${mode} · 已与 Coo 同步` : `${mode} · 等待双端同步`;
-  const toolsNav = document.querySelector('[data-panel="tools"]');
-  if (toolsNav) toolsNav.hidden = s.mode === 'safe';
-  if (s.mode === 'safe' && state.panel === 'tools') toolsNav?.parentElement?.querySelector('[data-panel="status"]')?.click();
+  if (previousApproval !== s.modeApproval || previousScope !== s.modeApprovalScopeVersion) $('modeRisk').checked = false;
+  $('modeApproval').hidden = !s.modeApproval;
+  if (s.modeApprovalScope && (previousApproval !== s.modeApproval || previousScope !== s.modeApprovalScopeVersion)) {
+    const scope = s.modeApprovalScope;
+    const list = values => values?.length ? values.join('、') : '无';
+    const sessions = [
+      `QQ 平台：${list(scope.platforms)}`,
+      `群聊：${scope.groupScope === 'all' ? '全部群' : list(scope.groupAllow)}（${scope.groupMode === 'all' ? '全部消息' : '仅被叫到'}）`,
+      `私聊：${{ all: '全部私聊', off: '关闭', allowlist: list(scope.privateAllow) }[scope.privateMode]}`,
+      ...(scope.privateAdminBypass?.length ? [`允许的管理员私聊：${list(scope.privateAdminBypass)}`] : []),
+      `可调用的工具：${list(scope.tools?.map(tool => tool.risk ? `${tool.name}（${tool.risk}）` : tool.name))}`,
+      `桌面主人工具：${scope.desktopOwner || '关闭'}`,
+      `桌面主动发送目标：${list(scope.desktopTargets)}`,
+    ];
+    $('modeApprovalScope').replaceChildren(...sessions.map(text => {
+      const item = document.createElement('li');
+      item.textContent = text;
+      return item;
+    }));
+  }
+  $('modeApprove').disabled = !$('modeRisk').checked;
+  $('modeNarrow').hidden = s.mode !== 'full';
+  $('accessDesktop').hidden = s.mode !== 'full';
+  for (const panel of fullModePanels) {
+    const button = document.querySelector(`[data-panel="${panel}"]`);
+    if (button) button.hidden = s.mode !== 'full';
+  }
+  $('metricTools').hidden = s.mode !== 'full';
+  if (s.mode !== 'full' && fullModePanels.includes(state.panel)) setPanel('status');
+  $('btnVoiceSend').textContent = s.mode === 'safe' ? '发到主人私聊' : '发到最近的允许会话';
 
   const cls = lampClass(s);
   $('railLamp').className = 'lamp ' + cls;
@@ -2106,13 +2138,100 @@ async function sendVoiceTest() {
   voiceMsg('发送中…');
   try {
     const data = unwrap(await bridge.apiPost('voice/test', { text }));
-    if (data.voice) voiceMsg('已用语音发到最近的 QQ 会话。');
-    else voiceMsg(`已发出，但退回了文字${data.note ? '：' + data.note : ''}`, true);
+    if (data.voice) voiceMsg('已发出试听语音。');
+    else voiceMsg(data.note || '没有发出语音。', true);
   } catch (e) {
     voiceMsg(e.message || String(e), true);
   } finally {
     btn.disabled = false;
   }
+}
+
+async function initAccess() {
+  const save = $('accessSave');
+  const risk = $('modeRisk');
+  const approve = $('modeApprove');
+  const accessRisk = $('accessRisk');
+  const ownerInput = $('accessOwner');
+  const platformInput = $('accessPlatform');
+  const toolsInput = $('accessTools');
+  const targetsInput = $('accessTargets');
+  let savedAccess = {};
+  let saving = false;
+  const currentTargets = () => targetsInput.value.split('\n').map(v => v.trim()).filter(Boolean);
+  const expandsDesktop = () => state.status?.mode === 'full' && (
+    (toolsInput.checked && (!savedAccess.desktopTools || ownerInput.value.trim() !== savedAccess.ownerQQ
+      || platformInput.value !== savedAccess.ownerPlatform))
+    || currentTargets().some(target => !savedAccess.desktopTargets?.includes(target))
+  );
+  const refreshAccessForm = () => {
+    const expands = expandsDesktop();
+    $('accessRiskRow').hidden = !expands;
+    save.disabled = saving || (expands && !accessRisk.checked);
+  };
+  const post = async (button, payload, label) => {
+    button.disabled = true;
+    try {
+      const data = unwrap(await bridge.apiPost('access', payload));
+      await refresh();
+      toast(label);
+      return data;
+    } catch (e) {
+      toast(e.message || String(e), true);
+      await refresh().catch(() => {});
+    } finally {
+      button.disabled = button === approve && !risk.checked;
+    }
+  };
+  risk.addEventListener('change', () => { approve.disabled = !risk.checked; });
+  approve.addEventListener('click', () => {
+    void post(approve, { action: 'approve', approval: state.status?.modeApproval,
+      scopeVersion: state.status?.modeApprovalScopeVersion, confirmed: risk.checked }, '完整模式已批准，等待 Coo 同步');
+  });
+  $('modeReject').addEventListener('click', e => {
+    void post(e.currentTarget, { action: 'reject', approval: state.status?.modeApproval }, '已驳回完整模式请求');
+  });
+  $('modeNarrow').addEventListener('click', e => {
+    void post(e.currentTarget, { action: 'narrow' }, '已收窄为主人私聊，等待 Coo 同步');
+  });
+  const data = unwrap(await bridge.apiGet('access')) || {};
+  savedAccess = data;
+  ownerInput.value = data.ownerQQ || '';
+  platformInput.replaceChildren(new Option('请选择平台实例', ''), ...(data.platforms || []).map(platform => {
+    const option = document.createElement('option');
+    option.value = platform;
+    option.textContent = platform;
+    return option;
+  }));
+  if (data.ownerPlatform) platformInput.value = data.ownerPlatform;
+  toolsInput.checked = data.desktopTools === true;
+  targetsInput.value = (data.desktopTargets || []).join('\n');
+  $('legacyDesktopReview').hidden = !data.legacyDesktopNeedsReview;
+  for (const field of [ownerInput, platformInput, toolsInput, targetsInput]) {
+    field.addEventListener('input', () => { accessRisk.checked = false; refreshAccessForm(); });
+  }
+  accessRisk.addEventListener('change', refreshAccessForm);
+  refreshAccessForm();
+  save.addEventListener('click', async () => {
+    const payload = { action: 'save', ownerQQ: ownerInput.value, ownerPlatform: platformInput.value };
+    if (state.status?.mode === 'full') {
+      Object.assign(payload, { desktopTools: toolsInput.checked, desktopTargets: currentTargets(), confirmed: accessRisk.checked });
+    }
+    saving = true;
+    try {
+      const updated = await post(save, payload, '授权设置已保存');
+      if (updated) {
+        savedAccess = updated;
+        toolsInput.checked = updated.desktopTools === true;
+        targetsInput.value = (updated.desktopTargets || []).join('\n');
+        $('legacyDesktopReview').hidden = !updated.legacyDesktopNeedsReview;
+      }
+    } finally {
+      saving = false;
+      accessRisk.checked = false;
+      refreshAccessForm();
+    }
+  });
 }
 
 function initVoice() {
@@ -2168,6 +2287,7 @@ async function main() {
   initTools();
   initToken();
   initVoice();
+  void initAccess().catch(e => toast('读取桥接授权失败：' + (e.message || e), true));
 
   // 状态读取失败只影响状态卡，不该让整场没有实时流（UI-007）。
   try {

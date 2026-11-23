@@ -20,33 +20,28 @@
 | 非回环 + 有 token | 校验 token |
 | 带 `Origin` 的连接 | 一律拒绝，close 4403 |
 | URL 携带 `token` / `access_token` | 一律拒绝，close 4401 |
-| `hello` 的 `v` 不是 2 | 拒绝，close 4004 |
-| `Authorization` 与帧内 token 不一致 | 拒绝，close 4003 |
+| `hello` 的 `v` 不是 3 | 拒绝，close 4004 |
+| `Authorization` 令牌不匹配或 `hello` 带令牌 | 拒绝，close 4003 |
 | `enabled=false` | 不开放监听；发送与工具调用返回 `door_closed` |
 
 ## 凭据通道
 
 ```text
-Authorization: Bearer <token>     首选，凭据不进帧
-hello.token                       兼容保留，升级期继续接受
+Authorization: Bearer <token>
 ```
 
-两者同时出现时必须一致；只给帧内 token 会记一条提示日志。  
-等 World 都升级完，可以把帧内 token 去掉。
-
-token 建议用 ASCII（控制台生成的 `token_urlsafe` 就是）。HTTP 头放不了非 ASCII，
-自定义的中文 token 会自动退回帧内路径；比较按 UTF-8 字节，不会抛 `TypeError`。
+两种跨机连接均使用同一枚桥接令牌。WS 本身是明文，WSS 由代理提供 TLS，Coo 按填写的地址验证证书。旧的非 ASCII 令牌使用 AstrBot 管理页生成的新令牌替换。
 
 ## 协议版本
 
 ```text
-World 在 hello 里发 v: 2
-插件只接受 2
+World 在 hello 里发 v: 3
+插件只接受 3
 缺省或其他值 close 4004
 同一连接重复 hello 也会重新校验 token 和版本
 ```
 
-1.3.9 两端都使用 v2，混装 1.3.8 或更早版本会收到 4004。模式协商完成前，消息继续走 AstrBot 的常规处理。
+1.3.9 两端都使用 v3。模式协商完成前，消息继续走 AstrBot 的常规处理。
 
 ## 关闭码
 
@@ -87,7 +82,8 @@ World 在 hello 里发 v: 2
 ## 工具与主人
 
 - QQ 轮次使用 AstrBot 保存的真实发言者记录。Coo 对话使用桥端指定的主人 QQ，该号须在 `admins_id` 里。
-- 主人身份须通过独立工具令牌授权。Coo 只在回环 WebSocket 或 WSS 上提交令牌，桥以收到的连接凭据和本地配置判定权限。工具令牌须与桥 token 不同。
+- 桌面主人工具与主动发送分别由 AstrBot 管理员授权，两项均要求连接通过桥接令牌鉴权。旧的独立凭据保留用于识别待迁移配置和回退。
+- 安全模式只接入绑定主人私聊。转为完整模式时，AstrBot 后台列出群、私聊、工具和桌面目标，管理员确认后才启用。
 - `tools_allow=["*"]` 只含在 `tools_risks` 中明确标为 read / write 的工具。未审查的工具按 exec 处理。exec 需要显式点名、管理员身份和已获工具授权的连接。
 - 权限拒绝会如实失败，不会包装成成功。
 
@@ -106,6 +102,6 @@ World 在 hello 里发 v: 2
 非回环 + 空 token    → 拒绝绑定
 非回环 + token       → 允许
 ?token=              → close 4401
-Header + 帧内 token 不一致 → close 4003
+令牌放进 hello        → close 4003
 hello.v=2            → close 4004
 ```
