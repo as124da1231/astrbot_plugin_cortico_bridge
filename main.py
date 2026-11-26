@@ -24,9 +24,11 @@ import base64
 import builtins
 import contextlib
 import hashlib
+import ipaddress
 import json
 import mimetypes
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -195,6 +197,9 @@ class CorticoBridge(Star):
             desktop_owner=self._desktop_owner,
             desktop_targets=self._desktop_targets,
             owner_umo=self._owner_umo,
+            owner_dms=self._owner_dms,
+            platform_routes=self._platform_routes,
+            discord_target_allowed=self._target_allowed,
             tools_frame=self.tools.frame,
             tts_available=self._tts_info,
             conversations=self.delivery.known_conversations,
@@ -235,15 +240,20 @@ class CorticoBridge(Star):
         self._cmd_names_at = 0.0
         # SSE 订阅者（每个打开面板的浏览器一个队列）
         self._subscribers: set[asyncio.Queue] = set()
+        self._listener_lock = asyncio.Lock()
         self.started_at = time.time()
 
         if HAS_WEB_API:
             for route, handler, methods, desc in (
                 ("status", self.page_status, ["GET"], "桥的状态与配置"),
+                ("settings/connection", self.page_connection_settings, ["GET", "POST"], "监听与发送设置"),
+                ("settings/qq", self.page_qq_settings, ["GET", "POST"], "QQ 实例与唤醒称呼"),
+                ("settings/images", self.page_image_settings, ["GET", "POST"], "图片处理设置"),
                 ("access", self.page_access, ["GET", "POST"], "模式审批与桌面授权"),
                 ("groups", self.page_groups, ["GET", "POST"], "群聊接管设置"),
                 ("private", self.page_private, ["GET", "POST"], "私聊接管设置"),
                 ("tools", self.page_tools, ["GET", "POST"], "给 Cortico 用的工具设置"),
+                ("tools/risks", self.page_tool_risks, ["GET", "POST"], "工具风险分类"),
                 ("voice", self.page_voice, ["GET", "POST"], "语音输入/输出设置"),
                 ("voice/preview", self.page_voice_preview, ["POST"], "合成一段试听语音"),
                 ("voice/test", self.page_voice_test, ["POST"], "把试听语音发到最近的会话"),
@@ -319,18 +329,24 @@ class CorticoBridge(Star):
         platform = _s(self.config.get("owner_platform")).strip()
         if not platform and len(platforms) == 1:
             platform = platforms[0]
-        if platform not in platforms or len(owner) > 20 or not owner.isascii() or not owner.isdigit():
+        if (platform not in platforms or platform in self._discord_routes() or platform in self._discord_instances()
+                or len(owner) > 20 or not owner.isascii() or not owner.isdigit()):
             return ""
         return f"{platform}:FriendMessage:{owner}"
 
     def _is_owner_private(self, event: AstrMessageEvent) -> bool:
+        if self._is_discord(event):
+            route = self._discord_routes().get(_s(event.get_platform_id()), {})
+            umo = _s(route.get("owner_umo"))
+            return bool(umo and event.is_private_chat() and self._umo_of(event) == umo
+                        and _s(event.get_sender_id()) == route.get("owner_id"))
         owner_umo = self._owner_umo()
         return bool(owner_umo and event.is_private_chat() and self._umo_of(event) == owner_umo
                     and _s(event.get_sender_id()) == owner_umo.rsplit(":", 1)[1])
 
     def _event_allowed(self, event: AstrMessageEvent) -> bool:
         if self.server.mode == "safe":
-            return self._is_owner_private(event)
+            return self._is_owner_private(event) and (not self._is_discord(event) or self._platform_allowed(event))
         return self._platform_allowed(event) and (
             self._private_allowed(event) if event.is_private_chat() else self._group_allowed(event)
         )
@@ -401,9 +417,78 @@ class CorticoBridge(Star):
             items = []
         return items or ["default"]
 
+    def _configured_platforms(self) -> dict[str, dict]:
+        try:
+            platforms = (self.context.get_config() or {}).get("platform", [])
+        except Exception:
+            return {}
+        if not isinstance(platforms, list):
+            return {}
+        return {
+            str(item["id"]): item for item in platforms
+            if isinstance(item, dict) and item.get("id")
+        }
+
+    def _discord_instances(self) -> dict[str, dict]:
+        return {key: item for key, item in self._configured_platforms().items() if item.get("type") == "discord"}
+
+    def _discord_routes(self) -> dict[str, dict]:
+        raw = self.config.get("discord_routes")
+        return {key: value for key, value in raw.items() if isinstance(value, dict)} if isinstance(raw, dict) else {}
+
+    def _platform_routes(self) -> list[dict]:
+        configured = self._configured_platforms()
+        routes = self._discord_routes()
+        discord = {key: item for key, item in configured.items() if item.get("type") == "discord"}
+        instances = {**dict.fromkeys(routes, {"enable": False}), **discord}
+        owner = self._owner_umo()
+        return [
+            {"id": platform, "channel": "qq", "enabled": configured[platform].get("enable") is not False,
+             "ownerBound": owner.startswith(f"{platform}:")}
+            for platform in self._bridge_platforms()
+            if configured.get(platform, {}).get("type") == "aiocqhttp" and platform not in instances
+        ] + [
+            {"id": platform, "channel": "discord", "enabled": routes.get(platform, {}).get("enabled") is True and item.get("enable") is not False,
+             "ownerBound": bool(routes.get(platform, {}).get("owner_umo"))}
+            for platform, item in instances.items()
+        ]
+
+    @staticmethod
+    def _is_discord(event: AstrMessageEvent) -> bool:
+        platform_name = getattr(event, "get_platform_name", None)
+        return callable(platform_name) and platform_name() == "discord"
+
+    def _owner_dms(self) -> list[str]:
+        return [self._owner_umo()] + [
+            _s(route.get("owner_umo")) for platform, route in self._discord_routes().items()
+            if self._discord_instance_enabled(platform)
+        ]
+
+    def _discord_instance_enabled(self, platform: str) -> bool:
+        adapter = self._discord_instances().get(platform)
+        return bool(adapter and adapter.get("enable") is not False
+                    and self._discord_routes().get(platform, {}).get("enabled") is True)
+
+    def _bind_discord_owner(self, event: AstrMessageEvent) -> bool:
+        platform = _s(event.get_platform_id())
+        routes = self._discord_routes()
+        route = routes.get(platform, {})
+        parsed = parse_umo(self._umo_of(event))
+        if (not parsed or parsed[:2] != (platform, "private") or not event.is_private_chat()
+                or not route.get("owner_id") or route.get("owner_umo")
+                or _s(event.get_sender_id()) != route["owner_id"]):
+            return False
+        return self._commit_config({"discord_routes": {**routes, platform: {**route, "owner_umo": parsed[3]}}})
+
     def _platform_allowed(self, event: AstrMessageEvent) -> bool:
         umo = self._umo_of(event)
         platform = umo.split(":", 1)[0] if ":" in umo else _s(event.get_platform_id())
+        if self._is_discord(event):
+            return bool(getattr(self.server, "supports_multiple_platforms", False)
+                        and platform == _s(event.get_platform_id())
+                        and parse_umo(umo) and self._discord_instance_enabled(platform))
+        if platform in self._discord_instances() or platform in self._discord_routes():
+            return False
         return platform in self._bridge_platforms()
 
     def _private_mode(self) -> str:
@@ -535,6 +620,9 @@ class CorticoBridge(Star):
     def _group_allowed(self, event: AstrMessageEvent) -> bool:
         if event.is_private_chat():
             return True
+        if self._is_discord(event):
+            route = self._discord_routes().get(_s(event.get_platform_id()), {})
+            return self._umo_of(event) in route.get("channels", [])
         if self._group_scope() == "all":
             return True
         return self._matches_scope(event, self._group_allow())
@@ -542,6 +630,8 @@ class CorticoBridge(Star):
     def _private_allowed(self, event: AstrMessageEvent) -> bool:
         if not event.is_private_chat():
             return True
+        if self._is_discord(event):
+            return self._is_owner_private(event)
         mode = self._private_mode()
         if mode == "off":
             return False
@@ -761,9 +851,17 @@ class CorticoBridge(Star):
             raise ValueError("保存桥接模式失败")
 
     def _target_allowed(self, umo: str) -> bool:
+        target = parse_umo(umo)
+        if target and (target[0] in self._discord_instances() or target[0] in self._discord_routes()):
+            platform, kind, _, _ = target
+            if not self._discord_instance_enabled(platform) or not getattr(self.server, "supports_multiple_platforms", False):
+                return False
+            route = self._discord_routes()[platform]
+            if kind == "private":
+                return umo == route.get("owner_umo") and self.delivery.has_umo(umo)
+            return self.server.mode == "full" and umo in route.get("channels", []) and self.delivery.has_umo(umo)
         if self.server.mode == "safe":
             return bool(umo and umo == self._owner_umo())
-        target = parse_umo(umo)
         if not target or not self.delivery.has_umo(umo):
             return False
         platform, kind, target_id, _ = target
@@ -803,7 +901,7 @@ class CorticoBridge(Star):
                 return False, "读取目标超出当前 QQ 会话"
             read_scope = scope
             # T-001：只按 AstrBot 管理员名单判断；不信任 World 帧里的 role/owner。
-            trusted = _s(event.get_sender_id()) in self._admin_ids()
+            trusted = not self._is_discord(event) and _s(event.get_sender_id()) in self._admin_ids()
             who = f"消息 {turn}"
         else:
             owner_id = self.server.tool_owner if actor == {"kind": "desktop"} and self.server.mode == "full" else ""
@@ -1073,14 +1171,14 @@ class CorticoBridge(Star):
             (
                 e.get("convName")
                 for e in reversed(self._recent)
-                if e.get("conv") == conv_key and e.get("convName")
+                if (e.get("umo") == umo if umo else e.get("conv") == conv_key) and e.get("convName")
             ),
             "",
         )
         entry = {
             "ts": _now_iso(),
             "dir": "out",
-            "channel": "qq",
+            "channel": "discord" if umo.split(":", 1)[0] in self._discord_instances() else "qq",
             "conv": conv_key,
             "convName": conv_name,
             "umo": umo,
@@ -1103,7 +1201,14 @@ class CorticoBridge(Star):
         """
         if not self.config.get("enabled", False):
             return
-        if self.server.mode == "safe" and not self._is_owner_private(event):
+        discord = self._is_discord(event)
+        if event.is_stopped():
+            return
+        if discord:
+            slash_command = getattr(event, "is_slash_command", None)
+            if callable(slash_command) and slash_command():
+                return
+        if discord and self._discord_instance_enabled(_s(event.get_platform_id())) and self._bind_discord_owner(event):
             return
         if not self._platform_allowed(event):
             umo = self._umo_of(event)
@@ -1113,8 +1218,11 @@ class CorticoBridge(Star):
                 % (platform, ",".join(self._bridge_platforms()))
             )
             return
+        if self.server.mode == "safe" and not self._is_owner_private(event):
+            return
 
-        self._remember_self(event)
+        if not discord:
+            self._remember_self(event)
         if self._looks_like_command(event):
             logger.info(
                 "Cortico Bridge: 指令交给 AstrBot —— %r", event.get_message_str()[:40]
@@ -1127,7 +1235,7 @@ class CorticoBridge(Star):
             )
 
         # 通知类事件先处理：撤回、入群、退群、戳一戳、上传文件。
-        notice, ref = self._notice_text(event)
+        notice, ref = self._notice_text(event) if not discord else ("", "")
         if notice:
             # A-9/P-003：只有真的推给 Cortico 才拦下来；桥断开时放它继续走，
             # 其他插件仍能看到撤回/入群。范围过滤保留在 _push_notice 内部。
@@ -1145,7 +1253,7 @@ class CorticoBridge(Star):
         # 这样指令和「自己轮询」的插件可以先执行并 stop，Coo 不会抢在它们前面。
         if event.is_private_chat():
             if not self._event_allowed(event):
-                if self._private_deny() == "ignore":
+                if not discord and self._private_deny() == "ignore":
                     event.stop_event()
                 return
             event.set_extra("_cortico_llm_owned", "private")
@@ -1157,10 +1265,15 @@ class CorticoBridge(Star):
         # 所以这里晚设置有效。真正起作用的是 is_at_or_wake_command，不是 is_wake。
         if not self._group_allowed(event):
             return
-        if self._group_mode() == "mention":
+        if discord or self._group_mode() == "mention":
             text = self._raw_message_text(event) or event.get_message_str()
             if not self._is_called_for_wake(event, text):
                 return
+            if not discord:
+                # /llm 修改该 UMO 使用的配置；事件层直推会跳过 AstrBot 的 LLM 检查。
+                config = self.context.get_config(umo=event.unified_msg_origin)
+                if not config.get("provider_settings", {}).get("enable", True):
+                    return
             event.is_at_or_wake_command = True
             event.set_extra("_cortico_llm_owned", "group")
             # 事件层直接推送是主路径，不依赖管线顺序；成功的 _push_event 会
@@ -1211,10 +1324,17 @@ class CorticoBridge(Star):
             if conv_kind == "group"
             else _s(event.get_sender_id() or event.get_session_id())
         )
+        discord = self._is_discord(event)
+        if discord:
+            target = parse_umo(self._umo_of(event))
+            if not target or target[1] != conv_kind:
+                return False
+            conv_id = target[2]
         if not conv_id:
             return False
 
-        self._remember_name(_s(event.get_sender_id()), _s(event.get_sender_name()))
+        if not discord:
+            self._remember_name(_s(event.get_sender_id()), _s(event.get_sender_name()))
 
         if conv_kind == "group":
             if not self._group_allowed(event):
@@ -1222,7 +1342,7 @@ class CorticoBridge(Star):
                 return False
         elif not self._event_allowed(event):
             logger.debug(f"Cortico Bridge: 私聊 {conv_id} 不在允许名单里")
-            if self._private_deny() == "ignore":
+            if not discord and self._private_deny() == "ignore":
                 event.stop_event()
             return False
 
@@ -1243,7 +1363,7 @@ class CorticoBridge(Star):
             text = " ".join(f"[{LABELS[part['type']]}]" for part in segments[:8])
 
         platform_id = _s(event.get_platform_id())
-        is_admin = self._is_admin(event)
+        is_admin = not discord and self._is_admin(event)
         self.delivery.remember(platform_id, conv_kind, conv_id, event.unified_msg_origin)
 
         msg_id = self._message_id(event)
@@ -1271,7 +1391,7 @@ class CorticoBridge(Star):
 
         frame = {
             "t": "msg",
-            "channel": "qq",
+            "channel": "discord" if discord else "qq",
             "id": msg_id,
             "umo": _s(event.unified_msg_origin).strip(),
             "ts": _now_iso(),
@@ -1281,7 +1401,7 @@ class CorticoBridge(Star):
             "mentioned": self._is_called(event, text),
             "platform": platform_id,
             "role": "admin" if is_admin else "member",
-            "owner": is_admin,
+            "owner": self._is_owner_private(event) if discord else is_admin,
             "can": {"screenshot": is_admin},
         }
 
@@ -1338,7 +1458,7 @@ class CorticoBridge(Star):
         entry = {
             "ts": frame["ts"],
             "dir": "in",
-            "channel": "qq",
+            "channel": frame["channel"],
             "role": frame["role"],
             "owner": bool(frame.get("owner")),
             "notice": False,
@@ -2063,17 +2183,21 @@ class CorticoBridge(Star):
         `mentioned` 用同一口径。
         """
         self_id = _s(event.get_self_id())
+        discord = self._is_discord(event)
         with contextlib.suppress(Exception):
+            native_mention = getattr(event, "is_mentioned", None)
+            if discord and callable(native_mention) and native_mention():
+                return True
             for comp in event.get_messages():
                 name = type(comp).__name__
                 if name == "At":
                     qq = _s(getattr(comp, "qq", ""))
                     if qq and qq != "all" and qq == self_id:
                         return True
-                elif name == "Reply" and self_id:
+                elif name == "Reply" and self_id and not discord:
                     if _s(getattr(comp, "sender_id", "")) == self_id:
                         return True
-        return any(a in text for a in self._aliases())
+        return not discord and any(a in text for a in self._aliases())
 
     def _is_called(self, event: AstrMessageEvent, text: str) -> bool:
         """有没有真的叫到名字；@ 自己、回复自己、正文里出现配置的称呼。"""
@@ -2118,7 +2242,8 @@ class CorticoBridge(Star):
                 "modeApproval": approval,
                 "modeApprovalScope": approval_scope,
                 "modeApprovalScopeVersion": self._approval_scope_version(approval_scope) if approval_scope else "",
-                "ownerBound": bool(self._owner_umo()),
+                "ownerBound": any(self._owner_dms()),
+                "platformRoutes": self._platform_routes(),
                 "listening": self.server.listening,
                 "listenError": self.server.listen_error,
                 "client": self.server.client_address,
@@ -2164,7 +2289,8 @@ class CorticoBridge(Star):
                 "sseClients": len(self._subscribers),
                 "conversations": self.delivery.known_conversations()[:20],
                 # 渠道卡用：最近一条从哪来、这一轮该用哪个出口。
-                "lastChannel": "qq" if last else "",
+                "lastChannel": last.get("channel", "qq") if last else "",
+                "platformRoutes": self._platform_routes(),
                 "lastMessage": last,
                 "replyWith": "astrbot_send_message" if last else "",
             }
@@ -2220,7 +2346,8 @@ class CorticoBridge(Star):
             "recent": list(self._recent),
             "toolLog": list(self._tool_log),
             "conversations": self.delivery.known_conversations()[:20],
-            "lastChannel": "qq" if last else "",
+            "lastChannel": last.get("channel", "qq") if last else "",
+            "platformRoutes": self._platform_routes(),
             "lastMessage": last,
             "replyWith": "astrbot_send_message" if last else "",
         }
@@ -2234,8 +2361,8 @@ class CorticoBridge(Star):
         missing = object()
         old = {key: self.config.get(key, missing) for key in changes}
         permission_keys = {
-            "owner_tool_qq", "owner_platform", "desktop_tools_enabled", "desktop_send_targets",
-            "bridge_platforms", "group_scope", "group_allow", "group_mode", "observe_all", "observe_groups",
+            "owner_tool_qq", "owner_platform", "desktop_tools_enabled", "desktop_send_targets", "discord_routes",
+            "bridge_platforms", "name_aliases", "group_scope", "group_allow", "group_mode", "observe_all", "observe_groups",
             "private_mode", "private_allow", "private_admin_bypass", "private_deny", "tools_allow", "tools_risks",
         }
         permissions_changed = any(key in permission_keys and old[key] != value for key, value in changes.items())
@@ -2259,6 +2386,192 @@ class CorticoBridge(Star):
                 asyncio.create_task(self.server.push_ready())
         return True
 
+    @staticmethod
+    def _setting_items(raw: Any, label: str) -> list[str]:
+        if not isinstance(raw, list) or len(raw) > 100 or any(
+            not isinstance(item, str) or len(item) > 256 for item in raw
+        ):
+            raise ValueError(f"{label}最多 100 项，每项不超过 256 个字符。")
+        return list(dict.fromkeys(item.strip() for item in raw if item.strip()))
+
+    def _connection_settings(self) -> dict:
+        return {
+            "enabled": self.config.get("enabled") is True,
+            "host": self._listen_host(), "port": self._port(), "maxSends": max(0, self._max_sends()),
+            "tokenSet": bool(self._token_value()),
+        }
+
+    async def _bind_listener(self, host: str, port: int, token: str, enabled: bool) -> bool:
+        await self.server.stop()
+        self.server.host, self.server.port, self.server.token = host, port, token
+        return not enabled or await self.server.start()
+
+    @staticmethod
+    def _settings_changed(payload: dict, current: dict, *keys: str) -> bool:
+        expected = payload.get("expected")
+        return expected is not None and expected != {key: current[key] for key in keys}
+
+    async def page_connection_settings(self):
+        if request is None or _s(request.method).upper() != "POST":
+            return json_response(self._connection_settings())
+        payload = await request.json(default={})
+        if not isinstance(payload, dict) or type(payload.get("enabled")) is not bool:
+            return error_response("请选择是否接管对话。", status_code=400)
+        enabled, port, max_sends = payload["enabled"], payload.get("port"), payload.get("maxSends")
+        host = _s(payload.get("host")).strip()
+        host = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", host):
+                return error_response("监听地址须为 IP 或主机名。", status_code=400)
+        if type(port) is not int or not 1 <= port <= 65535 or type(max_sends) is not int or max_sends < 0:
+            return error_response("端口须为 1–65535，发送上限须为非负整数。", status_code=400)
+
+        async with self._listener_lock:
+            current = self._connection_settings()
+            if self._settings_changed(payload, current, "enabled", "host", "port", "maxSends"):
+                return error_response("连接设置已在别处修改，请重新打开控制台后再保存。", status_code=409)
+            changes = dict(enabled=enabled, listen_host=host, listen_port=port, max_sends_per_minute=max_sends)
+            rebind = (enabled, host, port) != (current["enabled"], current["host"], current["port"])
+            if not rebind:
+                if max_sends != current["maxSends"] and not self._commit_config(changes):
+                    return error_response("保存发送上限失败。", status_code=500)
+                return json_response(self._connection_settings())
+
+            token = self._token_value()
+            if enabled and not is_loopback_host(host) and not token:
+                return error_response("跨机监听需要令牌。请先在本页生成令牌。", status_code=400)
+            if payload.get("confirmed") is not True and (self.server.listening or enabled and not is_loopback_host(host)):
+                return error_response("请确认修改监听会改变 Coo 的连接。", status_code=409)
+            if self.server.operations_active:
+                return error_response("桥正在处理消息，请稍后再改监听。", status_code=409)
+
+            previous = (self.server.host, self.server.port, self.server.token, self.server.listening)
+            try:
+                if not await self._bind_listener(host, port, token, enabled):
+                    raise RuntimeError("新地址或端口监听失败")
+                if not self._commit_config(changes):
+                    raise RuntimeError("保存连接设置失败")
+            except (Exception, asyncio.CancelledError) as exc:
+                try:
+                    restored = await self._bind_listener(*previous)
+                except Exception:
+                    restored = False
+                logger.warning(f"Cortico Bridge: 应用监听设置失败，旧监听恢复={restored}（{type(exc).__name__}）")
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                message = "未能应用新设置，已恢复原监听。" if restored else "未能应用新设置，原监听也恢复失败。请检查地址和端口。"
+                return error_response(message, status_code=500)
+            return json_response(self._connection_settings())
+
+    def _qq_settings(self) -> dict:
+        return {
+            "platforms": self._bridge_platforms(), "aliases": self._aliases(), "mode": self.server.mode,
+            "instances": [
+                {"id": key, "enabled": item.get("enable") is not False}
+                for key, item in self._configured_platforms().items() if item.get("type") == "aiocqhttp"
+            ],
+        }
+
+    async def page_qq_settings(self):
+        if request is None or _s(request.method).upper() != "POST":
+            return json_response(self._qq_settings())
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求格式不正确。", status_code=400)
+        try:
+            platforms = self._setting_items(payload.get("platforms"), "QQ 实例")
+            aliases = self._setting_items(payload.get("aliases"), "唤醒称呼")
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+        current = self._qq_settings()
+        if self._settings_changed(payload, current, "platforms", "aliases"):
+            return error_response("QQ 设置已在别处修改，请重新打开控制台后再保存。", status_code=409)
+        added = set(platforms) - set(current["platforms"])
+        available = {item["id"] for item in current["instances"]}
+        if not platforms or added - available:
+            return error_response("请至少保留一个 QQ 实例，新增项须从 AstrBot 已配置的实例中选择。", status_code=400)
+        owner_platform = self._owner_umo().partition(":")[0]
+        if owner_platform and owner_platform not in platforms:
+            return error_response("请先调整主人私聊绑定，再移除此 QQ 实例。", status_code=409)
+        if (added or self.server.mode == "full" and set(aliases) - set(current["aliases"])) and payload.get("confirmed") is not True:
+            return error_response("请确认新增的实例或称呼可以触发 Coo。", status_code=409)
+        changes = {"bridge_platforms": platforms, "name_aliases": aliases}
+        if owner_platform and not self.config.get("owner_platform") and len(platforms) > 1:
+            changes["owner_platform"] = owner_platform
+        if not self._commit_config(changes):
+            return error_response("保存设置失败。桥正在处理消息时请稍后再试。", status_code=409)
+        return json_response(self._qq_settings())
+
+    def _image_settings(self) -> dict:
+        providers = []
+        try:
+            for provider in self.context.get_all_providers():
+                key = _s((getattr(provider, "provider_config", None) or {}).get("id")).strip()
+                if key and key not in providers:
+                    providers.append(key)
+        except Exception:
+            logger.debug("Cortico Bridge: 未能读取视觉模型列表")
+        return {"mode": self._image_mode(), "provider": _s(self.config.get("image_vision_provider")).strip(), "providers": providers}
+
+    async def page_image_settings(self):
+        if request is None or _s(request.method).upper() != "POST":
+            return json_response(self._image_settings())
+        payload = await request.json(default={})
+        if not isinstance(payload, dict) or payload.get("mode") not in ("auto", "image", "describe", "off"):
+            return error_response("请选择有效的图片处理方式。", status_code=400)
+        current = self._image_settings()
+        if self._settings_changed(payload, current, "mode", "provider"):
+            return error_response("图片设置已在别处修改，请重新打开控制台后再保存。", status_code=409)
+        provider = payload.get("provider")
+        if not isinstance(provider, str) or provider and provider not in current["providers"] and provider != current["provider"]:
+            return error_response("请选择 AstrBot 已配置的模型，或使用自动选择。", status_code=400)
+        if not self._commit_config({"image_mode": payload["mode"], "image_vision_provider": provider}):
+            return error_response("保存图片设置失败。", status_code=500)
+        return json_response(self._image_settings())
+
+    async def page_tool_risks(self):
+        posting = request is not None and _s(request.method).upper() == "POST"
+        payload = await request.json(default={}) if posting else {}
+        known = {row["name"] for row in self.tools.catalog(force=True) if row.get("name")}
+        previous = self.tools.declared_risks()
+        allow = self.tools.allow_list()
+        auto_reviewed = "*" in allow
+        if posting:
+            if self.server.mode != "full":
+                return error_response("工具风险分类只在完整模式下编辑。", status_code=403)
+            try:
+                entries = self._setting_items(payload.get("entries") if isinstance(payload, dict) else None, "工具风险分类")
+                requested_auto = payload.get("autoReviewed")
+                if type(requested_auto) is not bool:
+                    raise ValueError("请选择是否自动授权已审查的读写工具。")
+                current = {"entries": sorted(f"{k}:{v}" for k, v in previous.items()), "autoReviewed": auto_reviewed}
+                if self._settings_changed(payload, current, "entries", "autoReviewed"):
+                    return error_response("风险分类已在别处修改，请重新打开控制台后再保存。", status_code=409)
+                risks = {}
+                available = known | previous.keys()
+                for entry in entries:
+                    name, _, risk = entry.rpartition(":")
+                    name, risk = name.strip(), risk.strip()
+                    if name in risks or name not in available or risk not in ("read", "write", "exec"):
+                        raise ValueError("请选择已知工具和有效风险等级，每个工具只配置一次。")
+                    risks[name] = risk
+            except ValueError as exc:
+                return error_response(str(exc), status_code=400)
+            if risks != previous or requested_auto != auto_reviewed:
+                if payload.get("confirmed") is not True:
+                    return error_response("请确认已核对工具行为和通配授权会受到的影响。", status_code=409)
+                changes = {"tools_risks": [f"{name}:{risk}" for name, risk in risks.items()]} if risks != previous else {}
+                if requested_auto != auto_reviewed:
+                    changes["tools_allow"] = ["*", *allow] if requested_auto else [name for name in allow if name != "*"]
+                if not self._commit_config(changes):
+                    return error_response("保存风险分类失败，请稍后再试。", status_code=409)
+                self.tools.catalog(force=True)
+                await self.server.push(self.tools.frame())
+                previous, auto_reviewed = risks, requested_auto
+        return json_response({"tools": sorted(known | previous.keys()), "risks": previous, "autoReviewed": auto_reviewed})
+
     def _full_mode_scope(self) -> dict:
         return {
             "platforms": self._bridge_platforms(),
@@ -2272,6 +2585,10 @@ class CorticoBridge(Star):
                       for tool in self.tools.enabled_catalog() if tool.get("name")],
             "desktopOwner": self._desktop_owner() if self._desktop_owner() in self._admin_ids() else "",
             "desktopTargets": self._desktop_targets(),
+            "discordRoutes": {
+                platform: route for platform, route in self._discord_routes().items()
+                if self._discord_instance_enabled(platform)
+            },
         }
 
     @staticmethod
@@ -2288,7 +2605,7 @@ class CorticoBridge(Star):
             try:
                 if action == "approve":
                     if payload.get("confirmed") is not True:
-                        raise ValueError("请确认完整模式会让已放行的 QQ 会话使用 Coo 主会话")
+                        raise ValueError("请确认完整模式会让已放行的会话使用 Coo 主会话")
                     if payload.get("scopeVersion") != self._approval_scope_version(self._full_mode_scope()):
                         raise ValueError("开放范围已变化，请刷新后重新确认")
                     await self.server.approve_mode(_s(payload.get("approval")))
@@ -2296,6 +2613,9 @@ class CorticoBridge(Star):
                     await self.server.reject_mode(_s(payload.get("approval")))
                 elif action == "narrow":
                     await self.server.narrow_mode()
+                elif action == "save-discord":
+                    if not self._save_discord_route(payload):
+                        return error_response("当前无法保存 Discord 接入配置。", status_code=409)
                 elif action == "save":
                     if self.server.operations_active:
                         return error_response("桥正处理上一轮，请稍后保存授权。", status_code=409)
@@ -2303,7 +2623,7 @@ class CorticoBridge(Star):
                     platform = _s(payload.get("ownerPlatform")).strip()
                     if owner and (not owner.isascii() or not owner.isdigit() or len(owner) > 20):
                         raise ValueError("主人 QQ 应为 20 位以内的数字")
-                    if owner and platform not in self._bridge_platforms():
+                    if owner and (platform not in self._bridge_platforms() or platform in self._discord_instances()):
                         raise ValueError("请选择已接入的 QQ 平台实例")
                     owner_changed = self._owner_umo() != (f"{platform}:FriendMessage:{owner}" if owner else "")
                     changes = {"owner_tool_qq": owner, "owner_platform": platform if owner else ""}
@@ -2323,11 +2643,46 @@ class CorticoBridge(Star):
             "modeApproval": self.server.pending_mode_approval(),
             "ownerQQ": _s(self.config.get("owner_tool_qq")).strip(),
             "ownerPlatform": _s(self.config.get("owner_platform")).strip() or self._owner_umo().split(":", 1)[0],
-            "platforms": self._bridge_platforms(),
+            "platforms": [p for p in self._bridge_platforms()
+                          if p not in self._discord_routes() and p not in self._discord_instances()],
+            "platformRoutes": [route for route in self._platform_routes()
+                               if route["channel"] == "qq" or route["id"] in self._discord_instances()],
+            "discordRoutes": self._discord_routes(),
             "desktopTools": self.config.get("desktop_tools_enabled") is True,
             "desktopTargets": self._desktop_targets(),
             "legacyDesktopNeedsReview": self._legacy_desktop_needs_review(),
         })
+
+    def _save_discord_route(self, payload: dict) -> bool:
+        platform = _s(payload.get("platform")).strip()
+        if platform not in self._discord_instances():
+            raise ValueError("请选择 AstrBot 已配置的 Discord 实例。")
+        owner = _s(payload.get("ownerId")).strip()
+        if owner and (not owner.isascii() or not owner.isdigit() or len(owner) > 20):
+            raise ValueError("Discord 主人用户 ID 应为 20 位以内的数字。")
+        channels = payload.get("channels")
+        if not isinstance(channels, list) or len(channels) > 100:
+            raise ValueError("频道白名单最多 100 条。")
+        targets = []
+        for item in channels:
+            value = _s(item).strip()
+            if value.isascii() and value.isdigit():
+                value = f"{platform}:GroupMessage:{value}"
+            parsed = parse_umo(value)
+            if not parsed or parsed[:2] != (platform, "group"):
+                raise ValueError("请填写所选 Discord 实例的频道 ID 或完整频道 UMO。")
+            if parsed[3] not in targets:
+                targets.append(parsed[3])
+        routes = self._discord_routes()
+        old = routes.get(platform, {})
+        enabled = payload.get("enabled") is True
+        opens_access = enabled and (old.get("enabled") is not True or owner != old.get("owner_id", "")
+                                    or set(targets).difference(old.get("channels", [])))
+        if self.server.mode == "full" and opens_access and payload.get("confirmed") is not True:
+            raise ValueError("请确认开放的 Discord 会话将接入 Coo 主会话。")
+        route = {"enabled": enabled, "owner_id": owner, "channels": targets,
+                 "owner_umo": old.get("owner_umo", "") if owner and owner == old.get("owner_id") else ""}
+        return self._commit_config({"discord_routes": {**routes, platform: route}})
 
     def _desktop_config_changes(self, payload: dict, owner: str, owner_changed: bool) -> dict:
         owner_tools = payload.get("desktopTools") is True
@@ -2337,10 +2692,11 @@ class CorticoBridge(Star):
         if not isinstance(targets, list) or len(targets) > 100:
             raise ValueError("桌面发送目标最多 100 条")
         allow = []
+        platforms = set(self._bridge_platforms()) | self._discord_routes().keys()
         for item in targets:
             parsed = parse_umo(item) if isinstance(item, str) else None
-            if not parsed or parsed[0] not in self._bridge_platforms():
-                raise ValueError("桌面发送目标必须是已接入平台的完整 QQ 会话 UMO")
+            if not parsed or parsed[0] not in platforms:
+                raise ValueError("桌面发送目标必须是已接入平台的完整会话 UMO")
             if parsed[3] not in allow:
                 allow.append(parsed[3])
         if payload.get("confirmed") is not True and (
@@ -2679,14 +3035,14 @@ class CorticoBridge(Star):
                     "action 必须是 generate / clear。", status_code=400
                 )
             token = secrets.token_urlsafe(32) if action == "generate" else ""
-            # A-3：save 成功后才动 server；保存失败时 config 已回滚，server 不变。
-            if not self._commit_config({"token": token}):
-                return error_response("保存配置失败。", status_code=500)
-            self.server.token = token
-            restarted = False
-            if self.server.listening:
-                await self.server.stop()
-                restarted = await self.server.start()
+            async with self._listener_lock:
+                # A-3：保存成功后才替换运行中的令牌。
+                if not self._commit_config({"token": token}):
+                    return error_response("保存配置失败。", status_code=500)
+                self.server.token = token
+                restarted = False
+                if self.server.listening:
+                    restarted = await self._bind_listener(self.server.host, self.server.port, token, True)
             logger.info(
                 "Cortico Bridge: 已%s访问 token"
                 % ("生成新的" if action == "generate" else "清除")
@@ -2710,19 +3066,13 @@ class CorticoBridge(Star):
 
     async def page_restart(self):
         """重开监听：改完端口、token，或怀疑卡住时用。"""
-        if not self.config.get("enabled", False):
-            return error_response(
-                "桥未启用，先打开「接管对话」再重开监听。", status_code=400
-            )
-        # 让「重开监听」真的按当前配置重新绑定，而不是继续用 init 时的旧值。
-        self.server.host = self._listen_host()
-        self.server.port = self._port()
-        self.server.token = self._token_value()
-        try:
-            await self.server.stop()
-            ok = await self.server.start()
-        except Exception as exc:  # noqa: BLE001
-            return error_response(f"重开失败：{exc}", status_code=500)
+        async with self._listener_lock:
+            if not self.config.get("enabled", False):
+                return error_response("桥未启用，先打开「接管对话」再重开监听。", status_code=400)
+            try:
+                ok = await self._bind_listener(self._listen_host(), self._port(), self._token_value(), True)
+            except Exception as exc:  # noqa: BLE001
+                return error_response(f"重开失败：{exc}", status_code=500)
         if not ok:
             return error_response(
                 f"{self.server.host}:{self.server.port} 监听失败，端口可能被占用。",

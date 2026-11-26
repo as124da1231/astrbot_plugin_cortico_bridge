@@ -1,7 +1,7 @@
 {
   "views": {
     "status": {
-      "title": "控制台",
+      "title": "Coo 桥控制台",
       "description": "连接状态、会话流水、群聊与私聊范围、工具授权和语音设置。"
     }
   }

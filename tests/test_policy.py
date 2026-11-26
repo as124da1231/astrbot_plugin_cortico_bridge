@@ -4,6 +4,7 @@ main.py 依赖较多 AstrBot 层；这里和 test_images 一样只 stub 到 impo
 部分，再用 object.__new__ 绕开插件完整初始化。
 """
 
+import asyncio
 import base64
 import contextlib
 import importlib.util
@@ -310,7 +311,7 @@ class FakeContext:
     def __init__(self, admins=None):
         self.admins = admins if admins is not None else ["111"]
 
-    def get_config(self):
+    def get_config(self, *, umo=None):
         return {"admins_id": list(self.admins), "wake_prefix": "/"}
 
 
@@ -355,6 +356,7 @@ def make_bridge(
     bridge.config = FakeConfig(data)
     bridge.context = context or FakeContext()
     bridge.server = FakeServer(connected=connected, push_ok=push_ok)
+    bridge._listener_lock = asyncio.Lock()
     bridge.delivery = delivery or FakeDelivery()
     bridge.tools = tools or FakeTools()
     bridge._recent = deque(maxlen=40)
@@ -426,6 +428,38 @@ class MentionPolicyTests(unittest.IsolatedAsyncioTestCase):
         # 直接推送成功后，LLM 层不再推第二次。
         await bridge.on_llm_request(event, None)
         self.assertEqual(len(bridge.server.pushed), 1)
+
+    async def test_mention_respects_effective_llm_config_for_each_group(self):
+        class GroupConfigContext(FakeContext):
+            def __init__(self):
+                super().__init__()
+                self.group_config = {"enable": False}
+
+            def get_config(self, *, umo=None):
+                config = super().get_config(umo=umo)
+                config["provider_settings"] = (
+                    self.group_config if umo == "default:GroupMessage:1" else {"enable": True}
+                )
+                return config
+
+        context = GroupConfigContext()
+        bridge = make_bridge(context=context)
+        muted = FakeEvent("你好", messages=[At("999"), Plain("你好")], message_id="1001")
+        await bridge.observe_all_messages(muted)
+        await bridge.on_llm_request(muted, None)
+        self.assertEqual(bridge.server.pushed, [])
+        self.assertFalse(muted.get_extra("_cortico_llm_owned"))
+        self.assertFalse(muted.is_stopped())
+
+        other = FakeEvent("你好", messages=[At("999"), Plain("你好")], group_id="2", message_id="1002")
+        await bridge.observe_all_messages(other)
+        self.assertEqual(len(bridge.server.pushed), 1)
+
+        context.group_config["enable"] = True
+        resumed = FakeEvent("你好", messages=[At("999"), Plain("你好")], message_id="1003")
+        await bridge.observe_all_messages(resumed)
+        await bridge.on_llm_request(resumed, None)
+        self.assertEqual(len(bridge.server.pushed), 2)
 
     async def test_mention_alias_wakes(self):
         bridge = make_bridge()
@@ -1140,3 +1174,190 @@ class PageBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data["all"])
         self.assertEqual(data["granted"], ["read_tool"])
         self.assertNotIn("exec_tool", data["granted"])
+
+
+class ConsoleSettingsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_connection_settings_confirm_and_restore_existing_listener(self):
+        bridge = make_bridge({"enabled": True, "listen_host": "0.0.0.0", "listen_port": 17999, "token": "fixture-token"})
+        bridge.server.listening = True
+        calls = []
+
+        async def start():
+            calls.append(bridge.server.port)
+            bridge.server.listening = bridge.server.port == 17999
+            return bridge.server.listening
+
+        bridge.server.start = start
+        draft = {"enabled": True, "host": "0.0.0.0", "port": 18000, "maxSends": 15}
+        with fake_responses(), fake_request("POST", draft):
+            reply = await bridge.page_connection_settings()
+        self.assertEqual(reply["status"], 409)
+        self.assertEqual(calls, [])
+
+        with fake_responses(), fake_request("POST", {**draft, "confirmed": True}):
+            reply = await bridge.page_connection_settings()
+        self.assertEqual(reply["status"], 500)
+        self.assertEqual(calls, [18000, 17999])
+        self.assertTrue(bridge.server.listening)
+        self.assertEqual(bridge.config["listen_port"], 17999)
+        self.assertEqual(bridge.config.saves, 0)
+
+    async def test_connection_settings_reject_non_loopback_without_token(self):
+        bridge = make_bridge({"enabled": False, "token": ""})
+        draft = {"enabled": True, "host": "0.0.0.0", "port": 17999, "maxSends": 30, "confirmed": True}
+        with fake_responses(), fake_request("POST", draft):
+            reply = await bridge.page_connection_settings()
+        self.assertEqual(reply["status"], 400)
+        self.assertFalse(bridge.server.listening)
+        self.assertFalse(bridge.config["enabled"])
+
+    async def test_qq_settings_keep_implicit_owner_when_adding_an_instance(self):
+        context = FakeContext()
+        context.get_config = lambda: {"platform": [
+            {"id": "default", "type": "aiocqhttp"},
+            {"id": "qq-two", "type": "aiocqhttp"},
+            {"id": "discord", "type": "discord"},
+        ]}
+        bridge = make_bridge({"owner_tool_qq": "111"}, context=context)
+        draft = {"platforms": ["default", "qq-two"], "aliases": ["Coo"]}
+        with fake_responses(), fake_request("POST", draft):
+            reply = await bridge.page_qq_settings()
+        self.assertEqual(reply["status"], 409)
+        with fake_responses(), fake_request("POST", {**draft, "confirmed": True}):
+            reply = await bridge.page_qq_settings()
+        self.assertEqual(reply["status"], 200)
+        self.assertEqual(bridge._owner_umo(), "default:FriendMessage:111")
+        self.assertEqual(bridge.config["owner_platform"], "default")
+
+    async def test_image_settings_offer_existing_providers_and_reject_unknown_ids(self):
+        context = FakeContext()
+        context.get_all_providers = lambda: [types.SimpleNamespace(provider_config={"id": "fixture-vision"})]
+        bridge = make_bridge(context=context)
+        with fake_responses(), fake_request("POST", {"mode": "describe", "provider": "missing"}):
+            reply = await bridge.page_image_settings()
+        self.assertEqual(reply["status"], 400)
+        with fake_responses(), fake_request("POST", {"mode": "describe", "provider": "fixture-vision"}):
+            reply = await bridge.page_image_settings()
+        self.assertEqual(reply["data"]["provider"], "fixture-vision")
+        self.assertEqual(bridge.config["image_mode"], "describe")
+
+    async def test_tool_risks_require_full_mode_and_explicit_confirmation(self):
+        tools = FakeTools(allow=["explicit_tool"], catalog=[{"name": "fixture_tool"}])
+        tools.declared_risks = lambda: {}
+        bridge = make_bridge(tools=tools)
+        bridge.server.mode = "safe"
+        draft = {"entries": ["fixture_tool:read"], "autoReviewed": True}
+        with fake_responses(), fake_request("POST", {**draft, "confirmed": True}):
+            reply = await bridge.page_tool_risks()
+        self.assertEqual(reply["status"], 403)
+        bridge.server.mode = "full"
+        with fake_responses(), fake_request("POST", draft):
+            reply = await bridge.page_tool_risks()
+        self.assertEqual(reply["status"], 409)
+        with fake_responses(), fake_request("POST", {**draft, "confirmed": True}):
+            reply = await bridge.page_tool_risks()
+        self.assertEqual(reply["status"], 200)
+        self.assertEqual(bridge.config["tools_risks"], ["fixture_tool:read"])
+        self.assertEqual(bridge.config["tools_allow"], ["*", "explicit_tool"])
+
+
+class DiscordRouteTests(unittest.IsolatedAsyncioTestCase):
+    def test_platform_report_matches_configured_instances_and_their_enablement(self):
+        context = FakeContext()
+        context.get_config = lambda: {"platform": [
+            {"id": "default", "type": "aiocqhttp", "enable": True},
+            {"id": "qq-disabled", "type": "aiocqhttp", "enable": False},
+            {"id": "web", "type": "webchat", "enable": True},
+            {"id": "discord", "type": "discord", "enable": True},
+        ]}
+        bridge = make_bridge({
+            "bridge_platforms": ["default", "qq-disabled", "missing", "web"],
+            "owner_tool_qq": "111", "owner_platform": "default",
+        }, context=context)
+        self.assertEqual(bridge._platform_routes(), [
+            {"id": "default", "channel": "qq", "enabled": True, "ownerBound": True},
+            {"id": "qq-disabled", "channel": "qq", "enabled": False, "ownerBound": False},
+            {"id": "discord", "channel": "discord", "enabled": False, "ownerBound": False},
+        ])
+
+    def make_discord_bridge(self, *, supports_discord=True, bound=""):
+        context = FakeContext()
+        context.get_config = lambda: {
+            "admins_id": ["111"],
+            "platform": [{"id": "my-discord", "type": "discord", "enable": True}],
+        }
+        bridge = make_bridge({
+            "group_mode": "all",
+            "owner_tool_qq": "111",
+            "discord_routes": {"my-discord": {
+                "enabled": True, "owner_id": "111", "owner_umo": bound,
+                "channels": ["my-discord:GroupMessage:600"],
+            }},
+        }, context=context)
+        bridge.server.supports_multiple_platforms = supports_discord
+        return bridge
+
+    @staticmethod
+    def event(*, private=False, session="600", sender="111", mention=False):
+        event = FakeEvent("Coo，你好", private=private, group_id=session, sender_id=sender, message_id="701")
+        kind = "FriendMessage" if private else "GroupMessage"
+        event.unified_msg_origin = f"my-discord:{kind}:{session}"
+        event.get_platform_id = lambda: "my-discord"
+        event.get_platform_name = lambda: "discord"
+        event.is_mentioned = lambda: mention
+        return event
+
+    async def test_safe_mode_binds_native_dm_for_the_configured_sender(self):
+        bridge = self.make_discord_bridge()
+        bridge.server.mode = "safe"
+        await bridge.observe_all_messages(self.event(private=True, sender="222"))
+        self.assertEqual(bridge.config.saves, 0)
+
+        await bridge.observe_all_messages(self.event(private=True))
+        self.assertEqual(bridge.config.saves, 1)
+        self.assertIn("my-discord:FriendMessage:600", bridge._owner_dms())
+        self.assertNotIn("my-discord:FriendMessage:111", bridge._owner_dms())
+        self.assertFalse(bridge._event_allowed(self.event(private=True, session="111")))
+        self.assertFalse(bridge._event_allowed(self.event(private=True, sender="222")))
+        self.assertFalse(bridge._event_allowed(self.event(mention=True)))
+
+        owner_message = self.event(private=True)
+        await bridge.observe_all_messages(owner_message)
+        await bridge.on_llm_request(owner_message, None)
+        frame, = bridge.server.pushed
+        self.assertEqual(frame["conv"]["id"], "600")
+        self.assertEqual(frame["sender"]["id"], "111")
+        self.assertEqual(frame["channel"], "discord")
+        self.assertTrue(frame["owner"])
+        self.assertFalse(frame["can"]["screenshot"])
+
+    async def test_full_mode_requires_channel_allowlist_and_real_mention(self):
+        bridge = self.make_discord_bridge(supports_discord=False)
+        await bridge.observe_all_messages(self.event(mention=True))
+        self.assertEqual(bridge.server.pushed, [])
+        bridge.server.supports_multiple_platforms = True
+        await bridge.observe_all_messages(self.event())
+        await bridge.observe_all_messages(self.event(session="601", mention=True))
+        self.assertEqual(bridge.server.pushed, [])
+        command = self.event(mention=True)
+        command.is_slash_command = lambda: True
+        await bridge.observe_all_messages(command)
+        self.assertEqual(bridge.server.pushed, [])
+
+        message = self.event(mention=True)
+        await bridge.observe_all_messages(message)
+        await bridge.on_llm_request(message, None)
+        frame, = bridge.server.pushed
+        self.assertEqual(frame["umo"], "my-discord:GroupMessage:600")
+        self.assertTrue(frame["mentioned"])
+        self.assertEqual(frame["role"], "member")
+        self.assertFalse(frame["can"]["screenshot"])
+
+    def test_admin_access_changes_require_confirmation_and_invalidate_dm_on_owner_change(self):
+        bridge = self.make_discord_bridge(bound="my-discord:FriendMessage:600")
+        change = {"platform": "my-discord", "enabled": True, "ownerId": "222", "channels": ["600"]}
+        with self.assertRaisesRegex(ValueError, "确认"):
+            bridge._save_discord_route(change)
+        self.assertTrue(bridge._save_discord_route({**change, "confirmed": True}))
+        self.assertEqual(bridge.config["discord_routes"]["my-discord"]["owner_umo"], "")
+        self.assertIsNone(bridge._discord_routes().get("default"))

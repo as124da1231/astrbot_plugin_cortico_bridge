@@ -770,3 +770,27 @@ class SendErrorTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DiscordTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discord_is_visible_only_to_a_multi_platform_peer_in_allowed_scope(self):
+        qq = {"umo": "default:GroupMessage:123", "id": "123", "kind": "group"}
+        discord = {"umo": "my-discord:GroupMessage:123", "id": "123", "kind": "group"}
+        revoked = {"umo": "my-discord:GroupMessage:124", "id": "124", "kind": "group"}
+        server = bridge.BridgeServer(
+            host="127.0.0.1", port=0, token="", on_send=_ok_send,
+            conversations=lambda: [qq, discord, revoked],
+            platform_routes=lambda: [{"id": "my-discord", "channel": "discord", "enabled": True}],
+            discord_target_allowed=lambda umo: umo == discord["umo"],
+        )
+        server._client = _Ws()
+        frame = await server.ready_frame()
+        self.assertNotIn("platformRoutes", frame)
+        self.assertEqual(frame["conversations"], [qq])
+        message = {"t": "msg", "channel": "discord", "id": "905", "umo": discord["umo"]}
+        self.assertFalse(await server.push(message))
+
+        server.capabilities = {"multi_platform": True}
+        frame = await server.ready_frame()
+        self.assertEqual(frame["conversations"], [qq, {**discord, "channel": "discord"}])
+        self.assertTrue(await server.push(message))

@@ -15,6 +15,7 @@ import contextlib
 import hmac
 import inspect
 import json
+import re
 import time
 from collections import OrderedDict
 from typing import Any, Awaitable, Callable
@@ -225,24 +226,24 @@ def _parse_at(raw: Any) -> tuple[list[str], str, str]:
     """校验 send 帧里的 at（群 @）。
 
     返回 (QQ 号列表, 错误码, 中文说明)；没有 at 时三个值是 ([], "", "")。
-    只接受数字 QQ 号或 "all"；去重，@全体 时只保留 "all"。
+    只接受平台数字用户 ID 或 "all"；去重，@全体时只保留 "all"。
     """
     if raw is None:
         return [], "", ""
     if not isinstance(raw, list):
-        return [], codes.BAD_AT, "at 必须是 QQ 号数组"
+        return [], codes.BAD_AT, "at 必须是平台用户 ID 数组"
     if len(raw) > AT_MAX:
         return [], codes.BAD_AT, f"一条消息最多 @ {AT_MAX} 人"
     out: list[str] = []
     for item in raw:
         if isinstance(item, bool) or not isinstance(item, (str, int)):
-            return [], codes.BAD_AT, "at 里只能是 QQ 号或 all"
+            return [], codes.BAD_AT, "at 里只能是平台用户 ID 或 all"
         value = str(item).strip()
         if value == "all":
             out.append("all")
             continue
-        if not (5 <= len(value) <= 20) or not value.isdigit():
-            return [], codes.BAD_AT, f"「{value}」不是 QQ 号，at 只接受数字"
+        if not (5 <= len(value) <= 20) or not value.isascii() or not value.isdigit():
+            return [], codes.BAD_AT, f"「{value}」不是有效用户 ID，at 只接受数字"
         out.append(value)
     if "all" in out:
         return ["all"], "", ""
@@ -265,6 +266,9 @@ class BridgeServer:
         desktop_owner: Callable[[], str] | None = None,
         desktop_targets: Callable[[], list[str]] | None = None,
         owner_umo: Callable[[], str] | None = None,
+        owner_dms: Callable[[], list[str]] | None = None,
+        platform_routes: Callable[[], list[dict]] | None = None,
+        discord_target_allowed: Callable[[str], bool] | None = None,
         tools_frame: ToolsProvider | None = None,
         tts_available: TtsInfoProvider | None = None,
         conversations: Callable[[], list[dict]] | None = None,
@@ -281,6 +285,9 @@ class BridgeServer:
         self._desktop_owner = desktop_owner or (lambda: "")
         self._desktop_targets = desktop_targets or (lambda: [])
         self._owner_umo = owner_umo or (lambda: "")
+        self._owner_dms = owner_dms or (lambda: [self._owner_umo()])
+        self._platform_routes = platform_routes or (lambda: [])
+        self._discord_target_allowed = discord_target_allowed or (lambda _: True)
         self._tools_frame = tools_frame
         self._tts_available = tts_available or (lambda: False)
         self._conversations = conversations or (lambda: [])
@@ -461,13 +468,15 @@ class BridgeServer:
         client = self._client
         if client is None:
             return False
+        if obj.get("t") == "msg" and obj.get("channel") == "discord" and not self.supports_multiple_platforms:
+            return False
         if self._save_mode and obj.get("t") == "tools" and (not self._mode_ready or self.mode != "full"):
             return False
         key = None
         if self._save_mode is not None and obj.get("t") == "msg":
             if not self._mode_ready:
                 return False
-            if self.mode == "safe" and (not self._owner_umo() or obj.get("umo") != self._owner_umo()):
+            if self.mode == "safe" and (not obj.get("umo") or obj.get("umo") not in self._owner_dms()):
                 return False
             obj = {**obj, "modeRevision": self._mode_revision}
             if obj.get("kind") != "notice":
@@ -522,7 +531,22 @@ class BridgeServer:
             return {"ready": bool(raw.get("ready")), "provider": _s(raw.get("provider"))}
         return {"ready": bool(raw), "provider": ""}
 
+    @property
+    def supports_multiple_platforms(self) -> bool:
+        return self.capabilities.get("multi_platform") is True
+
     async def ready_frame(self) -> dict:
+        routes = self._platform_routes()
+        discord_routes = {route["id"]: route for route in routes if route["channel"] == "discord"}
+        conversations = self._conversations() if self.mode == "full" else []
+        visible_conversations = []
+        for item in conversations:
+            umo = item.get("umo") or ""
+            route = discord_routes.get(umo.split(":", 1)[0])
+            if route is None:
+                visible_conversations.append(item)
+            elif self.supports_multiple_platforms and route["enabled"] and self._discord_target_allowed(umo):
+                visible_conversations.append({**item, "channel": "discord"})
         return {
             "t": "ready",
             "channel": "qq",
@@ -532,12 +556,13 @@ class BridgeServer:
             "admins": list(self._admin_ids()) if self.token and self.mode == "full" else [],
             "ownerTools": self.mode == "full" and bool(self.tool_owner),
             "desktopSend": self.mode == "full" and self._has_credentials(self._client) and bool(self._desktop_targets()),
-            "ownerBound": bool(self._owner_umo()),
+            "ownerBound": bool(any(self._owner_dms()) if self.supports_multiple_platforms else self._owner_umo()),
             "modeApprovalPending": bool(self.pending_mode_approval()),
             # 桥这边能不能发语音，以及会用哪个 provider（World 可据此少试一次）。
             "tts": await self._tts_info(),
             # 桥记得的会话（含重启前恢复的），World 用它来支持主动发送。
-            "conversations": self._conversations()[:20] if self.mode == "full" else [],
+            "conversations": visible_conversations[:20],
+            **({"platformRoutes": routes} if self.supports_multiple_platforms else {}),
             "v": PROTOCOL_VERSION,
             **({"mode": self.mode, "modeRevision": self._mode_revision} if self._save_mode else {}),
         }
@@ -955,6 +980,10 @@ class BridgeServer:
                 else:
                     platform = p_platform or platform
                     conv_kind, conv_id, umo = p_kind, p_id, p_umo
+        discord = any(route["id"] == platform and route["channel"] == "discord" for route in self._platform_routes())
+        if discord:
+            # 被引用的文字可能含有全体或角色提及，避免原样转发触发通知。
+            text = re.sub(r"@(?=everyone\b|here\b|&[0-9]+>)", "@\u200b", text)
         image, image_code, image_note = _parse_image(frame.get("image"))
         used_voice = False
         uncertain = False
@@ -981,6 +1010,8 @@ class BridgeServer:
             ok, code, err = False, codes.VOICE_IMAGE_CONFLICT, "语音和图片不能是同一条消息"
         elif voice and at:
             ok, code, err = False, codes.VOICE_AT_CONFLICT, "语音和 @ 不能是同一条消息"
+        elif discord and "all" in at:
+            ok, code, err = False, "scope_denied", "Discord 频道只允许点名具体成员"
         elif conv_kind not in ("group", "private") or not conv_id:
             ok, code, err = False, codes.BAD_SESSION, "会话参数不合法"
         elif self._save_mode and self.mode == "safe" and (conv_kind != "private" or image is not None or at):

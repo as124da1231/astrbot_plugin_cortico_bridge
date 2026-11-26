@@ -1,5 +1,5 @@
 /**
- * Cortico 桥 · 控制台
+ * Coo 桥控制台
  *
  * 约束：页面跑在受限 iframe 里（sandbox 无 same-origin），拿不到 Dashboard 的
  * cookie / localStorage，也不能用 alert/confirm。所有后端调用都走
@@ -10,29 +10,44 @@ const $ = (id) => document.getElementById(id);
 
 const PANELS = {
   status: {
-    eyebrow: 'CORTICO BRIDGE · 概览',
     title: '概览',
-    desc: 'Cortico 连着没有，消息都在往哪儿走。',
+    desc: '查看桥接状态和已配置的平台。',
+  },
+  connection: {
+    title: '连接',
+    desc: '管理 QQ 和 Discord 共用的桥接令牌与模式。',
+  },
+  records: {
+    title: '消息记录',
+    desc: '查看桥接消息、会话和工具回执。',
+  },
+  qq: {
+    title: 'QQ',
+    desc: '管理 QQ 实例和主人私聊。',
+  },
+  discord: {
+    title: 'Discord',
+    desc: '管理 Discord 实例、主人私信和获准频道。',
   },
   groups: {
-    eyebrow: 'CORTICO BRIDGE · 群聊',
-    title: '群聊',
-    desc: '选「全部群」接管所有群；选「指定群」只处理名单里的群。',
+    title: 'QQ',
+    desc: '设置可接入的群聊和消息范围。',
   },
   private: {
-    eyebrow: 'CORTICO BRIDGE · 私聊',
-    title: '私聊',
-    desc: '谁可以私聊 Coo；QQ 私聊仍要求 bot 和对方是好友。',
+    title: 'QQ',
+    desc: '设置完整模式下可接入的 QQ 私聊。',
   },
   tools: {
-    eyebrow: 'CORTICO BRIDGE · 工具',
     title: '工具',
-    desc: '决定 Coo 能借用 AstrBot 的哪些手；保存后立刻同步给 Coo。',
+    desc: '选择 Coo 可以调用的 AstrBot 工具。',
+  },
+  images: {
+    title: '图片',
+    desc: '选择原图、视觉转述或关闭图片处理。',
   },
   voice: {
-    eyebrow: 'CORTICO BRIDGE · 语音',
     title: '语音',
-    desc: '听和说都借 AstrBot 的语音能力；Coo 只在值得开口时用语音。',
+    desc: '配置语音转写和语音回复。',
   },
 };
 
@@ -255,33 +270,37 @@ function marked(text, needle) {
 /* ---------------- 分页 ---------------- */
 
 const fullModePanels = ['groups', 'private', 'tools'];
+const qqPanels = ['qq', 'groups', 'private'];
+const settingsLoaders = new Map();
 
 function setPanel(name) {
-  if (fullModePanels.includes(name) && state.status?.mode !== 'full') return;
+  const meta = PANELS[name];
+  if (!meta || (fullModePanels.includes(name) && state.status?.mode !== 'full')) return;
   state.panel = name;
   if (state.armClear && name !== 'tools') disarmClear();
-  const meta = PANELS[name];
 
   document.querySelectorAll('.navitem').forEach((btn) => {
-    const on = btn.dataset.panel === name;
+    const on = btn.dataset.panel === (qqPanels.includes(name) ? 'qq' : name);
     btn.classList.toggle('active', on);
     if (on) btn.setAttribute('aria-current', 'page');
     else btn.removeAttribute('aria-current');
   });
-  $('panel-status').hidden = name !== 'status';
-  $('panel-groups').hidden = name !== 'groups';
-  $('panel-private').hidden = name !== 'private';
-  $('panel-tools').hidden = name !== 'tools';
-  $('panel-voice').hidden = name !== 'voice';
-  $('actionsStatus').hidden = name !== 'status';
+  for (const panel of Object.keys(PANELS)) $(`panel-${panel}`).hidden = name !== panel;
+  $('qqTabs').hidden = !qqPanels.includes(name) || state.status?.mode !== 'full';
+  for (const tab of document.querySelectorAll('[data-qq-tab]')) {
+    if (tab.dataset.openPanel === name) tab.setAttribute('aria-current', 'page');
+    else tab.removeAttribute('aria-current');
+  }
+  $('btnRestart').hidden = name !== 'connection';
+  $('btnReset').hidden = name !== 'records';
   $('actionsTools').hidden = name !== 'tools';
 
-  if (name !== 'status') clearOnceToken();
+  if (name !== 'connection') clearOnceToken();
 
-  $('eyebrow').textContent = meta.eyebrow;
   $('pageTitle').textContent = meta.title;
   $('pageDesc').textContent = meta.desc;
   $('scroll').scrollTop = 0;
+  settingsLoaders.get(name)?.();
 
   if (name === 'tools') {
     if (!state.loaded) {
@@ -305,14 +324,6 @@ function setPanel(name) {
   if (name === 'private' && !state.privateDirty) {
     loadPrivate().catch((e) => toast('读取私聊设置失败：' + (e.message || e), true));
   }
-}
-
-/* ---------------- 概览 ---------------- */
-
-function setPill(node, text, on) {
-  node.textContent = '';
-  const pill = el('span', 'pill ' + (on ? 'on' : 'off'), text);
-  node.appendChild(pill);
 }
 
 /* ---------------- token ---------------- */
@@ -518,8 +529,20 @@ function applyStatus(s) {
   const previousScope = state.status?.modeApprovalScopeVersion;
   s = { ...(state.status || {}), ...s };
   state.status = s;
-  const mode = s.mode === 'safe' ? '安全模式' : '完整模式';
+  if (!$('discordAccess').hidden) refreshDiscordBinding();
+  const mode = s.mode === 'safe' ? '安全模式' : s.mode === 'full' ? '完整模式' : '模式待同步';
   $('bridgeMode').textContent = s.connected ? `${mode} · 已与 Coo 同步` : `${mode} · 等待双端同步`;
+  $('connectionMode').textContent = $('bridgeMode').textContent;
+  $('overviewApproval').hidden = !s.modeApproval;
+  $('overviewConnection').hidden = !!s.modeApproval;
+  $('qqTabs').hidden = !qqPanels.includes(state.panel) || s.mode !== 'full';
+  for (const platform of ['qq', 'discord']) {
+    const routes = (s.platformRoutes || []).filter(item => item.channel === platform);
+    const enabled = routes.filter(item => item.enabled).length;
+    const label = $(`${platform}Summary`);
+    label.textContent = enabled ? `${enabled} 个实例已启用` : routes.length ? `${routes.length} 个实例待启用` : '暂无接入实例';
+    label.classList.toggle('is-enabled', enabled > 0);
+  }
   if (previousApproval !== s.modeApproval || previousScope !== s.modeApprovalScopeVersion) $('modeRisk').checked = false;
   $('modeApproval').hidden = !s.modeApproval;
   if (s.modeApprovalScope && (previousApproval !== s.modeApproval || previousScope !== s.modeApprovalScopeVersion)) {
@@ -529,6 +552,8 @@ function applyStatus(s) {
       `QQ 平台：${list(scope.platforms)}`,
       `群聊：${scope.groupScope === 'all' ? '全部群' : list(scope.groupAllow)}（${scope.groupMode === 'all' ? '全部消息' : '仅被叫到'}）`,
       `私聊：${{ all: '全部私聊', off: '关闭', allowlist: list(scope.privateAllow) }[scope.privateMode]}`,
+      ...Object.entries(scope.discordRoutes || {}).map(([platform, route]) =>
+        `Discord「${platform}」：频道 ${list(route.channels)} · 主人私聊 ${route.owner_umo || (route.owner_id ? '待绑定' : '未配置')}`),
       ...(scope.privateAdminBypass?.length ? [`允许的管理员私聊：${list(scope.privateAdminBypass)}`] : []),
       `可调用的工具：${list(scope.tools?.map(tool => tool.risk ? `${tool.name}（${tool.risk}）` : tool.name))}`,
       `桌面主人工具：${scope.desktopOwner || '关闭'}`,
@@ -544,11 +569,11 @@ function applyStatus(s) {
   $('modeNarrow').hidden = s.mode !== 'full';
   $('accessDesktop').hidden = s.mode !== 'full';
   for (const panel of fullModePanels) {
-    const button = document.querySelector(`[data-panel="${panel}"]`);
+    const button = document.querySelector(`[data-panel="${panel}"], [data-qq-tab][data-open-panel="${panel}"]`);
     if (button) button.hidden = s.mode !== 'full';
   }
   $('metricTools').hidden = s.mode !== 'full';
-  if (s.mode !== 'full' && fullModePanels.includes(state.panel)) setPanel('status');
+  if (s.mode !== 'full' && fullModePanels.includes(state.panel)) setPanel(qqPanels.includes(state.panel) ? 'qq' : 'status');
   $('btnVoiceSend').textContent = s.mode === 'safe' ? '发到主人私聊' : '发到最近的允许会话';
 
   const cls = lampClass(s);
@@ -558,9 +583,9 @@ function applyStatus(s) {
   $('railDot').className = 'navdot ' + cls;
 
   const text = s.connected
-    ? 'Cortico 已连接'
+    ? 'Coo 已连接'
     : s.listening
-      ? '等待 Cortico 连接'
+      ? '等待 Coo 连接'
       : s.listenError
         ? '监听失败'
         : '监听未开启';
@@ -570,7 +595,7 @@ function applyStatus(s) {
   const versionBadge = $('versionBadge');
   if (versionBadge) {
     versionBadge.textContent = s.version ? 'v' + s.version : 'v—';
-    versionBadge.title = s.version ? `Cortico 桥 v${s.version}` : 'Cortico 桥版本';
+    versionBadge.title = s.version ? `Coo 桥 v${s.version}` : 'Coo 桥版本';
   }
 
   const headState = $('headState');
@@ -601,7 +626,7 @@ function applyStatus(s) {
   } else if (s.listenError) {
     parts.push(`监听失败：${s.listenError}`);
   } else {
-    parts.push('去配置页打开「接管对话」');
+    parts.push('在「连接」页打开接管对话。');
   }
   $('connSub').textContent = parts.join(' · ');
 
@@ -617,67 +642,6 @@ function applyStatus(s) {
   if (!(state.panel === 'tools' && state.loaded)) {
     $('railTools').textContent = s.toolCount ? s.toolCount : '—';
   }
-
-  setPill($('kEnabled'), s.enabled ? '开' : '关', !!s.enabled);
-
-  $('kObserve').textContent = s.observeAll
-    ? '开 · 群里每条都交给 Coo'
-    : '关 · 只回被叫到的';
-
-  const groups = s.groups || [];
-  $('kGroups').textContent = groups.length ? groups.join('、') : '全部群';
-  $('kGroups').title = groups.length ? '只接管这些群' : '没有限制，所有群都按 B 模式处理';
-
-  const aliases = s.aliases || [];
-  $('kAliases').textContent = aliases.length ? aliases.join('、') : '只认 @';
-
-  $('kMax').textContent = s.maxSends ? `${s.maxSends} 条 / 分钟` : '不限';
-
-  const imageMode =
-    s.imageMode === 'image'
-      ? '原图'
-      : s.imageMode === 'off'
-        ? '关闭'
-        : s.imageMode === 'auto'
-          ? s.peerImages
-            ? '原图（自动）'
-            : '转述（自动）'
-          : '转述';
-  $('kImage').textContent = imageMode;
-  $('kImage').title =
-    s.imageMode === 'auto'
-      ? 'auto：对端模型能读图就传原图，否则让视觉模型转述'
-      : '在插件「配置」页的 image_mode 里调整';
-
-  const last = s.lastMessage;
-  if (last) {
-    const [lkind, lid] = String(last.conv || '').split(':');
-    const chName = lkind === 'private' ? 'QQ私聊' : 'QQ群';
-    const who = last.dir === 'out' ? 'Coo' : (last.sender || '未知');
-    $('chLast').textContent =
-      `${chName} · ${last.convName || lid || ''} · ${who}${last.owner ? ' · 主人' : ''}`;
-    $('chReply').textContent = s.replyWith || '—';
-  } else {
-    $('chLast').textContent = '—';
-    $('chReply').textContent = '—';
-  }
-
-  $('kVoiceIn').textContent = s.sttProvider
-    ? `${s.sttProvider}${s.sttEnabled ? '' : ' · 未启用'}`
-    : '未配置 STT';
-  $('kVoiceIn').title = s.sttProvider
-    ? s.sttEnabled
-      ? 'QQ 语音先用这个 STT Provider 转成文字，再交给 Coo'
-      : 'STT Provider 已就绪，但「转写群里的语音」还关着'
-    : '去 AstrBot 的模型提供商页添加一个 STT Provider（Whisper / SenseVoice 等）';
-  $('kVoiceOut').textContent = s.ttsProvider
-    ? `${s.ttsProvider}${s.ttsEnabled ? '' : ' · 未启用'}`
-    : '未配置 TTS';
-  $('kVoiceOut').title = s.ttsProvider
-    ? s.ttsEnabled
-      ? 'Cortico 可以让某条回复用语音发出'
-      : 'TTS Provider 已就绪，但插件里的「允许语音」还关着'
-    : '去 AstrBot 的模型提供商页添加一个 TTS Provider（Edge TTS / OpenAI TTS 等）';
 
   // /status 只给 tokenSet，明文一律按需走 /token（UI-002）。
   const tokenSet = !!s.tokenSet;
@@ -724,28 +688,10 @@ function applyStatus(s) {
   };
   renderRefusals();
 
-  const settings = document.querySelector('.settings');
-  if (settings && !settings.__bound) {
-    settings.__bound = true;
-    settings.addEventListener('toggle', () => {
-      const hint = $('settingsHint');
-      if (hint) hint.textContent = settings.open ? '收起' : '展开';
-    });
-  }
-
-  const admins = s.admins || [];
-  $('kOwner').textContent = admins.length ? admins.join('、') : '未配置';
-  $('kOwner').title = admins.length
-    ? '来自 AstrBot 管理员名单：截图权限和「主人」身份都从这里来'
-    : '去 AstrBot 的配置里填管理员 ID';
+  syncOwnerChoices(s.admins || []);
 
   const convs = s.conversations || [];
   state.convs = convs;
-  $('kConvs').textContent = convs.length ? `${convs.length} 个` : '还没有';
-  $('kConvs').title = convs
-    .map((c) => `${c.umo || c.key} · ${ago(c.age_sec)}`)
-    .join('\n');
-
   renderConvs();
   renderToolLog();
 }
@@ -790,7 +736,9 @@ function renderRows() {
     if (row.owner && !row.notice && row.dir !== 'out') {
       meta.appendChild(el('span', 'who owner', '· 主人'));
     }
-    const ch = kind === 'private' ? 'QQ私聊' : 'QQ群';
+    const ch = row.channel === 'discord'
+      ? (kind === 'private' ? 'Discord 私聊' : 'Discord 频道')
+      : (kind === 'private' ? 'QQ私聊' : 'QQ群');
     meta.appendChild(
       el('span', 'who', `· ${kind === 'private' ? ch : `${ch} ${convLabel(kind, id, row.convName)}`}`),
     );
@@ -869,6 +817,10 @@ function renderRefusals() {
 }
 
 function renderConvs() {
+  syncConversationChoices('accessTargetPreset', state.convs || [], '请选择会话');
+  const discord = $('discordPlatform').value;
+  const channels = (state.convs || []).filter(c => c.platform === discord && c.kind === 'group');
+  syncConversationChoices('discordChannelPreset', channels, '请选择频道');
   const host = $('convLog');
   if (!host) return;
   host.textContent = '';
@@ -1189,7 +1141,7 @@ function updateToolHero() {
   if (note) {
     note.hidden = !state.wildcard;
     note.textContent = state.wildcard
-      ? '当前用「*」授权：只包含在插件配置中明确标为读或写的工具。'
+      ? '已自动授权在「已审查的工具风险」中标为只读或写入的工具。编辑勾选后，保存为手动名单。'
       : '';
   }
 
@@ -2054,12 +2006,7 @@ function renderVoice(data) {
   $('sttEnabled').checked = !!data.sttEnabled;
   $('sttEnabled').disabled = !(providers.stt || []).length;
 
-  const limit = data.maxChars || 0;
-  $('ttsMeta').textContent = hasTts
-    ? limit
-      ? `超过 ${limit} 字改发文字`
-      : '不限字数'
-    : '先添加 TTS Provider';
+  $('ttsMaxChars').value = data.maxChars ?? 120;
 
   $('ttsEnabled').checked = !!data.enabled;
   $('ttsEnabled').disabled = !hasTts;
@@ -2147,15 +2094,120 @@ async function sendVoiceTest() {
   }
 }
 
+function syncOwnerChoices(admins, force = false) {
+  const picker = $('accessOwnerPreset');
+  const options = [...new Set(admins.map(String).filter(id => /^[0-9]{1,20}$/.test(id)))];
+  const serial = JSON.stringify(options);
+  if (!force && serial === picker.dataset.ids) return;
+
+  const owner = $('accessOwner').value.trim();
+  const manual = picker.dataset.manual === 'true';
+  picker.replaceChildren(new Option('请选择主人 QQ', ''),
+    ...options.map(id => new Option(id, id)), new Option('手动指定 QQ', 'manual'));
+  picker.dataset.ids = serial;
+  picker.value = manual ? 'manual' : options.includes(owner) ? owner : owner ? 'manual' : '';
+  $('accessOwnerManual').hidden = picker.value !== 'manual';
+}
+
+function syncConversationChoices(id, conversations, prompt) {
+  const picker = $(id);
+  const choices = conversations.filter(c => c.umo).map(c => [c.umo, c.name ? `${c.name} · ${c.umo}` : c.umo]);
+  const serial = JSON.stringify(choices);
+  if (serial === picker.dataset.choices) return;
+  picker.dataset.choices = serial;
+  picker.replaceChildren(new Option(choices.length ? prompt : '暂无已见过的会话', ''),
+    ...choices.map(([value, label]) => new Option(label, value)));
+}
+
+function addFromConversationPicker(picker, target) {
+  const selected = picker.value;
+  picker.value = '';
+  const values = target.value.split('\n').map(value => value.trim()).filter(Boolean);
+  if (!selected || values.includes(selected)) return;
+  target.value = [...values, selected].join('\n');
+  target.dispatchEvent(new Event('input'));
+}
+
+function refreshDiscordBinding() {
+  const platform = $('discordPlatform').value;
+  const channels = (state.convs || []).filter(c => c.platform === platform && c.kind === 'group');
+  syncConversationChoices('discordChannelPreset', channels, '请选择频道');
+  const route = state.status?.platformRoutes?.find(item => item.id === platform && item.channel === 'discord');
+  const enabled = $('discordEnabled').checked;
+  const owner = $('discordOwner');
+  const ownerChanged = owner.value.trim() !== owner.dataset.savedOwner;
+  $('discordBinding').textContent = !enabled ? '该实例暂未接入 Coo。' : ownerChanged
+    ? '先保存主人用户 ID，再用该账号私信机器人完成绑定。'
+    : route?.ownerBound
+    ? '主人私聊已绑定。'
+    : '启用接入并保存主人用户 ID，再用该账号给机器人发一条私信完成绑定。';
+  const full = state.status?.mode === 'full';
+  $('discordChannelsConfig').hidden = !full;
+  $('discordRiskRow').hidden = !full || !enabled;
+}
+
+function initDiscordAccess(data, post) {
+  const routes = (data.platformRoutes || []).filter(route => route.channel === 'discord');
+  if (!routes.length) {
+    $('discordAvailability').textContent = '尚未配置 Discord 机器人';
+    $('discordAvailabilityDetail').textContent = '请在 AstrBot 的「机器人」中添加 Discord 适配器，再重新打开本页选择实例。';
+    return;
+  }
+  $('discordUnavailable').hidden = true;
+  const select = $('discordPlatform');
+  select.replaceChildren(...routes.map(route => new Option(route.id, route.id)));
+  let settings = data.discordRoutes || {};
+  function fill() {
+    const current = settings[select.value] || {};
+    $('discordEnabled').checked = current.enabled === true;
+    $('discordOwner').value = current.owner_id || '';
+    $('discordOwner').dataset.savedOwner = current.owner_id || '';
+    $('discordChannels').value = (current.channels || []).join('\n');
+    $('discordRisk').checked = false;
+    refreshDiscordBinding();
+  }
+  select.addEventListener('change', fill);
+  const channelPicker = $('discordChannelPreset');
+  channelPicker.addEventListener('change', () => addFromConversationPicker(channelPicker, $('discordChannels')));
+  const controls = [select, $('discordEnabled'), $('discordOwner'), $('discordChannels'), $('discordRisk'), channelPicker];
+  for (const control of controls.slice(1, 4)) {
+    control.addEventListener('input', () => { $('discordRisk').checked = false; refreshDiscordBinding(); });
+  }
+  $('discordSave').addEventListener('click', async event => {
+    const payload = {
+      action: 'save-discord',
+      platform: select.value,
+      enabled: $('discordEnabled').checked,
+      ownerId: $('discordOwner').value,
+      channels: $('discordChannels').value.split('\n').map(value => value.trim()).filter(Boolean),
+      confirmed: $('discordRisk').checked,
+    };
+    for (const control of controls) control.disabled = true;
+    try {
+      const updated = await post(event.currentTarget, payload, 'Discord 接入已保存');
+      if (updated) {
+        settings = updated.discordRoutes || {};
+        fill();
+      }
+    } finally {
+      for (const control of controls) control.disabled = false;
+    }
+  });
+  $('discordAccess').hidden = false;
+  fill();
+}
+
 async function initAccess() {
   const save = $('accessSave');
   const risk = $('modeRisk');
   const approve = $('modeApprove');
   const accessRisk = $('accessRisk');
   const ownerInput = $('accessOwner');
+  const ownerPicker = $('accessOwnerPreset');
   const platformInput = $('accessPlatform');
   const toolsInput = $('accessTools');
   const targetsInput = $('accessTargets');
+  const targetPicker = $('accessTargetPreset');
   let savedAccess = {};
   let saving = false;
   const currentTargets = () => targetsInput.value.split('\n').map(v => v.trim()).filter(Boolean);
@@ -2195,8 +2247,10 @@ async function initAccess() {
     void post(e.currentTarget, { action: 'narrow' }, '已收窄为主人私聊，等待 Coo 同步');
   });
   const data = unwrap(await bridge.apiGet('access')) || {};
+  initDiscordAccess(data, post);
   savedAccess = data;
   ownerInput.value = data.ownerQQ || '';
+  syncOwnerChoices(state.status?.admins || [], true);
   platformInput.replaceChildren(new Option('请选择平台实例', ''), ...(data.platforms || []).map(platform => {
     const option = document.createElement('option');
     option.value = platform;
@@ -2210,6 +2264,15 @@ async function initAccess() {
   for (const field of [ownerInput, platformInput, toolsInput, targetsInput]) {
     field.addEventListener('input', () => { accessRisk.checked = false; refreshAccessForm(); });
   }
+  ownerPicker.addEventListener('change', () => {
+    const manual = ownerPicker.value === 'manual';
+    ownerPicker.dataset.manual = String(manual);
+    $('accessOwnerManual').hidden = !manual;
+    if (manual) ownerInput.focus();
+    else ownerInput.value = ownerPicker.value;
+    ownerInput.dispatchEvent(new Event('input'));
+  });
+  targetPicker.addEventListener('change', () => addFromConversationPicker(targetPicker, targetsInput));
   accessRisk.addEventListener('change', refreshAccessForm);
   refreshAccessForm();
   save.addEventListener('click', async () => {
@@ -2236,6 +2299,15 @@ async function initAccess() {
 
 function initVoice() {
   $('ttsEnabled').addEventListener('change', (e) => saveVoiceEnabled(e.target.checked));
+  $('ttsMaxChars').addEventListener('change', async (e) => {
+    if (!e.target.reportValidity()) return;
+    e.target.disabled = true;
+    try {
+      await saveVoiceField({ max_chars: e.target.valueAsNumber }, '已保存语音字数上限');
+    } finally {
+      e.target.disabled = false;
+    }
+  });
   $('ttsProvider').addEventListener('change', (e) =>
     saveVoiceField({ tts_provider_id: e.target.value }, e.target.value ? '已指定 TTS Provider' : '已改回 AstrBot 当前 TTS Provider'),
   );
@@ -2247,6 +2319,196 @@ function initVoice() {
   );
   $('btnVoicePreview').addEventListener('click', previewVoice);
   $('btnVoiceSend').addEventListener('click', sendVoiceTest);
+}
+
+function mountManagedSettings(panel, id, endpoint, { fill, read, confirm, afterSave }) {
+  const form = $(id);
+  const fields = form.querySelector('[data-settings-fields]');
+  const message = form.querySelector('[data-settings-message]');
+  const retry = form.querySelector('[data-settings-retry]');
+  const save = form.querySelector('[type=submit]');
+  const consent = form.querySelector('[data-setting-confirm]');
+  const checkbox = consent?.querySelector('input');
+  let baseline;
+  let busy = false;
+  const requiresConfirmation = draft => !!confirm?.(draft, baseline);
+  const sync = () => {
+    if (!baseline) return;
+    const draft = read();
+    const changed = JSON.stringify(draft) !== JSON.stringify(baseline);
+    const needsConfirm = changed && requiresConfirmation(draft);
+    if (consent) consent.hidden = !needsConfirm;
+    save.disabled = busy || !changed || needsConfirm && !checkbox?.checked;
+  };
+  const show = data => {
+    fill(data);
+    baseline = read();
+    if (checkbox) checkbox.checked = false;
+    fields.hidden = false;
+    retry.hidden = true;
+  };
+  const load = async () => {
+    if (baseline || busy) return;
+    busy = true;
+    retry.hidden = true;
+    message.textContent = '正在读取设置…';
+    try {
+      show(unwrap(await bridge.apiGet(endpoint)));
+      message.textContent = '';
+    } catch (error) {
+      message.textContent = `读取失败：${error.message || error}`;
+      retry.hidden = false;
+    } finally {
+      busy = false;
+      sync();
+    }
+  };
+  settingsLoaders.set(panel, load);
+  retry.addEventListener('click', load);
+  form.addEventListener('input', event => {
+    if (checkbox && event.target !== checkbox) checkbox.checked = false;
+    sync();
+  });
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (busy || save.disabled || !form.reportValidity()) return;
+    busy = true;
+    fields.disabled = true;
+    sync();
+    try {
+      const data = unwrap(await bridge.apiPost(endpoint, { ...read(), expected: baseline, confirmed: checkbox?.checked === true }));
+      show(data);
+      message.textContent = '已保存。';
+      afterSave?.(data);
+      void refresh().catch(() => {});
+    } catch (error) {
+      message.textContent = `保存失败：${error.message || error}`;
+    } finally {
+      fields.disabled = false;
+      busy = false;
+      sync();
+    }
+  });
+}
+
+const settingLines = input => input.value.split('\n').map(value => value.trim()).filter(Boolean);
+
+function selectedSettingsChip(label, remove) {
+  const chip = el('button', 'chip', `${label} ×`);
+  chip.type = 'button';
+  chip.setAttribute('aria-label', `移除 ${label}`);
+  chip.addEventListener('click', remove);
+  return chip;
+}
+
+function initManagedSettings() {
+  const local = '127.0.0.1';
+  const remote = '0.0.0.0';
+  const hostMode = $('settingHostMode');
+  hostMode.addEventListener('change', () => { $('settingHostRow').hidden = hostMode.value !== 'custom'; });
+  mountManagedSettings('connection', 'connectionSettings', 'settings/connection', {
+    fill(data) {
+      $('settingEnabled').checked = data.enabled;
+      hostMode.value = data.host === local ? 'local' : data.host === remote ? 'remote' : 'custom';
+      $('settingHost').value = data.host;
+      $('settingHostRow').hidden = hostMode.value !== 'custom';
+      $('settingPort').value = data.port;
+      $('settingMaxSends').value = data.maxSends;
+    },
+    read: () => ({
+      enabled: $('settingEnabled').checked,
+      host: hostMode.value === 'local' ? local : hostMode.value === 'remote' ? remote : $('settingHost').value.trim(),
+      port: $('settingPort').valueAsNumber, maxSends: $('settingMaxSends').valueAsNumber,
+    }),
+    confirm: (next, old) => (next.enabled !== old.enabled || next.host !== old.host || next.port !== old.port)
+      && (old.enabled || next.enabled && ![local, 'localhost', '::1', '[::1]'].includes(next.host.toLowerCase())),
+  });
+
+  const qqPicker = $('settingQqPlatform');
+  const qqForm = $('qqSettings');
+  let qqRows = [];
+  let selectedQq = [];
+  const drawQq = () => {
+    qqPicker.replaceChildren(new Option('请选择 QQ 实例', ''), ...qqRows
+      .filter(item => !selectedQq.includes(item.id))
+      .map(item => new Option(item.enabled ? item.id : `${item.id}（AstrBot 未启用）`, item.id)));
+    $('settingQqPicked').replaceChildren(...selectedQq.map(id => selectedSettingsChip(id, () => {
+      selectedQq = selectedQq.filter(value => value !== id);
+      drawQq();
+      qqForm.dispatchEvent(new Event('input', { bubbles: true }));
+    })));
+  };
+  qqPicker.addEventListener('change', () => {
+    if (!qqPicker.value) return;
+    selectedQq = [...selectedQq, qqPicker.value];
+    drawQq();
+    qqForm.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  mountManagedSettings('qq', 'qqSettings', 'settings/qq', {
+    fill(data) {
+      selectedQq = data.platforms;
+      qqRows = data.instances;
+      $('settingAliases').value = data.aliases.join('\n');
+      drawQq();
+    },
+    read: () => ({ platforms: selectedQq, aliases: settingLines($('settingAliases')) }),
+    confirm: (next, old) => next.platforms.some(id => !old.platforms.includes(id))
+      || state.status?.mode === 'full' && next.aliases.some(alias => !old.aliases.includes(alias)),
+    afterSave(data) {
+      const access = $('accessPlatform');
+      const current = access.value;
+      access.replaceChildren(new Option('请选择平台实例', ''), ...data.platforms.map(id => new Option(id, id)));
+      if (data.platforms.includes(current)) access.value = current;
+    },
+  });
+
+  const imageMode = $('settingImageMode');
+  const vision = $('settingVision');
+  const syncVision = () => { $('settingVisionRow').hidden = !['auto', 'describe'].includes(imageMode.value); };
+  imageMode.addEventListener('change', syncVision);
+  mountManagedSettings('images', 'imageSettings', 'settings/images', {
+    fill(data) {
+      imageMode.value = data.mode;
+      const providers = new Set(data.providers);
+      if (data.provider) providers.add(data.provider);
+      vision.replaceChildren(new Option('自动选择', ''), ...[...providers].map(id => new Option(id, id)));
+      vision.value = data.provider;
+      syncVision();
+    },
+    read: () => ({ mode: imageMode.value, provider: vision.value }),
+  });
+
+  const riskPicker = $('settingRiskTool');
+  const riskForm = $('toolRiskSettings');
+  let risks = new Map();
+  const drawRisks = () => $('settingRiskList').replaceChildren(...[...risks].sort(([a], [b]) => a.localeCompare(b)).map(([name, risk]) =>
+    selectedSettingsChip(`${name} · ${RISK[risk].label}`, () => {
+      risks.delete(name);
+      drawRisks();
+      riskForm.dispatchEvent(new Event('input', { bubbles: true }));
+    })));
+  $('addRiskTool').addEventListener('click', () => {
+    if (!riskPicker.value) return;
+    risks.set(riskPicker.value, $('settingRiskLevel').value);
+    drawRisks();
+    riskForm.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  mountManagedSettings('tools', 'toolRiskSettings', 'tools/risks', {
+    fill(data) {
+      risks = new Map(Object.entries(data.risks));
+      $('settingReviewedTools').checked = data.autoReviewed;
+      riskPicker.replaceChildren(new Option('请选择工具', ''), ...data.tools.map(name => new Option(name, name)));
+      drawRisks();
+    },
+    read: () => ({
+      entries: [...risks].map(([name, risk]) => `${name}:${risk}`).sort(),
+      autoReviewed: $('settingReviewedTools').checked,
+    }),
+    confirm: () => true,
+    afterSave() {
+      if (!state.toolsTouched) void loadTools().catch(() => {});
+    },
+  });
 }
 
 /* ---------------- 启动 ---------------- */
@@ -2262,8 +2524,8 @@ async function main() {
   // 宿主主题只做能力检测；没有就不碰用户/系统选择（UI-001）。
   adoptHostTheme();
 
-  document.querySelectorAll('.navitem').forEach((btn) => {
-    btn.addEventListener('click', () => setPanel(btn.dataset.panel));
+  document.querySelectorAll('[data-panel], [data-open-panel]').forEach((btn) => {
+    btn.addEventListener('click', () => setPanel(btn.dataset.panel || btn.dataset.openPanel));
   });
 
   $('btnRestart').addEventListener('click', () => act('restart', '已重开监听'));
@@ -2287,7 +2549,12 @@ async function main() {
   initTools();
   initToken();
   initVoice();
-  void initAccess().catch(e => toast('读取桥接授权失败：' + (e.message || e), true));
+  initManagedSettings();
+  void initAccess().catch(e => {
+    $('discordAvailability').textContent = '读取 Discord 实例失败';
+    $('discordAvailabilityDetail').textContent = '重新打开控制台后重试。';
+    toast('读取桥接授权失败：' + (e.message || e), true);
+  });
 
   // 状态读取失败只影响状态卡，不该让整场没有实时流（UI-007）。
   try {

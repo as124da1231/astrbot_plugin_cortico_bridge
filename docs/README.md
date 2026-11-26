@@ -2,7 +2,8 @@
 
 ## 第一次部署
 
-- [从零接入：Cortico 桥 + Coo + QQ](tutorial.md)
+- [新手图文教程：安装、连接和每项设置](beginner-guide.md)
+- [部署流程简表](tutorial.md)
 
 从安装插件、配置 World，到第一条私聊、群聊和工具调用。
 

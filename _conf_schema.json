@@ -3,12 +3,19 @@
     "description": "接管对话",
     "type": "bool",
     "default": false,
-    "hint": "打开后，QQ 消息交给 Cortico 想，AstrBot 自己的模型不再参与这一轮。Cortico 没连上时自动退回 AstrBot 原有行为。"
+    "hint": "打开后，获准接入的消息交给 Cortico，AstrBot 自己的模型不再参与这一轮。Cortico 没连上时自动退回 AstrBot 原有行为。",
+    "invisible": true
   },
   "bridge_mode": {
     "description": "当前已批准的桥接模式",
     "type": "string",
     "default": "",
+    "invisible": true
+  },
+  "discord_routes": {
+    "description": "Discord 机器人实例的接入授权",
+    "type": "dict",
+    "default": {},
     "invisible": true
   },
   "bridge_platforms": {
@@ -17,7 +24,8 @@
     "default": [
       "default"
     ],
-    "hint": "只接管这里的平台 ID（UMO 第一段）。webchat/console、default1 等不在列表里的平台永远不会被桥拦截或 stop。默认只接管 default。"
+    "hint": "这里保留 QQ 平台实例的接入范围，填写 UMO 第一段的实例 ID。Discord 在桥插件概览页单独设置。",
+    "invisible": true
   },
   "group_scope": {
     "description": "群范围：全部群 / 指定群",
@@ -28,13 +36,15 @@
       "allowlist"
     ],
     "default": "inherit",
-    "hint": "inherit=沿用旧群名单，无旧名单时接全部群；all=所有群；allowlist=只处理 group_allow。要清除旧名单，请在插件的群聊页保存全部群。"
+    "hint": "inherit=沿用旧群名单，无旧名单时接全部群；all=所有群；allowlist=只处理 group_allow。要清除旧名单，请在插件的群聊页保存全部群。",
+    "invisible": true
   },
   "group_allow": {
     "description": "指定群名单",
     "type": "list",
     "default": [],
-    "hint": "仅在 group_scope=allowlist 时生效；指定群模式下不能为空。一项一个 UMO 或旧群号；多平台请提交完整 UMO（platform:GroupMessage:群号）。"
+    "hint": "仅在 group_scope=allowlist 时生效；指定群模式下不能为空。一项一个 UMO 或旧群号；多平台请提交完整 UMO（platform:GroupMessage:群号）。",
+    "invisible": true
   },
   "group_mode": {
     "description": "群消息范围：仅被叫 / 全部消息",
@@ -45,25 +55,29 @@
       "all"
     ],
     "default": "inherit",
-    "hint": "inherit=沿用旧 observe_all，未设置时仅处理点名；mention=仅被叫时交给 Cortico；all=处理群里的全部消息。"
+    "hint": "inherit=沿用旧 observe_all，未设置时仅处理点名；mention=仅被叫时交给 Cortico；all=处理群里的全部消息。",
+    "invisible": true
   },
   "name_aliases": {
     "description": "算作叫到自己的称呼",
     "type": "list",
     "default": [],
-    "hint": "除 @ 之外，正文里出现这些词也算点名，例如 Coo、库。群消息范围=mention 时命中称呼会唤醒并交给 Coo；只写不容易误伤的称呼。"
+    "hint": "除 @ 之外，正文里出现这些词也算点名，例如 Coo、库。群消息范围=mention 时命中称呼会唤醒并交给 Coo；只写不容易误伤的称呼。",
+    "invisible": true
   },
   "listen_port": {
     "description": "桥的监听端口",
     "type": "int",
     "default": 17999,
-    "hint": "WS 直连使用此端口。使用 WSS 代理时，Coo 填代理的端口，桥的监听端口可留在回环或私网。"
+    "hint": "WS 直连使用此端口。使用 WSS 代理时，Coo 填代理的端口，桥的监听端口可留在回环或私网。",
+    "invisible": true
   },
   "listen_host": {
     "description": "桥的监听地址",
     "type": "string",
     "default": "127.0.0.1",
-    "hint": "默认监听 127.0.0.1。跨机直连或代理在独立容器时，填写对端可达的监听地址。非回环监听必须设置桥接令牌。"
+    "hint": "默认监听 127.0.0.1。跨机直连或代理在独立容器时，填写对端可达的监听地址。非回环监听必须设置桥接令牌。",
+    "invisible": true
   },
   "token": {
     "description": "校验 token",
@@ -71,37 +85,43 @@
     "default": "",
     "secret": true,
     "obvious_hint": true,
-    "hint": "必须与 Cortico 部署里 worlds.astrbot.token 完全一致。只监听 127.0.0.1 时可以留空；监听 0.0.0.0 或任何非回环地址时必填，否则桥拒绝启动。"
+    "hint": "必须与 Cortico 部署里 worlds.astrbot.token 完全一致。只监听 127.0.0.1 时可以留空；监听 0.0.0.0 或任何非回环地址时必填，否则桥拒绝启动。",
+    "invisible": true
   },
   "max_sends_per_minute": {
     "description": "每分钟发送上限",
     "type": "int",
     "default": 30,
-    "hint": "防止 Cortico 失控刷屏。0 表示不限。"
+    "hint": "防止 Cortico 失控刷屏。0 表示不限。",
+    "invisible": true
   },
   "owner_tool_qq": {
     "description": "主人 QQ",
     "type": "string",
     "default": "",
-    "hint": "用于安全模式的主人私聊。若为桌面对话启用主人工具，该 QQ 还须在 AstrBot 管理员名单内。"
+    "hint": "用于安全模式的主人私聊。若为桌面对话启用主人工具，该 QQ 还须在 AstrBot 管理员名单内。",
+    "invisible": true
   },
   "owner_platform": {
     "description": "主人 QQ 所在平台实例",
     "type": "string",
     "default": "",
-    "hint": "多个平台时选择主人所在的 QQ 平台实例。也可在插件概览页设定。"
+    "hint": "多个平台时选择主人所在的 QQ 平台实例。也可在插件概览页设定。",
+    "invisible": true
   },
   "desktop_tools_enabled": {
     "description": "允许 Coo 桌面使用主人工具",
     "type": "bool",
     "default": false,
-    "hint": "完整模式且桥接令牌已鉴权时生效。仍受 AstrBot 工具名单和主人权限约束。"
+    "hint": "完整模式且桥接令牌已鉴权时生效。仍受 AstrBot 工具名单和主人权限约束。",
+    "invisible": true
   },
   "desktop_send_targets": {
     "description": "允许 Coo 桌面主动发送的会话",
     "type": "list",
     "default": [],
-    "hint": "完整模式下才生效。每项填写一个完整的 QQ 会话 UMO，机器人身份发送。"
+    "hint": "完整模式下才生效。每项填写一个完整的 QQ 会话 UMO，机器人身份发送。",
+    "invisible": true
   },
   "desktop_auth_reviewed": {
     "description": "桌面权限迁移已确认",
@@ -121,7 +141,8 @@
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "只在「转述」这条路上用：把图片描述成文字再交给 Cortico。留空则自动挑一个带 vision / VL 的模型。"
+    "hint": "只在「转述」这条路上用：把图片描述成文字再交给 Cortico。留空则自动挑一个带 vision / VL 的模型。",
+    "invisible": true
   },
   "image_mode": {
     "description": "群里的图片怎么给 Cortico",
@@ -133,49 +154,57 @@
       "off"
     ],
     "default": "auto",
-    "hint": "auto=对端声明能读图就传原图，否则尝试视觉转述。image=始终传原图（用户显式选择，即使对端未声明支持也照发）；原图会先经 AstrBot 处理：GIF 切成 3×3 帧拼图、大图压到 provider_settings.image_compress_options.max_size（默认 1280）。describe=始终转述成文字；off=只留 [图片] 占位，不花任何视觉调用。"
+    "hint": "auto=对端声明能读图就传原图，否则尝试视觉转述。image=始终传原图（用户显式选择，即使对端未声明支持也照发）；原图会先经 AstrBot 处理：GIF 切成 3×3 帧拼图、大图压到 provider_settings.image_compress_options.max_size（默认 1280）。describe=始终转述成文字；off=只留 [图片] 占位，不花任何视觉调用。",
+    "invisible": true
   },
   "tts_enabled": {
     "description": "允许 Coo 用语音说话",
     "type": "bool",
     "default": false,
-    "hint": "打开后，Cortico 可以要求某条回复用语音发出。语音由下面指定的 TTS Provider 合成；没配 Provider 时会自动退回文字。"
+    "hint": "打开后，Cortico 可以要求某条回复用语音发出。语音由下面指定的 TTS Provider 合成；没配 Provider 时会自动退回文字。",
+    "invisible": true
   },
   "tts_provider_id": {
     "description": "用哪个 TTS Provider",
     "type": "string",
     "default": "",
-    "hint": "填 AstrBot 里 TTS Provider 的 id，例如 edge_tts。留空则用 AstrBot 的「当前 TTS Provider」。填了之后不再依赖 AstrBot 的全局语音开关。"
+    "hint": "填 AstrBot 里 TTS Provider 的 id，例如 edge_tts。留空则用 AstrBot 的「当前 TTS Provider」。填了之后不再依赖 AstrBot 的全局语音开关。",
+    "invisible": true
   },
   "tts_max_chars": {
     "description": "语音最长字数",
     "type": "int",
     "default": 120,
-    "hint": "超过这个长度的文字会改用普通文字发送，避免一条语音太长。0 表示不限制。"
+    "hint": "超过这个长度的文字会改用普通文字发送，避免一条语音太长。0 表示不限制。",
+    "invisible": true
   },
   "stt_enabled": {
     "description": "把 QQ 语音转成文字",
     "type": "bool",
     "default": false,
-    "hint": "打开后，群里发来的语音会先用下面指定的 STT Provider 转写，再交给 Cortico。只转写本插件接管的群，不依赖 AstrBot 的全局 STT 开关。"
+    "hint": "打开后，群里发来的语音会先用下面指定的 STT Provider 转写，再交给 Cortico。只转写本插件接管的群，不依赖 AstrBot 的全局 STT 开关。",
+    "invisible": true
   },
   "stt_provider_id": {
     "description": "用哪个 STT Provider",
     "type": "string",
     "default": "",
-    "hint": "填 AstrBot 里 STT Provider 的 id，例如 siliconflow-sensevoice。留空则用 AstrBot 的「当前 STT Provider」。"
+    "hint": "填 AstrBot 里 STT Provider 的 id，例如 siliconflow-sensevoice。留空则用 AstrBot 的「当前 STT Provider」。",
+    "invisible": true
   },
   "tools_allow": {
     "description": "允许 Cortico 调用的 AstrBot 工具",
     "type": "list",
     "default": [],
-    "hint": "一行一个工具名。* 只包含管理员在 tools_risks 中明确标记为 read 或 write 的工具。其余工具必须点名，并通过管理员身份和桥授权。"
+    "hint": "一行一个工具名。* 只包含管理员在 tools_risks 中明确标记为 read 或 write 的工具。其余工具必须点名，并通过管理员身份和桥授权。",
+    "invisible": true
   },
   "tools_risks": {
     "description": "已审查的工具风险",
     "type": "list",
     "default": [],
-    "hint": "每行填写 工具名:read 或 工具名:write。只标记已确认行为的工具；未标记的工具一律按执行类处理。"
+    "hint": "每行填写 工具名:read 或 工具名:write。只标记已确认行为的工具；未标记的工具一律按执行类处理。",
+    "invisible": true
   },
   "private_mode": {
     "description": "私聊策略",
@@ -186,19 +215,22 @@
       "all"
     ],
     "default": "all",
-    "hint": "off=不接私聊；allowlist=只接 private_allow 里的 UMO/QQ 号；all=所有能私聊到 bot 的人都接。"
+    "hint": "off=不接私聊；allowlist=只接 private_allow 里的 UMO/QQ 号；all=所有能私聊到 bot 的人都接。",
+    "invisible": true
   },
   "private_allow": {
     "description": "私聊白名单",
     "type": "list",
     "default": [],
-    "hint": "一行一个 UMO（default:FriendMessage:QQ号）或 QQ 号。private_mode=allowlist 时生效；空列表表示没人能私聊。"
+    "hint": "一行一个 UMO（default:FriendMessage:QQ号）或 QQ 号。private_mode=allowlist 时生效；空列表表示没人能私聊。",
+    "invisible": true
   },
   "private_admin_bypass": {
     "description": "管理员私聊豁免",
     "type": "bool",
     "default": true,
-    "hint": "管理员即使不在 private_allow 里也可以私聊。"
+    "hint": "管理员即使不在 private_allow 里也可以私聊。",
+    "invisible": true
   },
   "private_deny": {
     "description": "私聊被拒时",
@@ -208,7 +240,8 @@
       "astrbot"
     ],
     "default": "ignore",
-    "hint": "ignore=静默忽略；astrbot=不推给 Cortico，交回 AstrBot 自己的模型。"
+    "hint": "ignore=静默忽略；astrbot=不推给 Cortico，交回 AstrBot 自己的模型。",
+    "invisible": true
   },
   "observe_all": {
     "description": "旧版 B 模式（自动迁移，勿改）",

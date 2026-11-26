@@ -1,8 +1,8 @@
-# Cortico 桥
+# Coo 桥控制台
 
-<img src="./logo.png" width="88" alt="Cortico 桥" align="right">
+<img src="./logo.png" width="88" alt="Coo 桥控制台" align="right">
 
-**当前版本 1.3.9**
+**当前版本 1.3.11，配套 Coo World 1.3.11**
 
 把 AstrBot 收到的 QQ 消息转给 [Cortico](https://github.com/Pal-AI-Lab/Cortico) 的人格，再把它的回复发回群里。  
 *Bridge QQ messages from AstrBot to [Cortico](https://github.com/Pal-AI-Lab/Cortico) persona and send replies back to QQ.*
@@ -18,13 +18,21 @@ QQ 消息组件按原始顺序交给配套 Coo 扩展。引用可带适配器取
 
 ### 从旧版升级
 
-备份插件配置及 `plugin_data/astrbot_plugin_cortico_bridge` 后，将两端一起更新到 1.3.9。旧协议对端会被拒绝，升级窗口内 QQ 由 AstrBot 原流程处理。旧群名单和已保存的桥地址继续生效。完整模式下可在插件「群聊」页检查实际范围。
+备份插件配置及 `plugin_data/astrbot_plugin_cortico_bridge` 后，将两端一起更新到 1.3.11，即可使用平台实例上报和 Discord。QQ 的群名单和已保存的桥地址继续生效。完整模式下可在插件「群聊」页检查实际范围。
 
-已有主人 QQ 和记下的会话可沿用。旧版若使用独立主人工具令牌，在「概览」核对现有绑定，再确认一枚桥接令牌是否可以使用桌面主人工具。桌面主动发送可添加要授权的具体会话。已有工具名单可以沿用。
+已有主人 QQ 和记下的会话可沿用。旧版若使用独立主人工具令牌，在「QQ」页核对现有绑定，再确认一枚桥接令牌是否可以使用桌面主人工具。桌面主动发送可添加要授权的具体会话。已有工具名单可以沿用。
 
 两种模式均使用原版 Coo 的主会话。安全模式允许指定主人在私聊中继续桌面对话。完整模式开放已授权的群和私聊，QQ 回复可能提到 Coo 桌面对话内容。
 
-## 群聊与私聊
+## Discord 接入
+
+1. 在 AstrBot「机器人」里配置并启用 [Discord 适配器](https://docs.astrbot.app/platform/discord.html)。Discord Bot Token 保存在 AstrBot 的适配器设置中。
+2. 在「Coo 桥控制台」的「Discord」页选择该实例，填主人的 Discord 用户 ID 并启用接入。主人首次向机器人发私信时，桥会绑定该事件的实际私聊 UMO。绑定后再发一条消息即可聊天。
+3. 在完整模式下可另填允许的频道 ID 或完整 UMO，每行一个。确认共享 Coo 主对话后保存。频道里直接 @ 机器人才能进 Coo，本地和平台回复仍分别走各自出口。
+
+Discord 和 QQ 通过同一条桥连接。私聊和频道使用 AstrBot 的 UMO 路由，原有 QQ 白名单继续有效。Coo 一端也需支持 Discord 才会接收 Discord 消息。
+
+## QQ 群聊与私聊
 
 配置里的会话键优先用 AstrBot 的 UMO：`平台:消息类型:会话ID`。
 
@@ -90,7 +98,7 @@ WebSocket 单帧上限          16MB
 工具身份有两条路径，**都不信任 World 帧里传来的 `role` / `owner`**：
 
 - **QQ 发言者**：这一轮由 QQ 消息触发时，用触发消息的事件执行，身份就是发言者；管理员工具由 AstrBot 权限层拦。
-- **Coo 桌面**：在 AstrBot 插件「概览」绑定管理员 QQ，单独开启桌面主人工具。桌面主动发 QQ 使用机器人身份，另设目标。两项都使用同一枚桥接令牌。
+- 在 AstrBot「Coo 桥控制台 → QQ」绑定管理员 QQ，单独开启桌面主人工具。桌面主动发 QQ 使用机器人身份，另设目标。两项都使用同一枚桥接令牌。
 
 权限拒绝、工具停用、不在白名单、这一轮已过期，都会**如实失败**并说明原因，不会回「成功」。工具异常原文只进日志，回给模型的是固定短句。
 
@@ -118,15 +126,15 @@ AstrBot 自己的模型不参与这些轮次；桥没连上时插件什么都不
 
 ## 文档
 
-- [从零接入教程](docs/tutorial.md)
+- [新手图文教程：安装、连接和每项设置](docs/beginner-guide.md)
 - [架构与边界](docs/architecture.md)
 - [配置、错误码与接口](docs/reference.md)
 - [接入安全模型](docs/security.md)
 
 ## 安装
 
-1. 在 AstrBot 插件市场搜索「Cortico 桥」，或把本仓库放进 `data/plugins/`。
-2. 重启 AstrBot，打开插件配置。
+1. 在 AstrBot 安装 `astrbot_plugin_cortico_bridge`，或把本仓库放进 `data/plugins/`。安装后在插件详情中打开「Coo 桥控制台」。
+2. 确认插件已加载，打开「Coo 桥控制台 → 连接」。
 3. 打开「接管对话」。同机 Coo 用默认的 `127.0.0.1`，不需要填 token。
 4. 跨机连接时设置一枚桥接令牌。直连在 Coo 填 `ws://服务器IP:17999` 和同一个令牌。使用 TLS 代理时填 `wss://` 地址，代理与桥之间可走回环或私网。WS 本身是明文，两种连接均校验令牌。
 
@@ -134,15 +142,15 @@ AstrBot 自己的模型不参与这些轮次；桥没连上时插件什么都不
 
 ## 配置
 
-全部走 AstrBot 原生配置页（`_conf_schema.json`），没有第二套界面。
+桥接设置从 AstrBot 侧栏的「Coo 桥控制台」保存到原有插件配置。下面的字段可用于对照旧版和迁移排查。
 
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | 关 | 接管开关。关着时插件完全不介入 |
 | `bridge_platforms` | `default` | 只接管这些 AstrBot 平台；`webchat`/`console`/`default1` 等平台不会被拦截或推送 |
-| `group_scope` | `all` | 群范围：`all` 全部群 / `allowlist` 指定群 |
+| `group_scope` | `inherit` | 沿用旧群名单，也可选 `all` 全部群或 `allowlist` 指定群 |
 | `group_allow` | 空 | 指定群名单，一行一个 UMO 或旧群号；只在 `group_scope=allowlist` 时生效，空名单不能保存 |
-| `group_mode` | `mention` | 群消息范围：`mention` 只交 @ / 回复 / 命中称呼的；`all` 每条群消息都交 |
+| `group_mode` | `inherit` | 沿用旧唤醒设置，也可选 `mention` 仅被叫到或 `all` 全部消息 |
 | `name_aliases` | 空 | 除 @ 之外算「叫到我」的称呼，例如 `Coo`、`库`；`mention` 下命中会唤醒并交给 Coo |
 | `listen_port` | `17999` | 桥监听的端口。WSS 代理场景下，公网只需访问代理入口 |
 | `listen_host` | `127.0.0.1` | 默认只允许本机连。直连时填写 Coo 可访问的地址，使用代理时填写代理可访问的地址 |
@@ -164,12 +172,7 @@ AstrBot 自己的模型不参与这些轮次；桥没连上时插件什么都不
 
 ## 主人是谁
 
-插件不维护第二份权限名单：AstrBot 的 `admins_id` 就是「主人」。
-
-- 握手时把 `admins` 告诉 Cortico，界面上给这些人加 `(主人)` 标记；
-- 只有主人说话的那一轮才允许 Cortico 截屏（配合 Coopanion 的 CUA）；
-- 非管理员说话会立刻收回授权；
-- Coo 对话轮次需完成上方的主人工具授权。群聊与私聊的普通转发沿用原连接设置。
+「QQ → 主人私聊」绑定发件人的 QQ 和机器人实例，用于安全模式的接入。AstrBot 的全局管理员名单继续提供工具授权所需的管理员资格。允许桌面对话使用主人工具时，绑定的主人还须在该管理员名单内。Discord 主人私信在「Discord」页单独绑定。
 
 ## 能力
 
@@ -184,9 +187,9 @@ AstrBot 自己的模型不参与这些轮次；桥没连上时插件什么都不
 
 ## 控制台
 
-插件详情页里是一个跟着 Cortico/Coopanion 视觉走的控制台，左侧分「概览 / 群聊 / 私聊 / 工具 / 语音」，纸面底色、细线、等宽字体，浅色深色都跟随 AstrBot。
+桥接配置集中在 AstrBot 侧栏的「Coo 桥控制台」。连接页管理接管开关、监听、发送上限、令牌和桥接模式；QQ 与 Discord 各有接入页。完整模式下，QQ 页提供群聊和私聊范围，「工具」页管理授权与风险分类。图片、语音和消息记录各有独立入口。所有设置继续写入原来的插件配置，由 AstrBot 管理的日志级别仍在通用插件配置中调整。
 
-- **概览**：连接状态、推送/发出/失败计数、会话流水（可按收到/发出/叫到筛）、最近 12 次工具调用、生效中的设置。配置仍然只读，改值请去 AstrBot 的配置页。
+- 概览显示连接状态和流量计数。「消息记录」提供会话流水、工具回执和最近会话。
 - **群聊**：`group_scope` / `group_allow` / `group_mode`，可直接保存。
 - **私聊**：`private_mode` / `private_allow` / 管理员绕过。
 - **工具**：按来源插件分组，搜索工具名/参数/说明，按风险筛选，只看已选，组内全选。改完有固定保存条，可撤销；`Ctrl+S` 保存，`/` 聚焦搜索。停用的工具会标出来，最近用过的会带一个绿点。
@@ -206,7 +209,7 @@ token 的复制 / 生成 / 清除都走 `POST /token`：
 
 - `generate`：`secrets.token_urlsafe(32)` 写回配置并重开监听；
 - `clear`：清空 token，非回环监听会因缺 token 停止监听；
-- 复制：控制台「概览」设置表有「复制 / 生成（轮换） / 清除」三个按钮，复制走 `GET /token`（需要 AstrBot 管理后台鉴权）；生成后会一次性显示新 token，方便复制。
+- 复制：控制台「连接」页的「访问令牌」提供复制、生成（轮换）和清除。复制走需要 AstrBot 管理后台鉴权的 `GET /token`，生成后会一次性显示新 token。
 
 ## 安全
 
@@ -219,7 +222,6 @@ token 的复制 / 生成 / 清除都走 `POST /token`：
 - 未握手前不会收到任何 QQ 消息，也不能发 `send` / `tool` 帧。
 - **`enabled=关` 时不开放端口**；发送和工具调用也会被拒绝（`door_closed`）。
 - 桥是明文 WebSocket。跨公网时建议再套 TLS 反代或走 VPN/专网。
-- 截图走 Coopanion 的 CUA，只有主人在说话时放行。
 
 ## 协议帧
 

@@ -119,7 +119,7 @@ class ToolRegistry:
                 out.append(name)
         return out
 
-    def _declared_risks(self) -> dict[str, str]:
+    def declared_risks(self) -> dict[str, str]:
         raw = self._config().get("tools_risks")
         entries = raw if isinstance(raw, list) else []
         risks = {}
@@ -133,7 +133,7 @@ class ToolRegistry:
     # ---------- 清单 ----------
 
     def catalog(self, force: bool = False) -> list[dict]:
-        risks = self._declared_risks()
+        risks = self.declared_risks()
         now = time.time()
         if not force and self._catalog and now - self._catalog_at < CATALOG_TTL:
             return [{**row, "risk": risks.get(row["name"], "exec")} for row in self._catalog]

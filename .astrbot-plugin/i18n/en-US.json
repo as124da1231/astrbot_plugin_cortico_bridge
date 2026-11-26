@@ -1,7 +1,7 @@
 {
   "views": {
     "status": {
-      "title": "Console",
+      "title": "Coo Bridge Console",
       "description": "Connection, message stream, group and private scopes, tool permissions, and voice settings."
     }
   }

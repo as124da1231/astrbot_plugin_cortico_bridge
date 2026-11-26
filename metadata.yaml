@@ -1,10 +1,10 @@
 name: astrbot_plugin_cortico_bridge
-display_name: Cortico 桥
-short_desc: 让 Cortico 的 Persona 在 QQ 群和私聊里说话，AstrBot 只当手脚 / Bridge QQ groups and private chats to a Cortico persona while AstrBot handles plugins
+display_name: Coo 桥控制台
+short_desc: 通过 AstrBot 将 QQ 和 Discord 接入 Coo / Connect QQ and Discord to Coo through AstrBot
 desc: >-
-  把 AstrBot 的 QQ 群聊和私聊接到 Coo。支持引用、合并转发、图片、按需读取语音原文件、语音转写和语音回复。AstrBot 管理接管范围与工具授权。
-  / Bridges QQ groups and private chats to Coo, with quotes, merged forwards, images, on-demand voice files, transcription, and voice replies.
-version: 1.3.9
+  把 AstrBot 的 QQ 群聊和私聊、获准的 Discord 频道和主人私聊接到 Coo。QQ 支持引用、合并转发、图片、按需读取语音原文件、语音转写和语音回复。AstrBot 管理接管范围与工具授权。
+  / Bridges QQ groups and private chats, plus approved Discord channels and owner DMs, to Coo. QQ supports quotes, merged forwards, images, and voice.
+version: 1.3.11
 author: as124da1231
 repo: https://github.com/as124da1231/astrbot_plugin_cortico_bridge
 entry: main.py
@@ -12,6 +12,7 @@ license: MIT
 astrbot_version: ">=4.29.1"
 support_platforms:
   - aiocqhttp
+  - discord
 tags:
   - bridge
   - agent
