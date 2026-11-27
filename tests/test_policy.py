@@ -950,7 +950,8 @@ class VoiceTestTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_safe_voice_test_selects_only_owner_and_rechecks_before_send(self):
         owner = "default:FriendMessage:111"
-        bridge = make_bridge({"tts_enabled": True, "owner_tool_qq": "111"}, delivery=FakeDelivery([
+        bridge = make_bridge({"tts_enabled": True, "owner_tool_qq": "111",
+                              "owner_sessions": {"default": {"user_id": "111", "umo": owner}}}, delivery=FakeDelivery([
             {"key": "group:1", "umo": "default:GroupMessage:1"}, {"key": "private:111", "umo": owner},
         ]))
         bridge.server.mode = "safe"
@@ -1226,8 +1227,8 @@ class ConsoleSettingsTests(unittest.IsolatedAsyncioTestCase):
         with fake_responses(), fake_request("POST", {**draft, "confirmed": True}):
             reply = await bridge.page_qq_settings()
         self.assertEqual(reply["status"], 200)
-        self.assertEqual(bridge._owner_umo(), "default:FriendMessage:111")
         self.assertEqual(bridge.config["owner_platform"], "default")
+        self.assertEqual(bridge._instance_owner("default"), ("111", ""))
 
     async def test_image_settings_offer_existing_providers_and_reject_unknown_ids(self):
         context = FakeContext()
@@ -1275,14 +1276,54 @@ class DiscordRouteTests(unittest.IsolatedAsyncioTestCase):
             "owner_tool_qq": "111", "owner_platform": "default",
         }, context=context)
         self.assertEqual(bridge._platform_routes(), [
-            {"id": "default", "channel": "qq", "enabled": True, "ownerBound": True},
-            {"id": "qq-disabled", "channel": "qq", "enabled": False, "ownerBound": False},
-            {"id": "discord", "channel": "discord", "enabled": False, "ownerBound": False},
+            {"id": "default", "channel": "qq", "adapterType": "aiocqhttp", "name": "default", "enabled": True, "ownerBound": False},
+            {"id": "qq-disabled", "channel": "qq", "adapterType": "aiocqhttp", "name": "qq-disabled", "enabled": False, "ownerBound": False},
+            {"id": "web", "channel": "webchat", "adapterType": "webchat", "name": "web", "enabled": False, "ownerBound": False},
+            {"id": "discord", "channel": "discord", "adapterType": "discord", "name": "discord", "enabled": False, "ownerBound": False},
         ])
+
+    async def test_instances_bind_and_forward_real_private_umos_without_sharing_scope(self):
+        bridge = self.make_discord_bridge()
+        bridge.server.mode = "safe"
+
+        def qq_private():
+            event = FakeEvent("你好", private=True, sender_id="111", message_id="701")
+            event.unified_msg_origin = "default:FriendMessage:qq-native:another-segment"
+            return event
+
+        forged = self.event(private=True)
+        forged.unified_msg_origin = qq_private().unified_msg_origin
+        await bridge.observe_all_messages(forged)
+        self.assertEqual(bridge.config.saves, 0)
+
+        await bridge.observe_all_messages(qq_private())
+        await bridge.observe_all_messages(self.event(private=True))
+        self.assertEqual(bridge.config["owner_sessions"], {
+            "default": {"user_id": "111", "umo": qq_private().unified_msg_origin},
+            "my-discord": {"user_id": "111", "umo": "my-discord:FriendMessage:600"},
+        })
+        self.assertFalse(bridge._event_allowed(forged))
+
+        for event in (qq_private(), self.event(private=True)):
+            await bridge.observe_all_messages(event)
+            await bridge.on_llm_request(event, None)
+        self.assertEqual([frame["umo"] for frame in bridge.server.pushed], [
+            qq_private().unified_msg_origin, "my-discord:FriendMessage:600",
+        ])
+
+        with fake_responses(), fake_request("POST", {"action": "save", "ownerQQ": "222", "ownerPlatform": "default"}):
+            result = await bridge.page_access()
+        self.assertEqual(result["status"], 200)
+        self.assertFalse(bridge._event_allowed(qq_private()))
+        self.assertTrue(bridge._event_allowed(self.event(private=True)))
+        bridge.server.mode = "full"
+        masquerading = qq_private()
+        masquerading.get_platform_id = lambda: "my-discord"
+        self.assertFalse(bridge._event_allowed(masquerading))
 
     def make_discord_bridge(self, *, supports_discord=True, bound=""):
         context = FakeContext()
-        context.get_config = lambda: {
+        context.get_config = lambda **_: {
             "admins_id": ["111"],
             "platform": [{"id": "my-discord", "type": "discord", "enable": True}],
         }
@@ -1361,3 +1402,91 @@ class DiscordRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bridge._save_discord_route({**change, "confirmed": True}))
         self.assertEqual(bridge.config["discord_routes"]["my-discord"]["owner_umo"], "")
         self.assertIsNone(bridge._discord_routes().get("default"))
+
+
+class NativeInstanceTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        context = FakeContext()
+        context.get_config = lambda **_: {"admins_id": ["111"], "platform": [
+            {"id": "default", "type": "aiocqhttp", "enable": True},
+            {"id": "work-chat", "type": "wecom_ai_bot", "enable": True},
+            {"id": "other-work", "type": "wecom_ai_bot", "enable": True},
+        ]}
+        self.bridge = make_bridge({
+            "group_scope": "allowlist", "group_allow": ["default:GroupMessage:70"],
+            "owner_tool_qq": "111", "desktop_tools_enabled": True,
+        }, context=context)
+        self.bridge.server.capabilities["instance_policies"] = True
+        self.bridge._migrate_instance_policies()
+
+    def event(self, instance="work-chat", *, sender="zhangsan", private=True):
+        session = f"wecomai:{'zhangsan' if private else 'group_1'}"
+        event = FakeEvent("你好", private=private, sender_id=sender, message_id="first")
+        event.unified_msg_origin = f"{instance}:{'FriendMessage' if private else 'GroupMessage'}:{session}"
+        event.get_platform_id = lambda: instance
+        event.send = mock.AsyncMock()
+        return event
+
+    async def save(self, instance, **policy):
+        row = next(row for row in self.bridge._instance_view()["instances"] if row["id"] == instance)
+        self.bridge._save_instance_policy({
+            "instance": instance, "version": row["version"], "policy": policy, "confirmed": True,
+        })
+
+    async def test_discovery_and_mixed_mode_bindings(self):
+        bridge = self.bridge
+        routes = {row["id"]: row for row in bridge._platform_routes()}
+        self.assertTrue(routes["default"]["enabled"])
+        self.assertEqual(routes["default"]["mode"], "full")
+        self.assertFalse(routes["work-chat"]["enabled"])
+        self.assertFalse(bridge._event_allowed(self.event()))
+        await self.save("work-chat", enabled=True, owner_id="zhangsan")
+        self.assertEqual(bridge.server.mode, "full")
+        self.assertEqual(bridge._scope_mode(self.event().unified_msg_origin), "safe")
+        for irrelevant in (self.event(private=False), self.event(sender="wrong"), self.event("other-work")):
+            await bridge.observe_all_messages(irrelevant)
+        self.assertFalse(bridge._instance_owner("work-chat")[1])
+        event = self.event()
+        await bridge.observe_all_messages(event)
+        self.assertEqual(bridge._instance_owner("work-chat"), ("zhangsan", event.unified_msg_origin))
+        await bridge.observe_all_messages(event)
+        await bridge.on_llm_request(event, None)
+        self.assertEqual(bridge.server.pushed[-1]["channel"], "wecom_ai_bot")
+        self.assertEqual(bridge.server.pushed[-1]["conv"]["id"], "wecomai:zhangsan")
+        self.assertFalse(bridge._event_allowed(self.event("other-work")))
+        await self.save("work-chat", owner_id="lisi")
+        self.assertFalse(bridge._event_allowed(event))
+
+    async def test_cross_instance_approval_and_fixed_webhook_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "完整原生会话 UMO"):
+            await self.save("work-chat", enabled=True, group_allow=["other-work:GroupMessage:wecomai:group_1"])
+        with self.assertRaisesRegex(ValueError, "主动发送未验证"):
+            await self.save("work-chat", enabled=True, mode="full", desktop_targets=[self.event().unified_msg_origin])
+        platform = {"id": "work-chat", "enable": True, "type": "wecom_ai_bot",
+                    "only_use_webhook_url_to_send": True, "msg_push_webhook_url": "https://example.invalid/"}
+        self.bridge.context.get_config = lambda **_: {"platform": [platform]}
+        with self.assertRaisesRegex(ValueError, "固定 Webhook"):
+            await self.save("work-chat", enabled=True)
+
+    async def test_reply_is_tied_to_the_native_event_and_its_umo(self):
+        bridge = self.bridge
+        await self.save("work-chat", enabled=True, owner_id="zhangsan")
+        event = self.event()
+        await bridge.observe_all_messages(event)
+        await bridge.observe_all_messages(event)
+        await bridge.on_llm_request(event, None)
+        args = ("private", "wecomai:zhangsan", "回复", "", "work-chat")
+        result = await bridge._on_send_from_cortico(*args, umo=event.unified_msg_origin, turn="bad")
+        self.assertFalse(result[0])
+        result = await bridge._on_send_from_cortico(*args, umo=event.unified_msg_origin, turn="first")
+        self.assertTrue(result[0], result)
+        self.assertIs(bridge.delivery.sent[-1][1]["reply_event"], event)
+        result = await bridge._on_send_from_cortico(*args, umo=event.unified_msg_origin)
+        self.assertFalse(result[0])
+
+    async def test_fresh_install_does_not_enable_default_bot(self):
+        bridge = make_bridge({"enabled": False}, context=self.bridge.context)
+        bridge._migrate_instance_policies()
+        self.assertTrue(bridge.config["instance_policy_migrated"])
+        self.assertEqual(bridge.config["instance_routes"], {})
+        self.assertFalse(bridge._instance_enabled("default"))

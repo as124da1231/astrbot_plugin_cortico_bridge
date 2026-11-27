@@ -268,6 +268,9 @@ class BridgeServer:
         owner_umo: Callable[[], str] | None = None,
         owner_dms: Callable[[], list[str]] | None = None,
         platform_routes: Callable[[], list[dict]] | None = None,
+        target_allowed: Callable[[str], bool] | None = None,
+        scope_mode: Callable[[str], str] | None = None,
+        instance_managed: Callable[[], bool] | None = None,
         discord_target_allowed: Callable[[str], bool] | None = None,
         tools_frame: ToolsProvider | None = None,
         tts_available: TtsInfoProvider | None = None,
@@ -287,7 +290,9 @@ class BridgeServer:
         self._owner_umo = owner_umo or (lambda: "")
         self._owner_dms = owner_dms or (lambda: [self._owner_umo()])
         self._platform_routes = platform_routes or (lambda: [])
-        self._discord_target_allowed = discord_target_allowed or (lambda _: True)
+        self._target_allowed = target_allowed or discord_target_allowed or (lambda _umo: True)
+        self._scope_mode = scope_mode or (lambda _umo: self.mode)
+        self._instance_managed = instance_managed or (lambda: False)
         self._tools_frame = tools_frame
         self._tts_available = tts_available or (lambda: False)
         self._conversations = conversations or (lambda: [])
@@ -396,6 +401,7 @@ class BridgeServer:
                     json.dumps({
                         "t": "tick", "ts": time.time(),
                         "modeApprovalPending": bool(self.pending_mode_approval()),
+                        **({"platformRoutes": self._platform_routes()} if self.supports_multiple_platforms else {}),
                     }, ensure_ascii=False)
                 )
                 self.last_frame_at = time.time()
@@ -476,7 +482,7 @@ class BridgeServer:
         if self._save_mode is not None and obj.get("t") == "msg":
             if not self._mode_ready:
                 return False
-            if self.mode == "safe" and (not obj.get("umo") or obj.get("umo") not in self._owner_dms()):
+            if self._scope_mode(_s(obj.get("umo"))) == "safe" and obj.get("umo") not in self._owner_dms():
                 return False
             obj = {**obj, "modeRevision": self._mode_revision}
             if obj.get("kind") != "notice":
@@ -537,16 +543,21 @@ class BridgeServer:
 
     async def ready_frame(self) -> dict:
         routes = self._platform_routes()
-        discord_routes = {route["id"]: route for route in routes if route["channel"] == "discord"}
-        conversations = self._conversations() if self.mode == "full" else []
+        by_id = {route["id"]: route for route in routes}
         visible_conversations = []
-        for item in conversations:
+        for item in self._conversations() if self.mode == "full" else []:
             umo = item.get("umo") or ""
-            route = discord_routes.get(umo.split(":", 1)[0])
-            if route is None:
-                visible_conversations.append(item)
-            elif self.supports_multiple_platforms and route["enabled"] and self._discord_target_allowed(umo):
-                visible_conversations.append({**item, "channel": "discord"})
+            route = by_id.get(umo.split(":", 1)[0])
+            if self._instance_managed() and (not self._target_allowed(umo) or self._scope_mode(umo) != "full"):
+                continue
+            if route is not None:
+                channel = route["channel"]
+                if channel == "discord" and (not self.supports_multiple_platforms or not self._target_allowed(umo)):
+                    continue
+                if channel not in ("qq", "discord") and self.capabilities.get("instance_policies") is not True:
+                    continue
+                item = {**item, "channel": channel}
+            visible_conversations.append(item)
         return {
             "t": "ready",
             "channel": "qq",
@@ -558,6 +569,7 @@ class BridgeServer:
             "desktopSend": self.mode == "full" and self._has_credentials(self._client) and bool(self._desktop_targets()),
             "ownerBound": bool(any(self._owner_dms()) if self.supports_multiple_platforms else self._owner_umo()),
             "modeApprovalPending": bool(self.pending_mode_approval()),
+            **({"instancePolicies": True} if self._instance_managed() else {}),
             # 桥这边能不能发语音，以及会用哪个 provider（World 可据此少试一次）。
             "tts": await self._tts_info(),
             # 桥记得的会话（含重启前恢复的），World 用它来支持主动发送。
@@ -871,7 +883,8 @@ class BridgeServer:
                 return ""
         elif not turn and self.mode == "full" and actor == {"kind": "desktop"}:
             if sending:
-                if self._has_credentials(websocket) and umo in self._desktop_targets():
+                if (self._has_credentials(websocket) and self._scope_mode(umo) == "full"
+                        and umo in self._desktop_targets()):
                     return ""
             elif self._authorized_owner(websocket):
                 return ""
@@ -980,8 +993,8 @@ class BridgeServer:
                 else:
                     platform = p_platform or platform
                     conv_kind, conv_id, umo = p_kind, p_id, p_umo
-        discord = any(route["id"] == platform and route["channel"] == "discord" for route in self._platform_routes())
-        if discord:
+        channel = next((route["channel"] for route in self._platform_routes() if route["id"] == platform), "qq")
+        if channel == "discord":
             # 被引用的文字可能含有全体或角色提及，避免原样转发触发通知。
             text = re.sub(r"@(?=everyone\b|here\b|&[0-9]+>)", "@\u200b", text)
         image, image_code, image_note = _parse_image(frame.get("image"))
@@ -1010,11 +1023,11 @@ class BridgeServer:
             ok, code, err = False, codes.VOICE_IMAGE_CONFLICT, "语音和图片不能是同一条消息"
         elif voice and at:
             ok, code, err = False, codes.VOICE_AT_CONFLICT, "语音和 @ 不能是同一条消息"
-        elif discord and "all" in at:
-            ok, code, err = False, "scope_denied", "Discord 频道只允许点名具体成员"
+        elif channel != "qq" and "all" in at:
+            ok, code, err = False, "scope_denied", "该平台只允许点名具体成员"
         elif conv_kind not in ("group", "private") or not conv_id:
             ok, code, err = False, codes.BAD_SESSION, "会话参数不合法"
-        elif self._save_mode and self.mode == "safe" and (conv_kind != "private" or image is not None or at):
+        elif self._save_mode and self._scope_mode(umo) == "safe" and (conv_kind != "private" or image is not None or at):
             ok, code, err = False, "scope_denied", "安全模式仅允许回复已授权的主人私聊"
         elif (denied := self._authorize_turn(websocket, frame, umo, sending=True)):
             ok, code, err = False, "scope_denied", denied
@@ -1039,7 +1052,8 @@ class BridgeServer:
                         ok, note, used_voice, uncertain, raw_code = False, denied or "桥已重新连接", False, False, "scope_denied"
                     else:
                         ok, note, used_voice, uncertain, raw_code = await self._on_send(
-                            conv_kind, conv_id, text, reply_to, platform, image, voice, umo, at
+                            conv_kind, conv_id, text, reply_to, platform, image, voice, umo, at,
+                            **({"turn": _s(frame.get("turn"))} if self._instance_managed() else {}),
                         )
                     code = _s(raw_code).strip()
                     err = _s(note)
@@ -1104,7 +1118,7 @@ class BridgeServer:
             identity_code = codes.OWNER_AUTH_REQUIRED
         elif self._authorize_turn(websocket, frame, _s(frame.get("umo"))):
             identity_code = "scope_denied"
-        elif self._save_mode and self.mode == "safe" and name not in ("cortico_read_message_component", "cortico_authorize_history"):
+        elif self._save_mode and (self._scope_mode(_s(frame.get("umo"))) if turn else self.mode) == "safe" and name not in ("cortico_read_message_component", "cortico_authorize_history"):
             identity_code = "scope_denied"
 
         if identity_code:
@@ -1185,6 +1199,8 @@ class BridgeServer:
             pending = False
             if not rid or not self._mode_ready or frame.get("modeRevision") != self._mode_revision or mode not in ("full", "safe"):
                 error = "模式状态已变化，请刷新"
+            elif self._instance_managed():
+                error = "请在 AstrBot 的「实例接入」中选择实例并切换模式"
             elif mode == "full" and self.mode == "safe":
                 if not self.pending_mode_approval():
                     self._pending_full = (uuid4().hex, self._epoch, self._mode_revision, time.monotonic() + 180)

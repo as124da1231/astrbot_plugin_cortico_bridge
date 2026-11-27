@@ -491,12 +491,11 @@ class Delivery:
             image_added = True
         return chain, used_voice, reply_added, image_added, notes, False
 
-    async def _send_once(self, umo: str, chain) -> bool:
-        return await asyncio.wait_for(
-            self._context.send_message(umo, chain), timeout=SEND_TIMEOUT
-        )
+    async def _send_once(self, umo: str, chain, reply_event=None) -> bool | None:
+        send = reply_event.send(chain) if reply_event is not None else self._context.send_message(umo, chain)
+        return await asyncio.wait_for(send, timeout=SEND_TIMEOUT)
 
-    async def _send_plain(self, umo: str, text: str) -> tuple[str, str]:
+    async def _send_plain(self, umo: str, text: str, reply_event=None) -> tuple[str, str]:
         """降级发一条纯文字；返回 (status, note)。
 
         status: ok / false（确定没发）/ timeout / error（可能已发）。
@@ -511,7 +510,7 @@ class Delivery:
             logger.debug("Cortico Bridge: 纯文字链构造失败 —— %s", exc, exc_info=True)
             return "error", "改发纯文字也失败"
         try:
-            ok = await self._send_once(umo, chain)
+            ok = await (self._send_once(umo, chain) if reply_event is None else self._send_once(umo, chain, reply_event))
         except asyncio.TimeoutError:
             logger.warning(
                 "Cortico Bridge: 纯文字发送超过 %.0f 秒没有确认，消息可能已经发出",
@@ -539,6 +538,7 @@ class Delivery:
         at: list[str] | None = None,
         *,
         may_dispatch: Callable[[], bool] | None = None,
+        reply_event=None,
     ) -> tuple[bool, str, bool, bool, str]:
         """发一条消息。返回 (成功, 备注, 是否真的用了语音, 结果是否未知, 错误码)。
 
@@ -578,8 +578,8 @@ class Delivery:
             logger.debug("Cortico Bridge: 附件构造失败（%s）", type(exc).__name__)
             if text.strip() and allow_text_fallback:
                 if may_dispatch is not None and not may_dispatch():
-                    return False, "该 QQ 会话未获授权", False, False, "scope_denied"
-                status, why = await self._send_plain(umo, text)
+                    return False, "该会话未获授权", False, False, "scope_denied"
+                status, why = await (self._send_plain(umo, text) if reply_event is None else self._send_plain(umo, text, reply_event))
                 if status == "ok":
                     return True, "附件构造失败，已改发纯文字", False, False, ""
                 if status == "false":
@@ -599,9 +599,9 @@ class Delivery:
         note = _join_notes(notes)
 
         if may_dispatch is not None and not may_dispatch():
-            return False, "该 QQ 会话未获授权", False, False, "scope_denied"
+            return False, "该会话未获授权", False, False, "scope_denied"
         try:
-            ok = await self._send_once(umo, chain)
+            ok = await (self._send_once(umo, chain) if reply_event is None else self._send_once(umo, chain, reply_event))
         except asyncio.TimeoutError:
             logger.warning(
                 "Cortico Bridge: 平台发送超过 %.0f 秒没有确认，消息可能已经发出",
@@ -616,8 +616,8 @@ class Delivery:
             # 平台明确说没发：有附件且还有正文时，降级重试一次纯文字。
             if had_attachment and text.strip() and allow_text_fallback:
                 if may_dispatch is not None and not may_dispatch():
-                    return False, "该 QQ 会话未获授权", False, False, "scope_denied"
-                status, why = await self._send_plain(umo, text)
+                    return False, "该会话未获授权", False, False, "scope_denied"
+                status, why = await (self._send_plain(umo, text) if reply_event is None else self._send_plain(umo, text, reply_event))
                 if status == "ok":
                     notes.append("附件未发出，已改发纯文字")
                     return True, _join_notes(notes), False, False, ""

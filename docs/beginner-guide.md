@@ -2,7 +2,7 @@
 
 跟着这份教程安装两端扩展，先让 Coo 在 QQ 私聊里回你一句。私聊跑通后，再决定要不要开放群聊、Discord、图片、语音或 AstrBot 工具。全程可以在图形界面完成。
 
-**版本说明**。教程以 AstrBot 桥和 Coo 扩展 **1.3.11** 为准。Discord 和两端的平台实例联动需要配套版本。已安装 AstrBot 桥 **1.3.9** 的用户可以继续接 QQ，下面也标有旧界面的入口。请在安装后先核对自己的版本号。 [AstrBot 桥发布页](https://github.com/as124da1231/astrbot_plugin_cortico_bridge/releases) · [Coo 扩展版本](https://www.npmjs.com/package/cortico-world-astrbot?activeTab=versions)
+**1.3.12 用户**。下面的安装截图可以继续使用。两端连通后，在 AstrBot 的「Coo 桥控制台 → 实例接入」选中机器人，开启「接入 Coo」，设置主人用户 ID 并保存。让这个账号发一条真实私聊，看到主人私聊已绑定即可。需要群聊时，在同一实例选择「完整模式」，设置「群聊与频道」并确认。Coo 的实例页会同步显示状态。后续章节出现的 QQ、Discord 单独接入页和 Coo 模式切换按钮是 1.3.11 的界面。 [AstrBot 桥发布页](https://github.com/as124da1231/astrbot_plugin_cortico_bridge/releases) · [Coo 扩展版本](https://www.npmjs.com/package/cortico-world-astrbot?activeTab=versions)
 
 [安装 AstrBot 插件](#2-在-astrbot-安装桥插件) · [安装 Coo 扩展](#3-在-coo-安装客户端扩展) · [同机或跨机连接](#4-接通两端) · [发第一条 QQ 消息](#5-绑定主人并发第一条-qq-私聊) · [切完整模式](#6-需要群聊时再切完整模式) · [AstrBot 设置](#7-astrbot-侧的每个设置怎么用) · [Coo 设置](#8-coo-侧的每个设置怎么用) · [故障排查](#9-连接了却不回复先看这里)
 

@@ -1,4 +1,4 @@
-﻿/* ------------------------------------------------------------------
+/* ------------------------------------------------------------------
    Coo 桥控制台
 
    视觉语言与 Coopanion / Cortico 的 WebUI 同源：
@@ -1776,3 +1776,149 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   .secitem:last-child { border-bottom: 0; }
   .secitem:last-child { border-bottom: 0; }
 }
+
+
+/* 实例、连接和共享能力各自有独立入口。 */
+.connection-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.connection-layout > .sheet { margin: 0; min-width: 0; }
+.connection-layout .form-grid { align-items: start; }
+.connection-layout .form-field { align-content: start; }
+
+.workspace-tabs {
+  display: flex;
+  gap: 20px;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+}
+.workspace-tabs button {
+  min-height: 42px;
+  padding: 4px 1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.workspace-tabs button[aria-current="page"] {
+  border-bottom-color: var(--accent);
+  color: var(--ink);
+  font-weight: 650;
+}
+.workspace-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.shared-tabs { width: min(100%, var(--content)); margin: 0 auto 18px; }
+.platform-card { width: 100%; text-align: start; cursor: pointer; }
+.platform-card-name { overflow-wrap: anywhere; }
+
+.instance-workspace {
+  display: grid;
+  grid-template-columns: minmax(210px, 255px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+.instance-directory { padding: 14px; min-width: 0; }
+.instance-directory-head { display: flex; justify-content: space-between; align-items: start; gap: 10px; padding: 4px 3px 14px; }
+.instance-directory-head h2 { margin: 0; font-size: 15px; }
+.instance-directory-head p { margin: 3px 0 0; color: var(--ink-dim); font-size: 12px; }
+.instance-directory-list { display: grid; gap: 5px; overflow-y: auto; max-height: min(65vh, 640px); padding: 2px; }
+.instance-directory-item {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px;
+  width: 100%; padding: 9px; border: 1px solid transparent; border-radius: var(--radius-sm);
+  background: transparent; color: var(--ink); text-align: start; cursor: pointer;
+}
+.instance-directory-item:hover { background: var(--sheet-2); }
+.instance-directory-item[aria-current="true"] {
+  background: color-mix(in srgb, var(--accent) 9%, var(--sheet));
+  border-color: color-mix(in srgb, var(--accent) 27%, var(--line));
+}
+.instance-directory-item:disabled { cursor: default; }
+.instance-directory-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.instance-directory-copy { min-width: 0; display: grid; }
+.instance-directory-copy strong, .instance-directory-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.instance-directory-copy strong { font-size: 13px; font-weight: 650; }
+.instance-directory-copy small, .instance-state-dot { font-size: 11px; color: var(--ink-dim); }
+.instance-state-dot { white-space: nowrap; }
+.instance-state-dot.on { color: var(--ok); font-weight: 650; }
+.instance-picker { display: none; }
+.instance-detail { min-width: 0; }
+.instance-notice { margin: 0 0 10px; color: var(--ink-soft); font-size: 13px; overflow-wrap: anywhere; }
+.instance-notice:empty, #instanceDraft:empty { display: none; }
+.instance-editor { padding: 0; overflow: hidden; }
+.instance-profile { display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; gap: 12px; }
+.instance-identity { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.instance-identity > div { min-width: 0; }
+.instance-mark {
+  display: grid; place-items: center; width: 44px; height: 44px; border-radius: var(--radius-md); flex: none;
+  font: 700 15px/1 var(--sans); color: var(--ok); background: color-mix(in srgb, var(--accent) 11%, var(--sheet-2));
+}
+.instance-profile h2 { margin: 0; font: 650 21px/1.2 var(--sans); overflow-wrap: anywhere; }
+.instance-profile p { margin: 4px 0 0; color: var(--ink-dim); font-size: 12px; overflow-wrap: anywhere; }
+.instance-directory h2::before, .instance-profile h2::before, .instance-pane h3::before { content: none; }
+.instance-toggle { white-space: nowrap; }
+.instance-toggle > span:first-child { color: var(--ink-soft); font-size: 13px; }
+.instance-capability { margin: 0 20px 12px; padding: 8px 11px; font-size: 13px; background: var(--sheet-2); border-radius: var(--radius-sm); color: var(--ink-soft); }
+.instance-tabs { padding: 0 20px; }
+.instance-pane { min-width: 0; padding: 6px 20px 0; }
+.instance-settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(160px, 235px);
+  align-items: start; gap: 15px; padding: 17px 0;
+}
+.instance-settings-row + .instance-settings-row { border-top: 1px solid var(--line); }
+.instance-setting-copy h3, .instance-pane-intro h3 { margin: 0; font-size: 14px; }
+.instance-setting-copy p, .instance-pane-intro p { margin: 3px 0 0; color: var(--ink-soft); font-size: 13px; }
+.instance-setting-copy details, .instance-manual { margin-top: 6px; color: var(--ink-soft); font-size: 12px; }
+.instance-setting-copy code { display: block; overflow-wrap: anywhere; }
+.instance-setting-copy summary, .instance-manual summary { cursor: pointer; }
+.instance-pane-intro { margin: 13px 0; }
+.instance-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 14px; padding-bottom: 18px; }
+.instance-field-grid .form-field { align-content: start; }
+.instance-field-wide { grid-column: 1 / -1; }
+.instance-targets { margin: 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.instance-target { display: flex; align-items: start; justify-content: space-between; gap: 10px; padding: 7px 10px; }
+.instance-target + .instance-target { border-top: 1px solid var(--line); }
+.instance-target code { overflow-wrap: anywhere; min-width: 0; }
+.instance-remove { color: var(--ink-soft); background: transparent; border: 0; padding: 0; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.instance-remove:hover { color: var(--danger); }
+.instance-manual textarea { width: 100%; margin-top: 5px; }
+.instance-actionbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 20px; min-height: 54px; border-top: 1px solid var(--line); background: var(--sheet-2); }
+.instance-actionbar p { font-size: 12px; color: var(--warn); margin: 0; }
+.instance-actionbar > div { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.instance-dialog { width: min(calc(100% - 24px), 470px); color: var(--ink); }
+.instance-dialog::backdrop { background: rgb(12 15 13 / .48); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+@media (max-width: 1080px) {
+  .connection-layout { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 900px) {
+  .instance-workspace { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .instance-directory-head { padding-bottom: 8px; }
+  .instance-directory-list, .instance-search { display: none; }
+  .instance-picker { display: grid; }
+}
+@media (max-width: 590px) {
+  .featureintro { padding-inline: 14px; }
+  .headrow { gap: 8px; padding-bottom: 12px; }
+  .pagetitle { font-size: 25px; }
+  .scroll { padding-inline: 12px; padding-top: 12px; scrollbar-gutter: auto; }
+  .instance-profile { padding: 14px 13px; }
+  .instance-profile h2 { font-size: 17px; }
+  .instance-mark { width: 32px; height: 32px; }
+  .instance-pane, .instance-tabs { padding-inline: 13px; }
+  .instance-settings-row, .instance-field-grid { grid-template-columns: minmax(0, 1fr); }
+  .instance-settings-row { gap: 8px; padding-block: 12px; }
+  .workspace-tabs { gap: 13px; }
+  .instance-actionbar { padding-inline: 13px; }
+  .instance-capability { margin-inline: 13px; }
+}
+
+.instance-search { margin-bottom: 7px; }
+.record-instance-filter { margin: 0 0 10px; }
+.record-instance-filter > select { width: min(100%, 250px); }

@@ -37,34 +37,15 @@
     </div>
 
     <nav class="stack" aria-label="Coo 桥控制台">
+      <div class="stacklabel">工作台</div>
       <button class="navitem active" type="button" data-panel="status" aria-current="page">
-        <span class="lbl">概览</span>
-        <span class="navdot" id="railDot" hidden aria-hidden="true"></span>
+        <span class="lbl">概览</span><span class="navdot" id="railDot" hidden aria-hidden="true"></span>
       </button>
-      <button class="navitem" type="button" data-panel="connection">
-        <span class="lbl">连接</span>
-      </button>
-      <button class="navitem" type="button" data-panel="records">
-        <span class="lbl">消息记录</span>
-      </button>
-      <div class="stacklabel">平台</div>
-      <button class="navitem" type="button" data-panel="qq">
-        <span class="lbl">QQ</span>
-      </button>
-      <button class="navitem" type="button" data-panel="discord">
-        <span class="lbl">Discord</span>
-      </button>
-      <div class="stacklabel">能力</div>
-      <button class="navitem" type="button" data-panel="tools" hidden>
-        <span class="lbl">工具</span>
-        <span class="navcount mono" id="railTools">—</span>
-      </button>
-      <button class="navitem" type="button" data-panel="images">
-        <span class="lbl">图片</span>
-      </button>
-      <button class="navitem" type="button" data-panel="voice">
-        <span class="lbl">语音</span>
-      </button>
+      <button class="navitem" type="button" data-panel="instances"><span class="lbl">实例接入</span></button>
+      <button class="navitem" type="button" data-panel="records"><span class="lbl">消息记录</span></button>
+      <div class="stacklabel">桥接管理</div>
+      <button class="navitem" type="button" data-panel="connection"><span class="lbl">连接与令牌</span></button>
+      <button class="navitem" type="button" data-panel="images" data-shared-nav><span class="lbl">共享能力</span><span class="navcount mono" id="railTools">—</span></button>
     </nav>
 
     <div class="railfoot">
@@ -99,11 +80,10 @@
     </header>
 
     <div class="scroll" id="scroll">
-
-      <nav class="platform-tabs" id="qqTabs" aria-label="QQ 设置分区" hidden>
-        <button class="platform-tab" type="button" data-open-panel="qq" data-qq-tab>接入设置</button>
-        <button class="platform-tab" type="button" data-open-panel="groups" data-qq-tab hidden>群聊范围</button>
-        <button class="platform-tab" type="button" data-open-panel="private" data-qq-tab hidden>私聊范围</button>
+      <nav id="sharedTabs" class="workspace-tabs shared-tabs" aria-label="共享能力" hidden>
+        <button type="button" data-open-panel="images">图片</button>
+        <button type="button" data-open-panel="voice">语音</button>
+        <button type="button" data-open-panel="tools" hidden>工具授权</button>
       </nav>
 
       <div class="panel" id="panel-status">
@@ -117,24 +97,16 @@
             </div>
           </div>
           <div class="overview-actions">
-            <button class="btn sm primary" id="overviewApproval" type="button" data-open-panel="connection" hidden>查看待审批请求</button>
+
             <button class="btn sm" id="overviewConnection" type="button" data-open-panel="connection">查看连接</button>
           </div>
         </section>
         <section class="platform-directory" aria-labelledby="platformTitle">
-          <h2 id="platformTitle">接入平台</h2>
-          <div class="platform-grid">
-            <button class="platform-card" type="button" data-open-panel="qq">
-              <span class="platform-card-name">QQ</span>
-              <span class="platform-card-status" id="qqSummary">正在读取</span>
-              <span class="platform-card-info">主人私聊、群聊和私聊范围</span>
-            </button>
-            <button class="platform-card" type="button" data-open-panel="discord">
-              <span class="platform-card-name">Discord</span>
-              <span class="platform-card-status" id="discordSummary">正在读取</span>
-              <span class="platform-card-info">主人私信和获准频道</span>
-            </button>
+          <div class="section-row">
+            <h2 id="platformTitle">机器人实例</h2>
+            <button class="btn sm" type="button" data-open-panel="instances">管理实例</button>
           </div>
+          <div class="platform-grid" id="platformInstances" aria-live="polite">正在读取</div>
         </section>
         <section class="traffic-overview" aria-labelledby="trafficTitle">
           <div class="section-row">
@@ -152,15 +124,15 @@
         </section>
       </div>
 
-      <div class="panel" id="panel-connection" hidden>
+      <div class="panel connection-layout" id="panel-connection" hidden>
         <section class="sheet security">
-          <div class="sheethead"><div class="sheethead-text"><h2>监听与接管</h2><div class="sh-desc">接管开启后，桥才接受 Coo 连接及放行的消息。</div></div></div>
+          <div class="sheethead"><div class="sheethead-text"><h2>连接设置</h2><div class="sh-desc">这些设置适用于整座桥。</div></div></div>
           <form id="connectionSettings" class="managed-settings" novalidate>
             <p class="bridge-hint" data-settings-message role="status">正在读取设置…</p>
             <button class="btn sm" type="button" data-settings-retry hidden>重试</button>
             <fieldset data-settings-fields hidden>
               <div class="form-grid">
-                <label class="cortico-switchrow form-wide"><input id="settingEnabled" type="checkbox" /><span class="cortico-switch" aria-hidden="true"></span>接管对话</label>
+                <label class="cortico-switchrow form-wide"><input id="settingEnabled" type="checkbox" /><span class="cortico-switch" aria-hidden="true"></span>开启桥接监听</label>
                 <div class="form-field">
                   <label for="settingHostMode">监听范围</label>
                   <select id="settingHostMode" class="kvselect"><option value="local">仅本机</option><option value="remote">跨机 · 所有 IPv4 接口</option><option value="custom">指定地址</option></select>
@@ -211,131 +183,82 @@
             <span class="secfoot-v" id="kRefused">—</span>
           </div>
         </section>
-        <section class="sheet security">
-          <div class="sheethead">
-            <div class="sheethead-text">
-              <h2>桥接模式</h2>
-              <div class="sh-desc">QQ 和 Discord 共用桥接模式。安全模式只开放绑定的主人私聊，完整模式按放行范围接入会话。</div>
-            </div>
-            <button class="btn sm" id="modeNarrow" type="button" hidden>切换为安全模式</button>
-          </div>
-          <p class="bridge-hint" id="connectionMode" role="status"></p>
-          <div id="modeApproval" class="tokenonce" hidden>
-            <strong>完整模式将开放</strong>
-            <ul id="modeApprovalScope"></ul>
-            <small>如需缩小范围，可先在侧栏的对应平台页调整，再从 Coo 发起切换。</small>
-            <label class="consent-row"><input type="checkbox" id="modeRisk" /> 我知道已放行的群、频道或私聊可能收到包含桌面对话内容的回复。</label>
-            <div class="token-actions">
-              <button class="btn sm" type="button" id="modeApprove" disabled>批准完整模式</button>
-              <button class="btn sm" type="button" id="modeReject">驳回</button>
-            </div>
-          </div>
-        </section>
       </div>
 
-      <div class="panel" id="panel-qq" hidden>
-        <section class="sheet security platform-settings">
-          <div class="sheethead"><div class="sheethead-text"><h2>接管实例</h2><div class="sh-desc">从 AstrBot 已配置的 QQ 机器人中选择，主人私聊在下方单独绑定。</div></div></div>
-          <form id="qqSettings" class="managed-settings" novalidate>
-            <p class="bridge-hint" data-settings-message role="status">正在读取设置…</p>
-            <button class="btn sm" type="button" data-settings-retry hidden>重试</button>
-            <fieldset data-settings-fields hidden>
-              <div class="form-grid">
-                <div class="form-field"><label for="settingQqPlatform">添加 QQ 实例</label><select class="kvselect" id="settingQqPlatform"></select></div>
-                <div class="form-field form-wide"><p class="bridge-hint" id="qqPickedLabel">已选实例</p><div class="chips" id="settingQqPicked" aria-labelledby="qqPickedLabel"></div></div>
-                <div class="form-field form-wide"><label for="settingAliases">群聊唤醒称呼（每行一个）</label><textarea class="kvselect" id="settingAliases" rows="2" spellcheck="false"></textarea></div>
-              </div>
-              <label class="consent-row" data-setting-confirm hidden><input type="checkbox" /> 确认新增的实例或称呼可以触发 Coo。</label>
-              <div class="token-actions form-actions"><button class="btn sm primary" type="submit" disabled>保存接管设置</button></div>
-            </fieldset>
-          </form>
-        </section>
-        <section class="sheet security platform-settings">
-          <div class="sheethead">
-            <div class="sheethead-text">
-              <h2>主人私聊</h2>
-              <div class="sh-desc">选择可在安全模式下接续 Coo 主对话的 QQ 私聊。</div>
+      <div class="panel" id="panel-instances" hidden>
+        <div class="instance-workspace">
+          <aside class="sheet instance-directory" aria-labelledby="instanceDirectoryTitle">
+            <div class="instance-directory-head">
+              <div><h2 id="instanceDirectoryTitle">机器人实例</h2><p id="instanceCount"></p></div>
+              <button class="btn sm" id="instanceReload" type="button">刷新</button>
             </div>
+            <div id="instanceSearchRow" class="form-field instance-search" hidden>
+              <label class="visually-hidden" for="instanceSearch">搜索实例</label>
+              <input id="instanceSearch" class="kvselect" type="search" placeholder="搜索实例" />
+            </div>
+            <div class="instance-directory-list" id="instanceDirectory"></div>
+            <div class="form-field instance-picker">
+              <label class="visually-hidden" for="instancePick">选择实例</label>
+              <select id="instancePick" class="kvselect"></select>
+            </div>
+          </aside>
+          <div class="instance-detail">
+            <p class="instance-notice" id="instanceFeedback" role="status"></p>
+            <form id="instanceForm" class="sheet instance-editor" hidden>
+              <header class="instance-profile">
+                <div class="instance-identity">
+                  <span class="instance-mark" id="instanceMark" aria-hidden="true"></span>
+                  <div><h2 id="instanceTitle"></h2><p id="instanceMeta"></p></div>
+                </div>
+                <div id="instanceEnable"></div>
+              </header>
+              <p class="instance-capability" id="instanceCapabilities" hidden></p>
+              <nav id="instanceTabs" class="workspace-tabs instance-tabs" aria-label="当前实例设置">
+                <button type="button" data-instance-tab="access" aria-current="page">接入</button>
+                <button type="button" data-instance-tab="groups" hidden>群聊与频道</button>
+                <button type="button" data-instance-tab="private" hidden>私聊</button>
+                <button type="button" data-instance-tab="desktop" hidden>桌面权限</button>
+              </nav>
+              <section class="instance-pane" id="instance-pane-access">
+                <div class="instance-settings-row">
+                  <div class="instance-setting-copy"><h3>接入模式</h3><p id="instanceModeHint"></p></div>
+                  <div id="instanceModeField"></div>
+                </div>
+                <div class="instance-settings-row">
+                  <div class="instance-setting-copy"><h3>主人绑定</h3><p id="instanceState"></p>
+                    <details id="instanceOwnerDetails" hidden><summary>查看私聊地址</summary><code id="instanceOwnerAddress"></code></details>
+                  </div>
+                  <div id="instanceOwnerField"></div>
+                </div>
+              </section>
+              <section class="instance-pane" id="instance-pane-groups" hidden>
+                <div class="instance-pane-intro"><h3>群聊与频道</h3><p>选择可接入的会话和唤醒方式。</p></div>
+                <div class="instance-field-grid" id="instanceGroupFields"></div>
+              </section>
+              <section class="instance-pane" id="instance-pane-private" hidden>
+                <div class="instance-pane-intro"><h3>私聊</h3><p>设置私聊范围，以及未放行时的处理方式。</p></div>
+                <div class="instance-field-grid" id="instancePrivateFields"></div>
+              </section>
+              <section class="instance-pane" id="instance-pane-desktop" hidden>
+                <div class="instance-pane-intro"><h3>桌面权限</h3><p>允许 Coo 在桌面对话中使用此实例的工具或主动发送。</p></div>
+                <div class="instance-field-grid" id="instanceDesktopFields"></div>
+              </section>
+              <footer class="instance-actionbar">
+                <p id="instanceDraft" aria-live="polite"></p>
+                <div>
+                  <button class="btn sm" id="instanceDiscard" type="button" disabled>撤销未保存修改</button>
+                  <button class="btn sm primary" id="instanceSave" type="submit" disabled>保存实例配置</button>
+                </div>
+              </footer>
+            </form>
           </div>
-          <div class="form-grid">
-            <div class="form-field">
-              <label for="accessOwnerPreset">主人 QQ</label>
-              <select class="kvselect" id="accessOwnerPreset" aria-describedby="accessOwnerHint"><option value="">请选择主人 QQ</option></select>
-            </div>
-            <div class="form-field">
-              <label for="accessPlatform">QQ 机器人实例</label>
-              <select class="kvselect" id="accessPlatform"></select>
-            </div>
-            <div class="form-field form-wide" id="accessOwnerManual" hidden>
-              <label for="accessOwner">手动填写 QQ 号</label>
-              <input class="kvselect mono" id="accessOwner" type="text" inputmode="numeric" maxlength="20" aria-describedby="accessOwnerHint" />
-            </div>
-          </div>
-          <p class="bridge-hint" id="accessOwnerHint">可直接选择 AstrBot 管理员，也可手动指定主人 QQ。</p>
-          <div id="accessDesktop" class="form-section" hidden>
-            <h3>桌面授权</h3>
-            <p class="bridge-hint" id="legacyDesktopReview" hidden>已保留旧版主人配置。请重新确认当前连接的工具和主动发送权限。</p>
-            <label class="cortico-switchrow"><input type="checkbox" id="accessTools" /><span class="cortico-switch" aria-hidden="true"></span>允许桌面以主人 QQ 身份调用已授权工具（该帐号须为 AstrBot 管理员）</label>
-            <div class="form-field">
-              <label for="accessTargetPreset">添加已见过的会话</label>
-              <select class="kvselect" id="accessTargetPreset"><option value="">请选择会话</option></select>
-            </div>
-            <div class="form-field">
-              <label for="accessTargets">桌面主动发送目标（每行一个会话 UMO）</label>
-              <textarea class="kvselect" id="accessTargets" rows="3" spellcheck="false"></textarea>
-            </div>
-            <label class="consent-row" id="accessRiskRow" hidden><input type="checkbox" id="accessRisk" /> 确认允许当前桥接令牌使用这次新增的桌面权限</label>
-          </div>
-          <div class="token-actions form-actions">
-            <button class="btn sm primary" id="accessSave" type="button" disabled>保存授权</button>
-          </div>
-        </section>
-      </div>
-
-      <div class="panel" id="panel-discord" hidden>
-        <section class="sheet platform-settings" id="discordUnavailable">
-          <div class="sheethead">
-            <div class="sheethead-text">
-              <h2 id="discordAvailability">正在读取 Discord 实例…</h2>
-              <div class="sh-desc" id="discordAvailabilityDetail"></div>
-            </div>
-          </div>
-        </section>
-        <section class="sheet security platform-settings" id="discordAccess" hidden>
-          <div class="sheethead">
-            <div class="sheethead-text">
-              <h2>机器人接入</h2>
-              <div class="sh-desc">选择机器人实例和主人。主人首次给机器人发私信时完成绑定。</div>
-            </div>
-          </div>
-          <div class="form-grid">
-            <div class="form-field">
-              <label for="discordPlatform">Discord 机器人实例</label>
-              <select class="kvselect" id="discordPlatform"></select>
-            </div>
-            <div class="form-field">
-              <label for="discordOwner">主人 Discord 用户 ID</label>
-              <input class="kvselect mono" id="discordOwner" type="text" inputmode="numeric" maxlength="20" />
-            </div>
-            <label class="cortico-switchrow form-wide"><input id="discordEnabled" type="checkbox" /><span class="cortico-switch" aria-hidden="true"></span>允许该实例接入 Coo</label>
-          </div>
-          <p class="bridge-hint" id="discordBinding" role="status"></p>
-          <div id="discordChannelsConfig" class="form-section" hidden>
-            <h3>频道范围</h3>
-            <div class="form-field">
-              <label for="discordChannelPreset">添加已见过的频道</label>
-              <select class="kvselect" id="discordChannelPreset"><option value="">请选择频道</option></select>
-            </div>
-            <div class="form-field">
-              <label for="discordChannels">允许点名的频道（每行一个频道 ID 或完整 UMO）</label>
-              <textarea class="kvselect" id="discordChannels" rows="3" spellcheck="false"></textarea>
-            </div>
-          </div>
-          <label class="consent-row" id="discordRiskRow" hidden><input id="discordRisk" type="checkbox" /> 确认新增频道或私聊可以接入 Coo 主会话</label>
-          <div class="token-actions form-actions">
-            <button class="btn sm primary" id="discordSave" type="button">保存 Discord 接入</button>
-          </div>
-        </section>
+        </div>
+        <dialog class="sheet instance-dialog" id="instanceConfirm">
+          <h2>确认此实例的接入范围</h2>
+          <p id="instanceConfirmText"></p>
+          <div class="token-actions"><button class="btn" id="instanceCancel" type="button">取消</button>
+            <button class="btn primary" id="instanceAccept" type="button">确认并保存</button></div>
+        </dialog>
       </div>
 
       <div class="panel" id="panel-records" hidden>
@@ -343,8 +266,8 @@
           <section class="sheet msgcard">
             <div class="sheethead">
               <div class="sheethead-text">
-                <h2>会话流水</h2>
-                <div class="sh-desc">查看 QQ 和 Discord 的桥接收发。</div>
+                <h2>收发消息</h2>
+                <div class="sh-desc">已接入实例的最近消息。</div>
               </div>
               <div class="chips filterchips" id="msgFilters" role="group" aria-label="按方向筛选消息">
                 <button class="chip on" type="button" data-msg="all" aria-pressed="true">全部</button>
@@ -352,6 +275,10 @@
                 <button class="chip" type="button" data-msg="out" aria-pressed="false">发出</button>
                 <button class="chip" type="button" data-msg="at" aria-pressed="false">叫到</button>
               </div>
+            </div>
+            <div class="record-instance-filter">
+              <label class="visually-hidden" for="recordInstance">筛选机器人实例</label>
+              <select id="recordInstance" class="kvselect"><option value="">全部实例</option></select>
             </div>
             <div class="liveband" id="liveband" data-live="retry">
               <span class="pulse" aria-hidden="true"></span>
@@ -373,7 +300,7 @@
             <section class="sheet">
               <div class="sheethead">
                 <div class="sheethead-text">
-                  <h2>最近调用</h2>
+                  <h2>工具回执</h2>
                 </div>
               </div>
               <div class="tlog" id="toolLog"></div>
@@ -394,103 +321,11 @@
       </div>
 
       <!-- ============ 群聊 ============ -->
-      <div class="panel" id="panel-groups" hidden>
-        <section class="sheet policy-sheet">
-          <div class="sheethead">
-            <div class="sheethead-text">
-              <h2>接管哪些群</h2>
-              <div class="sh-desc">「全部群」时每个群都交给 Coo；「指定群」只处理名单里的群。</div>
-            </div>
-          </div>
-          <div class="policy">
-            <div class="policy-label" id="groupScopeLabel">范围</div>
-            <div class="seg" id="groupScope" role="group" aria-labelledby="groupScopeLabel">
-              <button class="segbtn" type="button" data-scope="all" aria-pressed="false">全部群</button>
-              <button class="segbtn" type="button" data-scope="allowlist" aria-pressed="true">指定群</button>
-            </div>
-            <p class="policy-hint" id="groupHint" aria-live="polite"></p>
-            <div class="policy-label" id="groupModeLabel">消息范围</div>
-            <div class="seg" id="groupMode" role="group" aria-labelledby="groupModeLabel">
-              <button class="segbtn" type="button" data-mode="mention" aria-pressed="true">仅被叫</button>
-              <button class="segbtn" type="button" data-mode="all" aria-pressed="false">全部消息</button>
-            </div>
-            <div class="policy-row" id="groupAddRow">
-              <label class="sr-only" for="groupInput">群 UMO 或群号</label>
-              <input class="kvselect grow" id="groupInput" placeholder="default:GroupMessage:123456789 或群号" autocomplete="off" spellcheck="false" />
-              <button class="btn sm" type="button" id="btnGroupAdd">添加</button>
-            </div>
-            <div class="chips" id="groupList"></div>
-            <div class="recent" id="groupRecent" hidden></div>
-            <div class="loaderr" id="groupError" hidden>
-              <span id="groupErrorText">读取群聊设置失败</span>
-              <button class="btn sm" type="button" id="btnGroupRetry">重试</button>
-            </div>
-            <div class="savebar" id="groupSavebar" hidden>
-              <span class="dirtytext">群聊设置未保存</span>
-              <span class="grow"></span>
-              <button class="btn sm" type="button" id="btnGroupRevert">撤销</button>
-              <button class="btn sm primary" type="button" id="btnGroupSave">保存</button>
-            </div>
-          </div>
-        </section>
-      </div>
-
-      <!-- ============ 私聊 ============ -->
-      <div class="panel" id="panel-private" hidden>
-        <section class="sheet policy-sheet">
-          <div class="sheethead">
-            <div class="sheethead-text">
-              <h2>谁可以私聊 Coo</h2>
-              <div class="sh-desc">QQ 私聊仍要求 bot 和对方是好友；这里控制谁进来。</div>
-            </div>
-          </div>
-          <div class="policy">
-            <div class="policy-label" id="privateModeLabel">模式</div>
-            <div class="seg" id="privateMode" role="group" aria-labelledby="privateModeLabel">
-              <button class="segbtn" type="button" data-mode="off" aria-pressed="false">关闭</button>
-              <button class="segbtn" type="button" data-mode="allowlist" aria-pressed="false">仅名单</button>
-              <button class="segbtn" type="button" data-mode="all" aria-pressed="false">全部</button>
-            </div>
-            <p class="policy-hint" id="privateHint" aria-live="polite"></p>
-            <div class="policy-row" id="privateAddRow">
-              <label class="sr-only" for="privateInput">私聊 UMO 或 QQ 号</label>
-              <input class="kvselect grow" id="privateInput" placeholder="default:FriendMessage:100000001 或 QQ 号" autocomplete="off" spellcheck="false" />
-              <button class="btn sm" type="button" id="btnPrivateAdd">添加</button>
-            </div>
-            <div class="chips" id="privateList"></div>
-            <div class="recent" id="privateRecent" hidden></div>
-            <label class="cortico-switchrow" id="privateAdminRow">
-              <input type="checkbox" id="privateAdmin" />
-              <span class="cortico-switch" aria-hidden="true"></span>
-              <span>管理员豁免</span>
-            </label>
-            <div class="policy-row" id="privateDenyRow">
-              <label class="policy-label" for="privateDeny">被拒时</label>
-              <select class="kvselect" id="privateDeny">
-                <option value="ignore">静默忽略</option>
-                <option value="astrbot">交给 AstrBot</option>
-              </select>
-            </div>
-            <div class="loaderr" id="privateError" hidden>
-              <span id="privateErrorText">读取私聊设置失败</span>
-              <button class="btn sm" type="button" id="btnPrivateRetry">重试</button>
-            </div>
-            <div class="savebar" id="privateSavebar" hidden>
-              <span class="dirtytext">私聊设置未保存</span>
-              <span class="grow"></span>
-              <button class="btn sm" type="button" id="btnPrivateRevert">撤销</button>
-              <button class="btn sm primary" type="button" id="btnPrivateSave">保存</button>
-            </div>
-          </div>
-        </section>
-      </div>
-
-      <!-- ============ 工具 ============ -->
       <div class="panel" id="panel-tools" hidden>
 
         <section class="sheet toolhero">
           <div class="thsum">
-            <div class="sh-kicker">03—A · 工具授权</div>
+            <div class="sh-kicker">工具授权</div>
             <div class="thbig mono"><span id="pickedCount">0</span><span class="thof">/ <span id="totalCount">0</span></span></div>
             <div class="thlabel">个工具已交给 Coo</div>
           </div>
@@ -590,9 +425,9 @@
           <section class="sheet voice-sheet">
             <div class="sheethead">
               <div class="sheethead-text">
-                <div class="sh-kicker">04—A · 输入</div>
-                <h2>听</h2>
-                <div class="sh-desc">QQ 语音先转成文字，再交给 Coo。</div>
+
+                <h2>语音转写</h2>
+                <div class="sh-desc">将平台收到的语音转成文字，再交给 Coo。</div>
               </div>
               <label class="cortico-switchrow">
                 <input type="checkbox" id="sttEnabled" />
@@ -612,7 +447,7 @@
               </div>
             </div>
             <p class="voice-hint">
-              只转写本插件接管的群，不依赖 AstrBot 的全局 STT 开关。没配或关着时语音只会留下
+              只转写桥接的会话，不依赖 AstrBot 的全局 STT 开关。没配或关着时语音只会留下
               <code>[语音]</code>，没有转写文字。
             </p>
           </section>
@@ -620,8 +455,8 @@
           <section class="sheet voice-sheet">
             <div class="sheethead">
               <div class="sheethead-text">
-                <div class="sh-kicker">04—B · 输出</div>
-                <h2>说</h2>
+
+                <h2>语音回复</h2>
                 <div class="sh-desc">Coo 想用语音时，桥会调 TTS 合成再发到 QQ。</div>
               </div>
               <label class="cortico-switchrow">

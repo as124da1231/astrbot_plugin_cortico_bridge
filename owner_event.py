@@ -13,7 +13,7 @@ import time
 import uuid
 
 
-def build_owner_event(context, platform_id: str, owner_id: str, self_id: str = ""):
+def build_owner_event(context, platform_id: str, owner_id: str, self_id: str = "", *, owner_umo: str = ""):
     """返回一个 role=admin 的主人私聊事件；构造失败直接抛错。"""
     from astrbot.api.event import AstrMessageEvent, MessageChain
     from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
@@ -45,10 +45,18 @@ def build_owner_event(context, platform_id: str, owner_id: str, self_id: str = "
             support_proactive_message=True,
         )
 
+    if owner_umo:
+        from astrbot.core.platform.message_session import MessageSession
+        session = MessageSession.from_str(owner_umo)
+        if session.platform_id != platform_id or session.message_type != MessageType.FRIEND_MESSAGE:
+            raise ValueError("主人私聊不属于所选实例")
+        session_id = session.session_id
+    else:
+        session_id = owner_id
     msg = AstrBotMessage()
     msg.type = MessageType.FRIEND_MESSAGE
     msg.self_id = self_id or ""
-    msg.session_id = owner_id
+    msg.session_id = session_id
     msg.message_id = f"coo-{uuid.uuid4().hex}"
     msg.sender = MessageMember(user_id=owner_id, nickname="主人")
     msg.message = []
@@ -65,7 +73,7 @@ def build_owner_event(context, platform_id: str, owner_id: str, self_id: str = "
                 chain = MessageChain(chain or [])
             await context.send_message(self.unified_msg_origin, chain)
 
-    event = CooOwnerEvent("", msg, meta, owner_id)
+    event = CooOwnerEvent("", msg, meta, session_id)
     # 工具插件常直接走 event.bot（aiocqhttp 的 CQHttp 客户端）。
     # 合成事件没有平台回调，这里把真实平台实例的 bot 挂上。
     bot = getattr(inst, "bot", None) if inst is not None else None

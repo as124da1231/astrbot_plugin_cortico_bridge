@@ -199,7 +199,9 @@ class CorticoBridge(Star):
             owner_umo=self._owner_umo,
             owner_dms=self._owner_dms,
             platform_routes=self._platform_routes,
-            discord_target_allowed=self._target_allowed,
+            target_allowed=self._target_allowed,
+            scope_mode=self._scope_mode,
+            instance_managed=lambda: self.config.get("instance_policy_migrated") is True,
             tools_frame=self.tools.frame,
             tts_available=self._tts_info,
             conversations=self.delivery.known_conversations,
@@ -234,17 +236,19 @@ class CorticoBridge(Star):
         # 自动选中的视觉模型；换模型时只提示一次。
         self._vision_logged = ""
         # QQ 号 → 昵称；通知事件只给号码，靠这里补上人名。
-        self._names: OrderedDict[str, str] = OrderedDict()
+        self._names: OrderedDict[tuple[str, str], str] = OrderedDict()
         # AstrBot 已注册的指令名；用于识别「不带唤醒前缀」的指令。
         self._cmd_names: set[str] = set()
         self._cmd_names_at = 0.0
         # SSE 订阅者（每个打开面板的浏览器一个队列）
         self._subscribers: set[asyncio.Queue] = set()
         self._listener_lock = asyncio.Lock()
+        self._observed_sessions: OrderedDict[str, dict] = OrderedDict()
         self.started_at = time.time()
 
         if HAS_WEB_API:
             for route, handler, methods, desc in (
+                ("instances", self.page_instances, ["GET", "POST"], "实例接入与授权"),
                 ("status", self.page_status, ["GET"], "桥的状态与配置"),
                 ("settings/connection", self.page_connection_settings, ["GET", "POST"], "监听与发送设置"),
                 ("settings/qq", self.page_qq_settings, ["GET", "POST"], "QQ 实例与唤醒称呼"),
@@ -323,41 +327,175 @@ class CorticoBridge(Star):
         # 已启用的旧版部署继续使用原权限；新安装从主人私聊开始。
         return "full" if self.config.get("enabled") else "safe"
 
-    def _owner_umo(self) -> str:
-        owner = _s(self.config.get("owner_tool_qq")).strip()
+    def _qq_owner_instance(self) -> str:
         platforms = self._bridge_platforms()
         platform = _s(self.config.get("owner_platform")).strip()
         if not platform and len(platforms) == 1:
             platform = platforms[0]
-        if (platform not in platforms or platform in self._discord_routes() or platform in self._discord_instances()
-                or len(owner) > 20 or not owner.isascii() or not owner.isdigit()):
-            return ""
-        return f"{platform}:FriendMessage:{owner}"
+        return platform if platform in platforms and platform not in self._discord_routes() and platform not in self._discord_instances() else ""
 
-    def _is_owner_private(self, event: AstrMessageEvent) -> bool:
-        if self._is_discord(event):
-            route = self._discord_routes().get(_s(event.get_platform_id()), {})
-            umo = _s(route.get("owner_umo"))
-            return bool(umo and event.is_private_chat() and self._umo_of(event) == umo
-                        and _s(event.get_sender_id()) == route.get("owner_id"))
-        owner_umo = self._owner_umo()
-        return bool(owner_umo and event.is_private_chat() and self._umo_of(event) == owner_umo
-                    and _s(event.get_sender_id()) == owner_umo.rsplit(":", 1)[1])
+    def _instance_policies(self) -> dict[str, dict]:
+        stored = self.config.get("instance_routes")
+        return dict(stored) if isinstance(stored, dict) else {}
 
-    def _event_allowed(self, event: AstrMessageEvent) -> bool:
-        if self.server.mode == "safe":
-            return self._is_owner_private(event) and (not self._is_discord(event) or self._platform_allowed(event))
-        return self._platform_allowed(event) and (
-            self._private_allowed(event) if event.is_private_chat() else self._group_allowed(event)
+    def _instance_policy(self, instance: str) -> dict:
+        saved = self._instance_policies().get(instance)
+        disabled = {"enabled": False, "mode": "safe"}
+        if isinstance(saved, dict):
+            current_type = self._configured_platforms().get(instance, {}).get("type")
+            return saved if not saved.get("adapter_type") or saved["adapter_type"] == current_type else disabled
+        if self.config.get("instance_policy_migrated") or not instance:
+            return disabled
+        # Legacy QQ and Discord configuration is read only during migration.
+        configured = self._configured_platforms().get(instance)
+        mode = self.server.mode
+        if instance in self._discord_routes() or (configured or {}).get("type") == "discord":
+            route = self._discord_routes().get(instance, {})
+            return {
+                "enabled": route.get("enabled") is True, "mode": mode,
+                "owner_id": _s(route.get("owner_id")), "group_scope": "allowlist",
+                "group_allow": route.get("channels", []), "group_mode": "mention",
+                "private_mode": "owner", "private_deny": "astrbot",
+                "legacy_owner_umo": _s(route.get("owner_umo")),
+            }
+        if instance not in self._bridge_platforms() or (
+            configured is not None and configured.get("type") != "aiocqhttp"
+        ):
+            return disabled
+        owner = _s(self.config.get("owner_tool_qq")).strip() if instance == self._qq_owner_instance() else ""
+        def scoped(values, kind):
+            return [entry for entry in values if ":" not in entry or (
+                (parsed := parse_umo(entry)) and parsed[:2] == (instance, kind)
+            )]
+        return {
+            "enabled": True, "mode": mode, "owner_id": owner,
+            "group_scope": self._group_scope(), "group_allow": scoped(self._group_allow(), "group"),
+            "group_mode": self._group_mode(), "aliases": self._aliases(),
+            "private_mode": self._private_mode(), "private_allow": scoped(self._private_allow(), "private"),
+            "private_deny": self._private_deny(),
+            "legacy_admin_bypass": self._admin_ids() if self._private_admin_bypass() else [],
+            "legacy_admin_tools": self._admin_ids(),
+        }
+
+    def _instance_enabled(self, instance: str) -> bool:
+        configured = self._configured_platforms().get(instance)
+        if configured is None and self.config.get("instance_policy_migrated"):
+            return False
+        return bool((configured is None or configured.get("enable") is not False)
+                    and self._instance_policy(instance).get("enabled") is True
+                    and self._instance_capabilities(instance)["reply"])
+
+    def _scope_mode(self, umo: str) -> str:
+        parsed = parse_umo(umo)
+        if not parsed or not self._instance_enabled(parsed[0]):
+            return "safe"
+        return "full" if self._instance_policy(parsed[0]).get("mode") == "full" else "safe"
+
+    def _transport_mode(self) -> str:
+        return "full" if any(
+            self._instance_enabled(instance) and self._instance_policy(instance).get("mode") == "full"
+            for instance in self._configured_platforms()
+        ) else "safe"
+
+    def _migrate_instance_policies(self) -> None:
+        if self.config.get("instance_policy_migrated"):
+            return
+        policies = self._instance_policies()
+        sessions = self._owner_sessions()
+        had_legacy_setup = bool(
+            self.config.get("enabled") or self.config.get("owner_tool_qq")
+            or self.config.get("group_allow") or self.config.get("observe_groups")
+            or self.config.get("private_allow") or self.config.get("desktop_send_targets")
+            or self._bridge_platforms() != ["default"] or self._discord_routes()
+        )
+        for instance in self._configured_platforms() if had_legacy_setup else ():
+            policy = dict(self._instance_policy(instance))
+            if policy.get("enabled") is not True:
+                continue
+            owner, umo = self._instance_owner(instance)
+            policy.pop("legacy_owner_umo", None)
+            policy["adapter_type"] = self._configured_platforms()[instance].get("type")
+            policy["desktop_tools"] = (instance == self._qq_owner_instance()
+                                        and self.config.get("desktop_tools_enabled") is True
+                                        and owner in self._admin_ids())
+            policy["desktop_targets"] = [
+                target for target in self._legacy_desktop_targets()
+                if (parsed := parse_umo(target)) and parsed[0] == instance
+            ]
+            policies.setdefault(instance, policy)
+            if owner and umo:
+                sessions[instance] = {"user_id": owner, "umo": umo}
+        if self._commit_config({"instance_routes": policies, "owner_sessions": sessions,
+                                "instance_policy_migrated": True}):
+            self.server.mode = self._transport_mode()
+
+    def _adapter_channel(self, instance: str) -> str:
+        adapter = _s(self._configured_platforms().get(instance, {}).get("type")).strip()
+        return ("qq" if adapter == "aiocqhttp" else adapter) or "qq"
+
+    def _instance_admin(self, event: AstrMessageEvent) -> bool:
+        policy = self._instance_policy(_s(event.get_platform_id()))
+        # Preserve the old QQ grants where they already applied. New policies
+        # require the instance's bound owner and AstrBot's administrator grant.
+        return self._is_admin(event) and (
+            _s(event.get_sender_id()) in policy.get("legacy_admin_tools", []) or self._is_owner_private(event)
         )
 
-    def _desktop_owner(self) -> str:
-        owner_umo = self._owner_umo()
-        return owner_umo.rsplit(":", 1)[1] if owner_umo and self.config.get("desktop_tools_enabled") is True else ""
+    def _instance_owner(self, instance: str) -> tuple[str, str]:
+        if not instance:
+            return "", ""
+        policy = self._instance_policy(instance)
+        owner = _s(policy.get("owner_id")).strip()
+        saved = self._owner_sessions().get(instance)
+        umo = _s(saved.get("umo")) if isinstance(saved, dict) and saved.get("user_id") == owner else _s(policy.get("legacy_owner_umo"))
+        parsed = parse_umo(umo)
+        return owner, umo if owner and parsed and parsed[:2] == (instance, "private") else ""
 
-    def _desktop_targets(self) -> list[str]:
+    def _owner_umo(self) -> str:
+        return self._instance_owner(self._qq_owner_instance())[1]
+
+    def _owner_sessions(self) -> dict:
+        stored = self.config.get("owner_sessions")
+        return dict(stored) if isinstance(stored, dict) else {}
+
+    def _is_owner_private(self, event: AstrMessageEvent) -> bool:
+        owner, umo = self._instance_owner(_s(event.get_platform_id()))
+        return bool(owner and umo and event.is_private_chat() and self._umo_of(event) == umo
+                    and _s(event.get_sender_id()) == owner)
+
+    def _event_allowed(self, event: AstrMessageEvent) -> bool:
+        if not self._platform_allowed(event):
+            return False
+        if self._scope_mode(self._umo_of(event)) == "safe":
+            return self._is_owner_private(event)
+        return self._private_allowed(event) if event.is_private_chat() else self._group_allowed(event)
+
+    def _desktop_bindings(self) -> list[tuple[str, str]]:
+        return [(owner, umo) for instance in self._configured_platforms()
+                if self._instance_enabled(instance)
+                and self._instance_policy(instance).get("desktop_tools") is True
+                and (binding := self._instance_owner(instance))
+                and (owner := binding[0]) in self._admin_ids()
+                and (umo := binding[1]) and self._scope_mode(umo) == "full"]
+
+    def _desktop_owner(self) -> str:
+        if self.config.get("instance_policy_migrated"):
+            bindings = self._desktop_bindings()
+            return bindings[0][0] if bindings else ""
+        owner, umo = self._instance_owner(self._qq_owner_instance())
+        return owner if umo and self.config.get("desktop_tools_enabled") is True else ""
+
+    def _legacy_desktop_targets(self) -> list[str]:
         targets = self.config.get("desktop_send_targets", [])
         return [target for target in targets if isinstance(target, str)] if isinstance(targets, list) else []
+
+    def _desktop_targets(self) -> list[str]:
+        if not self.config.get("instance_policy_migrated"):
+            return self._legacy_desktop_targets()
+        return [umo for instance in self._configured_platforms() if self._instance_enabled(instance)
+                for umo in self._instance_policy(instance).get("desktop_targets", [])
+                if self._scope_mode(umo) == "full" and self._target_allowed(umo)
+                and parse_umo(umo)[0] == instance and self._instance_capabilities(instance)["sessionSend"]]
 
     def _legacy_desktop_needs_review(self) -> bool:
         # 旧的独立令牌只用于识别待迁移配置，不能授权新版连接。
@@ -436,60 +574,73 @@ class CorticoBridge(Star):
         raw = self.config.get("discord_routes")
         return {key: value for key, value in raw.items() if isinstance(value, dict)} if isinstance(raw, dict) else {}
 
-    def _platform_routes(self) -> list[dict]:
-        configured = self._configured_platforms()
-        routes = self._discord_routes()
-        discord = {key: item for key, item in configured.items() if item.get("type") == "discord"}
-        instances = {**dict.fromkeys(routes, {"enable": False}), **discord}
-        owner = self._owner_umo()
-        return [
-            {"id": platform, "channel": "qq", "enabled": configured[platform].get("enable") is not False,
-             "ownerBound": owner.startswith(f"{platform}:")}
-            for platform in self._bridge_platforms()
-            if configured.get(platform, {}).get("type") == "aiocqhttp" and platform not in instances
-        ] + [
-            {"id": platform, "channel": "discord", "enabled": routes.get(platform, {}).get("enabled") is True and item.get("enable") is not False,
-             "ownerBound": bool(routes.get(platform, {}).get("owner_umo"))}
-            for platform, item in instances.items()
-        ]
+    def _instance_capabilities(self, instance: str) -> dict:
+        native = self._configured_platforms().get(instance, {})
+        adapter = native.get("type")
+        # AstrBot 4.29.1's WeCom AI Bot can send to a fixed push webhook
+        # regardless of the passed session. Preserve its event-scoped text reply.
+        fixed_reply = (adapter == "wecom_ai_bot" and native.get("only_use_webhook_url_to_send")
+                       and native.get("msg_push_webhook_url"))
+        return {
+            "reply": not bool(fixed_reply),
+            "replyTextOnly": adapter == "wecom_ai_bot",
+            "sessionSend": adapter in ("aiocqhttp", "discord", "telegram"),
+        }
 
-    @staticmethod
-    def _is_discord(event: AstrMessageEvent) -> bool:
-        platform_name = getattr(event, "get_platform_name", None)
-        return callable(platform_name) and platform_name() == "discord"
+    def _platform_routes(self) -> list[dict]:
+        result = []
+        for instance, item in self._configured_platforms().items():
+            adapter = _s(item.get("type")).strip()
+            if not adapter:
+                continue
+            capabilities = self._instance_capabilities(instance)
+            result.append({"id": instance, "channel": self._adapter_channel(instance),
+                           "adapterType": adapter, "name": _s(item.get("name")) or instance,
+                           "enabled": self._instance_enabled(instance),
+                           "ownerBound": bool(self._instance_owner(instance)[1]),
+                           **({"mode": self._instance_policy(instance).get("mode", "safe"),
+                               "astrbotEnabled": item.get("enable") is not False,
+                               "replySupported": capabilities["reply"],
+                               "replyTextOnly": capabilities["replyTextOnly"]}
+                              if self.config.get("instance_policy_migrated") else {})})
+        return result
 
     def _owner_dms(self) -> list[str]:
-        return [self._owner_umo()] + [
-            _s(route.get("owner_umo")) for platform, route in self._discord_routes().items()
-            if self._discord_instance_enabled(platform)
-        ]
+        instances = self._configured_platforms().keys() | self._instance_policies().keys()
+        if not self.config.get("instance_policy_migrated"):
+            instances |= set(self._bridge_platforms()) | self._discord_routes().keys()
+        return [umo for instance in sorted(instances) if self._instance_enabled(instance)
+                and (umo := self._instance_owner(instance)[1])]
 
     def _discord_instance_enabled(self, platform: str) -> bool:
         adapter = self._discord_instances().get(platform)
         return bool(adapter and adapter.get("enable") is not False
                     and self._discord_routes().get(platform, {}).get("enabled") is True)
 
-    def _bind_discord_owner(self, event: AstrMessageEvent) -> bool:
+    def _bind_instance_owner(self, event: AstrMessageEvent) -> bool:
         platform = _s(event.get_platform_id())
-        routes = self._discord_routes()
-        route = routes.get(platform, {})
-        parsed = parse_umo(self._umo_of(event))
-        if (not parsed or parsed[:2] != (platform, "private") or not event.is_private_chat()
-                or not route.get("owner_id") or route.get("owner_umo")
-                or _s(event.get_sender_id()) != route["owner_id"]):
+        owner, bound = self._instance_owner(platform)
+        if (not owner or bound or not event.is_private_chat() or _s(event.get_sender_id()) != owner
+                or owner == _s(event.get_self_id()) or owner in ("unknown", "default_user")):
             return False
-        return self._commit_config({"discord_routes": {**routes, platform: {**route, "owner_umo": parsed[3]}}})
+        umo = self._umo_of(event)
+        parsed = parse_umo(umo)
+        if not parsed or parsed[:2] != (platform, "private"):
+            return False
+        sessions = self._owner_sessions()
+        sessions[platform] = {"user_id": owner, "umo": umo}
+        return self._commit_config({"owner_sessions": sessions})
 
     def _platform_allowed(self, event: AstrMessageEvent) -> bool:
-        umo = self._umo_of(event)
-        platform = umo.split(":", 1)[0] if ":" in umo else _s(event.get_platform_id())
-        if self._is_discord(event):
-            return bool(getattr(self.server, "supports_multiple_platforms", False)
-                        and platform == _s(event.get_platform_id())
-                        and parse_umo(umo) and self._discord_instance_enabled(platform))
-        if platform in self._discord_instances() or platform in self._discord_routes():
+        platform = _s(event.get_platform_id())
+        route = parse_umo(self._umo_of(event))
+        kind = "private" if event.is_private_chat() else "group"
+        if not route or route[:2] != (platform, kind) or not self._instance_enabled(platform):
             return False
-        return platform in self._bridge_platforms()
+        channel = self._adapter_channel(platform)
+        if channel in ("qq", "discord"):
+            return channel == "qq" or getattr(self.server, "supports_multiple_platforms", False)
+        return bool((self.server.capabilities or {}).get("instance_policies"))
 
     def _private_mode(self) -> str:
         raw = self.config.get("private_mode")
@@ -620,26 +771,25 @@ class CorticoBridge(Star):
     def _group_allowed(self, event: AstrMessageEvent) -> bool:
         if event.is_private_chat():
             return True
-        if self._is_discord(event):
-            route = self._discord_routes().get(_s(event.get_platform_id()), {})
-            return self._umo_of(event) in route.get("channels", [])
-        if self._group_scope() == "all":
+        policy = self._instance_policy(_s(event.get_platform_id()))
+        if policy.get("group_scope") == "all":
             return True
-        return self._matches_scope(event, self._group_allow())
+        return self._matches_scope(event, policy.get("group_allow", []))
 
     def _private_allowed(self, event: AstrMessageEvent) -> bool:
         if not event.is_private_chat():
             return True
-        if self._is_discord(event):
-            return self._is_owner_private(event)
-        mode = self._private_mode()
-        if mode == "off":
-            return False
+        policy = self._instance_policy(_s(event.get_platform_id()))
+        mode = policy.get("private_mode", "owner")
         if mode == "all":
             return True
-        if self._private_admin_bypass() and self._is_admin(event):
-            return True
-        return self._matches_scope(event, self._private_allow())
+        if mode == "owner":
+            return self._is_owner_private(event)
+        if mode != "allowlist":
+            return False
+        sender = _s(event.get_sender_id())
+        return (sender in policy.get("legacy_admin_bypass", []) and self._is_admin(event)
+                or self._matches_scope(event, policy.get("private_allow", [])))
 
     def _aliases(self) -> list[str]:
         raw = self.config.get("name_aliases", "")
@@ -783,6 +933,7 @@ class CorticoBridge(Star):
     # ---------- 生命周期 ----------
 
     async def initialize(self):
+        self._migrate_instance_policies()
         if self.config.get("bridge_mode") not in ("safe", "full"):
             self._commit_config({"bridge_mode": self.server.mode})
         token = self._token_value()
@@ -852,34 +1003,31 @@ class CorticoBridge(Star):
 
     def _target_allowed(self, umo: str) -> bool:
         target = parse_umo(umo)
-        if target and (target[0] in self._discord_instances() or target[0] in self._discord_routes()):
-            platform, kind, _, _ = target
-            if not self._discord_instance_enabled(platform) or not getattr(self.server, "supports_multiple_platforms", False):
-                return False
-            route = self._discord_routes()[platform]
-            if kind == "private":
-                return umo == route.get("owner_umo") and self.delivery.has_umo(umo)
-            return self.server.mode == "full" and umo in route.get("channels", []) and self.delivery.has_umo(umo)
-        if self.server.mode == "safe":
-            return bool(umo and umo == self._owner_umo())
-        if not target or not self.delivery.has_umo(umo):
+        if not target:
             return False
-        platform, kind, target_id, _ = target
-        if platform not in self._bridge_platforms():
+        instance, kind, target_id, _ = target
+        if not self._instance_enabled(instance):
             return False
+        if self._scope_mode(umo) == "safe":
+            return kind == "private" and umo == self._instance_owner(instance)[1]
+        if not self.delivery.has_umo(umo):
+            return False
+        policy = self._instance_policy(instance)
         if kind == "group":
-            return self._group_scope() == "all" or bool({umo, target_id}.intersection(self._group_allow()))
-        mode = self._private_mode()
+            return policy.get("group_scope") == "all" or bool({umo, target_id}.intersection(policy.get("group_allow", [])))
+        mode = policy.get("private_mode", "owner")
+        if mode == "owner":
+            return umo == self._instance_owner(instance)[1]
         return mode == "all" or (mode == "allowlist" and (
-            bool({umo, target_id}.intersection(self._private_allow())) or (
-                self._private_admin_bypass() and target_id in self._admin_ids())))
+            bool({umo, target_id}.intersection(policy.get("private_allow", []))) or (
+                target_id in policy.get("legacy_admin_bypass", []) and target_id in self._admin_ids())))
 
     async def _on_tool_call(
         self, name: str, args: dict, turn: str, actor: dict | None = None, *, scope: str = ""
     ) -> tuple[bool, str | ComponentReceipt]:
         """执行一个 AstrBot 工具。
 
-        QQ 轮次用触发消息的身份；Coo 桌面轮次用 AstrBot 管理页授权的主人 QQ。
+        平台轮次使用原消息的身份。桌面轮次使用对应实例中已获授权的主人身份。
         """
         if not self.config.get("enabled", False):
             return False, "桥未启用，工具调用被拒绝"
@@ -896,31 +1044,48 @@ class CorticoBridge(Star):
                 self._message_segments.pop(key, None)
                 return False, "这一轮的消息已经过期，请重新说一次"
             if not self._event_allowed(event):
-                return False, "触发该轮的 QQ 会话已停用"
+                return False, "触发该轮的会话已停用"
             if read_scope and read_scope != scope and name in (READ_COMPONENT_TOOL, "cortico_authorize_history"):
-                return False, "读取目标超出当前 QQ 会话"
+                return False, "读取目标超出当前会话"
             read_scope = scope
             # T-001：只按 AstrBot 管理员名单判断；不信任 World 帧里的 role/owner。
-            trusted = not self._is_discord(event) and _s(event.get_sender_id()) in self._admin_ids()
+            if self._scope_mode(scope) == "safe" and name not in (READ_COMPONENT_TOOL, "cortico_authorize_history"):
+                return False, "安全模式仅开放本会话的历史和附件"
+            trusted = self._instance_admin(event)
             who = f"消息 {turn}"
         else:
             owner_id = self.server.tool_owner if actor == {"kind": "desktop"} and self.server.mode == "full" else ""
             if not owner_id:
                 return False, "桌面对话未获得 AstrBot 的主人工具授权"
+            managed = self.config.get("instance_policy_migrated")
+            owner_umo = self._owner_umo()
+            if managed:
+                if name in (READ_COMPONENT_TOOL, "cortico_authorize_history"):
+                    target = parse_umo(read_scope)
+                    if not target or self._scope_mode(read_scope) != "full" or not any(
+                        parse_umo(bound)[0] == target[0] for _, bound in self._desktop_bindings()
+                    ):
+                        return False, "桌面未获得该实例的读取授权"
+                else:
+                    bindings = self._desktop_bindings()
+                    if len(bindings) != 1:
+                        return False, "有多个实例授予了桌面主人工具，请只保留一个明确的执行身份"
+                    owner_id, owner_umo = bindings[0]
             if name == READ_COMPONENT_TOOL:
                 if not self._target_allowed(read_scope):
-                    return False, "该 QQ 会话未获授权"
+                    return False, "该会话未获授权"
                 return await self._read_message_component(args, scope=read_scope)
             if name == "cortico_authorize_history":
                 allowed = self._target_allowed(read_scope)
-                return allowed, "" if allowed else "该 QQ 会话未获授权"
+                return allowed, "" if allowed else "该会话未获授权"
             trusted = True
-            platform = self._owner_umo().split(":", 1)[0]
+            platform = owner_umo.split(":", 1)[0]
             try:
                 from .owner_event import build_owner_event
 
                 event = build_owner_event(
-                    self.context, platform, owner_id, self.server.self_id
+                    self.context, platform, owner_id, "" if managed else self.server.self_id,
+                    **({"owner_umo": owner_umo} if managed else {})
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.error("Cortico Bridge: 主人工具身份构造失败（%s）", type(exc).__name__)
@@ -1115,14 +1280,32 @@ class CorticoBridge(Star):
         voice: bool = False,
         umo: str = "",
         at: list[str] | None = None,
+        *, turn: str = "",
     ) -> tuple[bool, str, bool, bool, str]:
         if not self.config.get("enabled", False):
             return False, "桥未启用，发送门是关的", False, False, codes.DOOR_CLOSED
         if not self._target_allowed(umo):
-            return False, "该 QQ 会话未获授权", False, False, "scope_denied"
+            return False, "该会话未获授权", False, False, "scope_denied"
+        options = {}
+        if self.config.get("instance_policy_migrated"):
+            instance = parse_umo(umo)[0]
+            capabilities = self._instance_capabilities(instance)
+            if turn:
+                hit = self._turns.get((umo, turn))
+                if hit is None or time.time() - hit[0] > 600 or not self._event_allowed(hit[1]):
+                    return False, "原会话已失效，请让对方重新发消息", False, False, "scope_denied"
+                if capabilities["replyTextOnly"] and (image is not None or voice or at):
+                    return False, "该实例当前仅支持原会话文字回复", False, False, "scope_denied"
+                if capabilities["replyTextOnly"]:
+                    reply_to = ""
+                options["reply_event"] = hit[1]
+            elif not capabilities["sessionSend"]:
+                return False, "该实例未开放按会话主动发送", False, False, "scope_denied"
         ok, note, used_voice, uncertain, error_code = await self.delivery.send(
             platform, conv_kind, conv_id, text, reply_to, image, voice, umo, at=at or [],
-            may_dispatch=lambda: bool(self.config.get("enabled") and self._target_allowed(umo)),
+            may_dispatch=lambda: bool(self.config.get("enabled") and self._target_allowed(umo)
+                                      and (not options or self._event_allowed(options["reply_event"]))),
+            **options,
         )
         if ok:
             self.stats["sent"] += 1
@@ -1178,7 +1361,7 @@ class CorticoBridge(Star):
         entry = {
             "ts": _now_iso(),
             "dir": "out",
-            "channel": "discord" if umo.split(":", 1)[0] in self._discord_instances() else "qq",
+            "channel": self._adapter_channel(umo.split(":", 1)[0]),
             "conv": conv_key,
             "convName": conv_name,
             "umo": umo,
@@ -1201,27 +1384,27 @@ class CorticoBridge(Star):
         """
         if not self.config.get("enabled", False):
             return
-        discord = self._is_discord(event)
         if event.is_stopped():
             return
-        if discord:
-            slash_command = getattr(event, "is_slash_command", None)
-            if callable(slash_command) and slash_command():
-                return
-        if discord and self._discord_instance_enabled(_s(event.get_platform_id())) and self._bind_discord_owner(event):
+        slash_command = getattr(event, "is_slash_command", None)
+        if callable(slash_command) and slash_command():
             return
+        route = parse_umo(self._umo_of(event))
+        if route and route[0] == _s(event.get_platform_id()) and self._instance_enabled(route[0]):
+            self._remember_session(route)
         if not self._platform_allowed(event):
-            umo = self._umo_of(event)
-            platform = umo.split(":", 1)[0] if ":" in umo else _s(event.get_platform_id())
-            logger.info(
-                "Cortico Bridge: 跳过非接管平台 %s（bridge_platforms=%s）"
-                % (platform, ",".join(self._bridge_platforms()))
-            )
             return
-        if self.server.mode == "safe" and not self._is_owner_private(event):
+        platform = _s(event.get_platform_id())
+        policy = self._instance_policy(platform)
+        notice, ref = self._notice_text(event)
+        if not notice and not self._looks_like_command(event) and (
+            event.get_message_str() or event.get_messages()
+        ) and self._bind_instance_owner(event):
+            return
+        if self._scope_mode(self._umo_of(event)) == "safe" and not self._is_owner_private(event):
             return
 
-        if not discord:
+        if self._adapter_channel(platform) == "qq":
             self._remember_self(event)
         if self._looks_like_command(event):
             logger.info(
@@ -1235,7 +1418,6 @@ class CorticoBridge(Star):
             )
 
         # 通知类事件先处理：撤回、入群、退群、戳一戳、上传文件。
-        notice, ref = self._notice_text(event) if not discord else ("", "")
         if notice:
             # A-9/P-003：只有真的推给 Cortico 才拦下来；桥断开时放它继续走，
             # 其他插件仍能看到撤回/入群。范围过滤保留在 _push_notice 内部。
@@ -1253,7 +1435,7 @@ class CorticoBridge(Star):
         # 这样指令和「自己轮询」的插件可以先执行并 stop，Coo 不会抢在它们前面。
         if event.is_private_chat():
             if not self._event_allowed(event):
-                if not discord and self._private_deny() == "ignore":
+                if policy.get("private_deny") == "ignore":
                     event.stop_event()
                 return
             event.set_extra("_cortico_llm_owned", "private")
@@ -1265,15 +1447,14 @@ class CorticoBridge(Star):
         # 所以这里晚设置有效。真正起作用的是 is_at_or_wake_command，不是 is_wake。
         if not self._group_allowed(event):
             return
-        if discord or self._group_mode() == "mention":
+        if policy.get("group_mode", "mention") == "mention":
             text = self._raw_message_text(event) or event.get_message_str()
             if not self._is_called_for_wake(event, text):
                 return
-            if not discord:
-                # /llm 修改该 UMO 使用的配置；事件层直推会跳过 AstrBot 的 LLM 检查。
-                config = self.context.get_config(umo=event.unified_msg_origin)
-                if not config.get("provider_settings", {}).get("enable", True):
-                    return
+            # 尊重 AstrBot /llm 的会话级设置，直推也要经过这一层判断。
+            config = self.context.get_config(umo=event.unified_msg_origin)
+            if not config.get("provider_settings", {}).get("enable", True):
+                return
             event.is_at_or_wake_command = True
             event.set_extra("_cortico_llm_owned", "group")
             # 事件层直接推送是主路径，不依赖管线顺序；成功的 _push_event 会
@@ -1313,38 +1494,11 @@ class CorticoBridge(Star):
         self, event: AstrMessageEvent, text: str | None = None
     ) -> bool:
         """统一推送入口：策略、去重、图片、统计和会话记录只在这里做一次。"""
-        if not self.server.connected:
-            return False
-        if not self._platform_allowed(event) or (self.server.mode == "safe" and not self._is_owner_private(event)):
+        if not self.server.connected or not self._event_allowed(event):
             return False
 
-        conv_kind = "private" if event.is_private_chat() else "group"
-        conv_id = (
-            _s(event.get_group_id())
-            if conv_kind == "group"
-            else _s(event.get_sender_id() or event.get_session_id())
-        )
-        discord = self._is_discord(event)
-        if discord:
-            target = parse_umo(self._umo_of(event))
-            if not target or target[1] != conv_kind:
-                return False
-            conv_id = target[2]
-        if not conv_id:
-            return False
-
-        if not discord:
-            self._remember_name(_s(event.get_sender_id()), _s(event.get_sender_name()))
-
-        if conv_kind == "group":
-            if not self._group_allowed(event):
-                logger.debug(f"Cortico Bridge: 群 {conv_id} 不在接管名单里，本轮交给 AstrBot")
-                return False
-        elif not self._event_allowed(event):
-            logger.debug(f"Cortico Bridge: 私聊 {conv_id} 不在允许名单里")
-            if not discord and self._private_deny() == "ignore":
-                event.stop_event()
-            return False
+        platform_id, conv_kind, conv_id, _ = parse_umo(self._umo_of(event))
+        self._remember_name(platform_id, _s(event.get_sender_id()), _s(event.get_sender_name()))
 
         media_text: dict[int, str] = {}
         supports_segments = bool((self.server.capabilities or {}).get("message_segments"))
@@ -1362,8 +1516,7 @@ class CorticoBridge(Star):
         if not text:
             text = " ".join(f"[{LABELS[part['type']]}]" for part in segments[:8])
 
-        platform_id = _s(event.get_platform_id())
-        is_admin = not discord and self._is_admin(event)
+        is_admin = self._instance_admin(event)
         self.delivery.remember(platform_id, conv_kind, conv_id, event.unified_msg_origin)
 
         msg_id = self._message_id(event)
@@ -1391,7 +1544,7 @@ class CorticoBridge(Star):
 
         frame = {
             "t": "msg",
-            "channel": "discord" if discord else "qq",
+            "channel": self._adapter_channel(platform_id),
             "id": msg_id,
             "umo": _s(event.unified_msg_origin).strip(),
             "ts": _now_iso(),
@@ -1401,8 +1554,8 @@ class CorticoBridge(Star):
             "mentioned": self._is_called(event, text),
             "platform": platform_id,
             "role": "admin" if is_admin else "member",
-            "owner": self._is_owner_private(event) if discord else is_admin,
-            "can": {"screenshot": is_admin},
+            "owner": self._is_owner_private(event),
+            "can": {"screenshot": is_admin and self._scope_mode(self._umo_of(event)) == "full"},
         }
 
         for fields, record in (quoted_records or [])[:2]:
@@ -1847,20 +2000,21 @@ class CorticoBridge(Star):
 
     # ---------- 通知类事件（撤回 / 入群 / 戳一戳…） ----------
 
-    def _remember_name(self, uid: str, name: str) -> None:
+    def _remember_name(self, instance: str, uid: str, name: str) -> None:
         """攒 QQ 号 → 昵称；通知事件只带号码，靠这张表补人名。"""
         if not uid or not name or name == uid:
             return
-        self._names[uid] = name
-        self._names.move_to_end(uid)
+        key = (instance, uid)
+        self._names[key] = name
+        self._names.move_to_end(key)
         while len(self._names) > 500:
             self._names.popitem(last=False)
 
-    def _display(self, uid: str) -> str:
+    def _display(self, instance: str, uid: str) -> str:
         """有昵称就显示昵称，没有就退回号码。"""
         if not uid:
             return ""
-        return self._names.get(uid) or uid
+        return self._names.get((instance, uid)) or uid
 
     def _notice_text(self, event: AstrMessageEvent) -> tuple[str, str]:
         """把 OneBot 的 notice 翻译成一句人话；返回 (正文, 相关消息号)。
@@ -1885,9 +2039,9 @@ class CorticoBridge(Star):
 
         self_id = _s(event.get_self_id())
         # 通知只给号码，用攒下来的昵称补人话；戳到自己时说「你」。
-        user_label = self._display(user)
-        operator_label = self._display(operator)
-        target_label = "你" if target and target == self_id else self._display(target)
+        user_label = self._display(_s(event.get_platform_id()), user)
+        operator_label = self._display(_s(event.get_platform_id()), operator)
+        target_label = "你" if target and target == self_id else self._display(_s(event.get_platform_id()), target)
 
         if kind == "group_recall":
             return f"[撤回] {operator_label or user_label} 撤回了一条消息", message_id
@@ -1917,23 +2071,11 @@ class CorticoBridge(Star):
         返回是否真的推出去了；调用方只在 True 时 stop_event，免得
         接管名单外的通知也被我们吞掉。
         """
-        if not self.server.connected or (self.server.mode == "safe" and not self._is_owner_private(event)):
+        if not self.server.connected or not self._event_allowed(event):
             return False
 
-        conv_kind = "private" if event.is_private_chat() else "group"
-        conv_id = (
-            _s(event.get_group_id())
-            if conv_kind == "group"
-            else _s(event.get_sender_id() or event.get_session_id())
-        )
-        if not conv_id:
-            return False
-        if conv_kind == "group" and not self._group_allowed(event):
-            return False
-        if conv_kind == "private" and not self._private_allowed(event):
-            return False
-
-        platform_id = _s(event.get_platform_id())
+        platform_id, conv_kind, conv_id, _ = parse_umo(self._umo_of(event))
+        channel = self._adapter_channel(platform_id)
         self.delivery.remember(platform_id, conv_kind, conv_id, event.unified_msg_origin)
 
         # 通知事件本身不带群名，问一次（拿不到就算了，World 那边有缓存兜底）。
@@ -1946,7 +2088,7 @@ class CorticoBridge(Star):
         frame = {
             "t": "msg",
             "kind": "notice",
-            "channel": "qq",
+            "channel": channel,
             "id": "",
             "umo": _s(event.unified_msg_origin).strip(),
             "ref": ref,
@@ -1956,8 +2098,8 @@ class CorticoBridge(Star):
             "text": text,
             "mentioned": False,
             "platform": platform_id,
-            "role": "admin" if self._is_admin(event) else "member",
-            "owner": self._is_admin(event),
+            "role": "admin" if self._instance_admin(event) else "member",
+            "owner": self._is_owner_private(event),
             "can": {"screenshot": False},
         }
         if not await self.server.push(frame):
@@ -1967,7 +2109,7 @@ class CorticoBridge(Star):
         entry = {
             "ts": frame["ts"],
             "dir": "in",
-            "channel": "qq",
+            "channel": channel,
             "role": frame["role"],
             "owner": bool(frame.get("owner")),
             "notice": True,
@@ -2183,10 +2325,10 @@ class CorticoBridge(Star):
         `mentioned` 用同一口径。
         """
         self_id = _s(event.get_self_id())
-        discord = self._is_discord(event)
+        policy = self._instance_policy(_s(event.get_platform_id()))
         with contextlib.suppress(Exception):
             native_mention = getattr(event, "is_mentioned", None)
-            if discord and callable(native_mention) and native_mention():
+            if callable(native_mention) and native_mention():
                 return True
             for comp in event.get_messages():
                 name = type(comp).__name__
@@ -2194,10 +2336,10 @@ class CorticoBridge(Star):
                     qq = _s(getattr(comp, "qq", ""))
                     if qq and qq != "all" and qq == self_id:
                         return True
-                elif name == "Reply" and self_id and not discord:
+                elif name == "Reply" and self_id:
                     if _s(getattr(comp, "sender_id", "")) == self_id:
                         return True
-        return not discord and any(a in text for a in self._aliases())
+        return any(a in text for a in policy.get("aliases", []))
 
     def _is_called(self, event: AstrMessageEvent, text: str) -> bool:
         """有没有真的叫到名字；@ 自己、回复自己、正文里出现配置的称呼。"""
@@ -2361,7 +2503,7 @@ class CorticoBridge(Star):
         missing = object()
         old = {key: self.config.get(key, missing) for key in changes}
         permission_keys = {
-            "owner_tool_qq", "owner_platform", "desktop_tools_enabled", "desktop_send_targets", "discord_routes",
+            "instance_routes", "instance_policy_migrated", "owner_tool_qq", "owner_platform", "owner_sessions", "desktop_tools_enabled", "desktop_send_targets", "discord_routes",
             "bridge_platforms", "name_aliases", "group_scope", "group_allow", "group_mode", "observe_all", "observe_groups",
             "private_mode", "private_allow", "private_admin_bypass", "private_deny", "tools_allow", "tools_risks",
         }
@@ -2381,6 +2523,8 @@ class CorticoBridge(Star):
             return False
 
         if permissions_changed:
+            if self.config.get("instance_policy_migrated"):
+                self.server.mode = self._transport_mode()
             self.server.revise_permissions()
             if self.server.has_client:
                 asyncio.create_task(self.server.push_ready())
@@ -2465,6 +2609,126 @@ class CorticoBridge(Star):
                 return error_response(message, status_code=500)
             return json_response(self._connection_settings())
 
+    def _remember_session(self, route: tuple[str, str, str, str]) -> None:
+        observed = getattr(self, "_observed_sessions", None)
+        if observed is None:
+            return
+        instance, kind, _, umo = route
+        observed[umo] = {"instance": instance, "kind": kind, "umo": umo}
+        observed.move_to_end(umo)
+        while len(observed) > 200:
+            observed.popitem(last=False)
+
+    def _instance_view(self) -> dict:
+        observed = getattr(self, "_observed_sessions", {})
+        rows = []
+        for route in self._platform_routes():
+            instance = route["id"]
+            policy = self._instance_policy(instance)
+            owner, bound = self._instance_owner(instance)
+            fields = {
+                "enabled": policy.get("enabled") is True, "mode": policy.get("mode", "safe"),
+                "owner_id": owner, "group_scope": policy.get("group_scope", "allowlist"),
+                "group_allow": policy.get("group_allow", []), "group_mode": policy.get("group_mode", "mention"),
+                "private_mode": policy.get("private_mode", "owner"), "private_allow": policy.get("private_allow", []),
+                "private_deny": policy.get("private_deny", "astrbot"), "aliases": policy.get("aliases", []),
+                "desktop_tools": policy.get("desktop_tools") is True, "desktop_targets": policy.get("desktop_targets", []),
+            }
+            rows.append({**route, "policy": fields, "ownerUmo": bound,
+                         "version": self._approval_scope_version({"policy": policy, "ownerUmo": bound, "adapter": route["adapterType"]}),
+                         "capabilities": self._instance_capabilities(instance),
+                         "sessions": [item for item in reversed(observed.values()) if item["instance"] == instance]})
+        return {"instances": rows, "admins": self._admin_ids(), "synced": self.server.connected}
+
+    def _save_instance_policy(self, payload: dict):
+        instance = _s(payload.get("instance")).strip()
+        row = next((row for row in self._instance_view()["instances"] if row["id"] == instance), None)
+        if not row:
+            raise ValueError("请选择 AstrBot 已配置的实例。")
+        if payload.get("version") != row["version"]:
+            raise ValueError("实例授权或主人绑定已变化，请刷新后重试。")
+        current = row["policy"]
+        stored = self._instance_policies().get(instance, {})
+        adapter_changed = bool(stored.get("adapter_type") and stored["adapter_type"] != row["adapterType"])
+        old = self._instance_policy(instance)
+        fields = payload.get("policy")
+        if not isinstance(fields, dict):
+            raise ValueError("缺少实例授权配置。")
+        policy = dict(current)
+        for key in ("enabled", "desktop_tools"):
+            if key in fields:
+                if not isinstance(fields[key], bool):
+                    raise ValueError("开关设置格式不正确。")
+                policy[key] = fields[key]
+        for key, choices in {
+            "mode": ("safe", "full"), "group_scope": ("all", "allowlist"), "group_mode": ("mention", "all"),
+            "private_mode": ("owner", "off", "allowlist", "all"), "private_deny": ("ignore", "astrbot"),
+        }.items():
+            if key in fields:
+                if fields[key] not in choices:
+                    raise ValueError("实例模式或会话范围不正确。")
+                policy[key] = fields[key]
+        if policy["enabled"] and not row["capabilities"]["reply"]:
+            raise ValueError("该实例配置了固定 Webhook 回复，无法按原会话安全回包。")
+        owner = fields.get("owner_id", current["owner_id"])
+        if not isinstance(owner, str) or len(owner) > 256 or any(ord(c) < 32 for c in owner):
+            raise ValueError("请输入 AstrBot 事件中显示的主人用户 ID。")
+        owner = owner.strip()
+        if owner in ("unknown", "default_user"):
+            raise ValueError("主人用户 ID 无效。")
+        policy["owner_id"] = owner
+        if "aliases" in fields:
+            policy["aliases"] = self._setting_items(fields["aliases"], "唤醒称呼")
+        for key, kind in (("group_allow", "group"), ("private_allow", "private"), ("desktop_targets", "")):
+            if key not in fields:
+                continue
+            items = self._setting_items(fields[key], "会话 UMO")
+            for value in items:
+                if value in current[key]:
+                    continue
+                route = parse_umo(value)
+                if not route or route[0] != instance or (kind and route[1] != kind):
+                    raise ValueError("请使用所选实例的完整原生会话 UMO。")
+            policy[key] = items
+        if policy["desktop_targets"] and not row["capabilities"]["sessionSend"]:
+            raise ValueError("该适配器的主动发送未验证可按 UMO 路由。")
+        sessions = self._owner_sessions()
+        owner_changed = owner != current["owner_id"]
+        if owner_changed or adapter_changed:
+            sessions.pop(instance, None)
+            policy["desktop_tools"] = False
+        if policy["desktop_tools"] and owner not in self._admin_ids():
+            raise ValueError("桌面主人工具需要该实例的主人同时属于 AstrBot 管理员。")
+        if fields.get("desktop_tools") is True and not current["desktop_tools"] and (owner_changed or not row["ownerUmo"]):
+            raise ValueError("请先完成主人私聊绑定，再授权桌面主人工具。")
+        opens = policy["enabled"] and (not current["enabled"] or owner_changed or (
+            policy["mode"] == "full" and policy != current
+        ))
+        if opens and payload.get("confirmed") is not True:
+            raise ValueError("请确认本实例的开放范围及共用 Coo 主会话的影响。")
+        policy["adapter_type"] = row["adapterType"]
+        for key in ("legacy_admin_bypass", "legacy_admin_tools"):
+            if key in old:
+                policy[key] = old[key]
+        if not self._commit_config({"instance_routes": {**self._instance_policies(), instance: policy},
+                                    "owner_sessions": sessions}):
+            raise ValueError("保存授权失败。正在发送或调用工具时请稍后重试。")
+
+    async def page_instances(self):
+        if request is not None and _s(request.method).upper() == "POST":
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求格式不正确。", status_code=400)
+            if not self.config.get("instance_policy_migrated"):
+                self._migrate_instance_policies()
+                if not self.config.get("instance_policy_migrated"):
+                    return error_response("旧授权迁移未保存，请稍后重试。", status_code=409)
+            try:
+                self._save_instance_policy(payload)
+            except ValueError as exc:
+                return error_response(str(exc), status_code=409)
+        return json_response(self._instance_view())
+
     def _qq_settings(self) -> dict:
         return {
             "platforms": self._bridge_platforms(), "aliases": self._aliases(), "mode": self.server.mode,
@@ -2477,6 +2741,8 @@ class CorticoBridge(Star):
     async def page_qq_settings(self):
         if request is None or _s(request.method).upper() != "POST":
             return json_response(self._qq_settings())
+        if self.config.get("instance_policy_migrated"):
+            return error_response("请在「实例接入」配置实例权限。", status_code=409)
         payload = await request.json(default={})
         if not isinstance(payload, dict):
             return error_response("请求格式不正确。", status_code=400)
@@ -2492,7 +2758,7 @@ class CorticoBridge(Star):
         available = {item["id"] for item in current["instances"]}
         if not platforms or added - available:
             return error_response("请至少保留一个 QQ 实例，新增项须从 AstrBot 已配置的实例中选择。", status_code=400)
-        owner_platform = self._owner_umo().partition(":")[0]
+        owner_platform = self._qq_owner_instance() if self.config.get("owner_tool_qq") else ""
         if owner_platform and owner_platform not in platforms:
             return error_response("请先调整主人私聊绑定，再移除此 QQ 实例。", status_code=409)
         if (added or self.server.mode == "full" and set(aliases) - set(current["aliases"])) and payload.get("confirmed") is not True:
@@ -2586,7 +2852,8 @@ class CorticoBridge(Star):
             "desktopOwner": self._desktop_owner() if self._desktop_owner() in self._admin_ids() else "",
             "desktopTargets": self._desktop_targets(),
             "discordRoutes": {
-                platform: route for platform, route in self._discord_routes().items()
+                platform: {**route, "owner_umo": self._instance_owner(platform)[1]}
+                for platform, route in self._discord_routes().items()
                 if self._discord_instance_enabled(platform)
             },
         }
@@ -2598,6 +2865,8 @@ class CorticoBridge(Star):
     async def page_access(self):
         """AstrBot 管理后台是绑定主人、配置桌面权限和批准扩权的唯一入口。"""
         if request is not None and _s(request.method).upper() == "POST":
+            if self.config.get("instance_policy_migrated"):
+                return error_response("请在「实例接入」配置实例权限。", status_code=409)
             payload = await request.json(default={})
             if not isinstance(payload, dict):
                 return error_response("请求格式不正确。", status_code=400)
@@ -2625,8 +2894,15 @@ class CorticoBridge(Star):
                         raise ValueError("主人 QQ 应为 20 位以内的数字")
                     if owner and (platform not in self._bridge_platforms() or platform in self._discord_instances()):
                         raise ValueError("请选择已接入的 QQ 平台实例")
-                    owner_changed = self._owner_umo() != (f"{platform}:FriendMessage:{owner}" if owner else "")
+                    previous_platform = self._qq_owner_instance()
+                    previous_owner = self._instance_owner(previous_platform)[0]
+                    owner_changed = (previous_owner, previous_platform if previous_owner else "") != (owner, platform if owner else "")
                     changes = {"owner_tool_qq": owner, "owner_platform": platform if owner else ""}
+                    if owner_changed:
+                        sessions = self._owner_sessions()
+                        sessions.pop(previous_platform, None)
+                        sessions.pop(platform, None)
+                        changes["owner_sessions"] = sessions
                     if self.server.mode == "full" and "desktopTools" in payload and "desktopTargets" in payload:
                         changes.update(self._desktop_config_changes(payload, owner, owner_changed))
                     elif owner_changed and self.config.get("desktop_tools_enabled") is True:
@@ -2642,12 +2918,13 @@ class CorticoBridge(Star):
             "mode": self.server.mode,
             "modeApproval": self.server.pending_mode_approval(),
             "ownerQQ": _s(self.config.get("owner_tool_qq")).strip(),
-            "ownerPlatform": _s(self.config.get("owner_platform")).strip() or self._owner_umo().split(":", 1)[0],
+            "ownerPlatform": self._qq_owner_instance(),
             "platforms": [p for p in self._bridge_platforms()
                           if p not in self._discord_routes() and p not in self._discord_instances()],
             "platformRoutes": [route for route in self._platform_routes()
                                if route["channel"] == "qq" or route["id"] in self._discord_instances()],
-            "discordRoutes": self._discord_routes(),
+            "discordRoutes": {platform: {**route, "owner_umo": self._instance_owner(platform)[1]}
+                              for platform, route in self._discord_routes().items()},
             "desktopTools": self.config.get("desktop_tools_enabled") is True,
             "desktopTargets": self._desktop_targets(),
             "legacyDesktopNeedsReview": self._legacy_desktop_needs_review(),
@@ -2682,7 +2959,12 @@ class CorticoBridge(Star):
             raise ValueError("请确认开放的 Discord 会话将接入 Coo 主会话。")
         route = {"enabled": enabled, "owner_id": owner, "channels": targets,
                  "owner_umo": old.get("owner_umo", "") if owner and owner == old.get("owner_id") else ""}
-        return self._commit_config({"discord_routes": {**routes, platform: route}})
+        changes = {"discord_routes": {**routes, platform: route}}
+        if owner != old.get("owner_id", ""):
+            sessions = self._owner_sessions()
+            sessions.pop(platform, None)
+            changes["owner_sessions"] = sessions
+        return self._commit_config(changes)
 
     def _desktop_config_changes(self, payload: dict, owner: str, owner_changed: bool) -> dict:
         owner_tools = payload.get("desktopTools") is True
@@ -2709,6 +2991,8 @@ class CorticoBridge(Star):
     async def page_groups(self):
         """群聊设置：范围、名单和消息范围。"""
         if request is not None and _s(request.method).upper() == "POST":
+            if self.config.get("instance_policy_migrated"):
+                return error_response("请在「实例接入」配置实例权限。", status_code=409)
             payload = await request.json(default={})
             if not isinstance(payload, dict):
                 return error_response("请求格式不正确。", status_code=400)
@@ -2771,6 +3055,8 @@ class CorticoBridge(Star):
     async def page_private(self):
         """私聊设置：模式、UMO 白名单、管理员豁免、拒绝策略。"""
         if request is not None and _s(request.method).upper() == "POST":
+            if self.config.get("instance_policy_migrated"):
+                return error_response("请在「实例接入」配置实例权限。", status_code=409)
             payload = await request.json(default={})
             if not isinstance(payload, dict):
                 return error_response("请求格式不正确。", status_code=400)
@@ -3002,9 +3288,11 @@ class CorticoBridge(Star):
                 status_code=400,
             )
         conversation = next((conv for conv in self.delivery.known_conversations()
-                             if self._target_allowed(_s(conv.get("umo")))), None)
+                             if self._target_allowed(_s(conv.get("umo")))
+                             and (not self.config.get("instance_policy_migrated") or
+                                  self._instance_capabilities(_s(conv.get("umo")).split(":", 1)[0])["sessionSend"])), None)
         if conversation is None:
-            message = "请先由已绑定的主人 QQ 发一条私聊。" if self.server.mode == "safe" else "还没有允许发送的 QQ 会话。"
+            message = "该实例暂无支持主动语音的已授权会话。" if self.server.mode == "safe" else "还没有允许主动发送语音的会话。"
             return error_response(message, status_code=400)
         umo = _s(conversation["umo"])
         # 试听失败只报错：allow_text_fallback=False 保证不会把文字发到最近会话。

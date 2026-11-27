@@ -14,28 +14,16 @@ const PANELS = {
     desc: '查看桥接状态和已配置的平台。',
   },
   connection: {
-    title: '连接',
-    desc: '管理 QQ 和 Discord 共用的桥接令牌与模式。',
+    title: '连接与令牌',
+    desc: '管理 Coo 与 AstrBot 之间的连接。',
   },
   records: {
     title: '消息记录',
     desc: '查看桥接消息、会话和工具回执。',
   },
-  qq: {
-    title: 'QQ',
-    desc: '管理 QQ 实例和主人私聊。',
-  },
-  discord: {
-    title: 'Discord',
-    desc: '管理 Discord 实例、主人私信和获准频道。',
-  },
-  groups: {
-    title: 'QQ',
-    desc: '设置可接入的群聊和消息范围。',
-  },
-  private: {
-    title: 'QQ',
-    desc: '设置完整模式下可接入的 QQ 私聊。',
+  instances: {
+    title: '实例接入',
+    desc: '选择一个机器人，管理它自己的接入与授权。',
   },
   tools: {
     title: '工具',
@@ -60,14 +48,9 @@ const RISK = {
 const state = {
   panel: 'status',
   status: null,
-  groups: [],
-  groupScope: 'all',
-  groupMode: 'mention',
-  groupsDirty: false,
-  private: { mode: 'all', allow: [], adminBypass: true, deny: 'ignore' },
-  privateDirty: false,
   rows: [],
   msgFilter: 'all',
+  msgInstance: '',
   toolLog: [],
   convs: [],
   refusals: { origin: 0, query: 0, token: 0, version: 0 },
@@ -83,8 +66,6 @@ const state = {
   used: new Set(),
   saving: false,
   toolsSaveGen: 0,
-  groupsSaving: false,
-  groupSaveGen: 0,
   tokenBusy: false,
   loaded: false,
   armClear: false,
@@ -269,8 +250,8 @@ function marked(text, needle) {
 
 /* ---------------- 分页 ---------------- */
 
-const fullModePanels = ['groups', 'private', 'tools'];
-const qqPanels = ['qq', 'groups', 'private'];
+const fullModePanels = ['tools'];
+const sharedPanels = ['images', 'voice', 'tools'];
 const settingsLoaders = new Map();
 
 function setPanel(name) {
@@ -280,25 +261,26 @@ function setPanel(name) {
   if (state.armClear && name !== 'tools') disarmClear();
 
   document.querySelectorAll('.navitem').forEach((btn) => {
-    const on = btn.dataset.panel === (qqPanels.includes(name) ? 'qq' : name);
+    const on = btn.hasAttribute('data-shared-nav') ? sharedPanels.includes(name) : btn.dataset.panel === name;
     btn.classList.toggle('active', on);
     if (on) btn.setAttribute('aria-current', 'page');
     else btn.removeAttribute('aria-current');
   });
   for (const panel of Object.keys(PANELS)) $(`panel-${panel}`).hidden = name !== panel;
-  $('qqTabs').hidden = !qqPanels.includes(name) || state.status?.mode !== 'full';
-  for (const tab of document.querySelectorAll('[data-qq-tab]')) {
-    if (tab.dataset.openPanel === name) tab.setAttribute('aria-current', 'page');
-    else tab.removeAttribute('aria-current');
-  }
   $('btnRestart').hidden = name !== 'connection';
   $('btnReset').hidden = name !== 'records';
   $('actionsTools').hidden = name !== 'tools';
 
   if (name !== 'connection') clearOnceToken();
 
-  $('pageTitle').textContent = meta.title;
-  $('pageDesc').textContent = meta.desc;
+  const shared = sharedPanels.includes(name);
+  $('sharedTabs').hidden = !shared;
+  for (const tab of $('sharedTabs').querySelectorAll('[data-open-panel]')) {
+    if (tab.dataset.openPanel === name) tab.setAttribute('aria-current', 'page');
+    else tab.removeAttribute('aria-current');
+  }
+  $('pageTitle').textContent = shared ? '共享能力' : meta.title;
+  $('pageDesc').textContent = shared ? '管理已接入实例共用的图片、语音和工具。' : meta.desc;
   $('scroll').scrollTop = 0;
   settingsLoaders.get(name)?.();
 
@@ -317,13 +299,8 @@ function setPanel(name) {
     loadVoice().catch((e) => toast('读取语音设置失败：' + (e.message || e), true));
   }
 
-  // 有未保存改动时保留内存状态，切页回来不会被重新加载覆盖。
-  if (name === 'groups' && !state.groupsDirty && !state.groupsSaving) {
-    loadGroups().catch((e) => toast('读取群聊设置失败：' + (e.message || e), true));
-  }
-  if (name === 'private' && !state.privateDirty) {
-    loadPrivate().catch((e) => toast('读取私聊设置失败：' + (e.message || e), true));
-  }
+  if (name === 'instances') void loadInstances();
+
 }
 
 /* ---------------- token ---------------- */
@@ -525,55 +502,42 @@ function initToken() {
 }
 
 function applyStatus(s) {
-  const previousApproval = state.status?.modeApproval;
-  const previousScope = state.status?.modeApprovalScopeVersion;
   s = { ...(state.status || {}), ...s };
   state.status = s;
-  if (!$('discordAccess').hidden) refreshDiscordBinding();
-  const mode = s.mode === 'safe' ? '安全模式' : s.mode === 'full' ? '完整模式' : '模式待同步';
-  $('bridgeMode').textContent = s.connected ? `${mode} · 已与 Coo 同步` : `${mode} · 等待双端同步`;
-  $('connectionMode').textContent = $('bridgeMode').textContent;
-  $('overviewApproval').hidden = !s.modeApproval;
-  $('overviewConnection').hidden = !!s.modeApproval;
-  $('qqTabs').hidden = !qqPanels.includes(state.panel) || s.mode !== 'full';
-  for (const platform of ['qq', 'discord']) {
-    const routes = (s.platformRoutes || []).filter(item => item.channel === platform);
-    const enabled = routes.filter(item => item.enabled).length;
-    const label = $(`${platform}Summary`);
-    label.textContent = enabled ? `${enabled} 个实例已启用` : routes.length ? `${routes.length} 个实例待启用` : '暂无接入实例';
-    label.classList.toggle('is-enabled', enabled > 0);
+  if (state.panel === 'instances') updateInstanceSaveStatus();
+  const routes = (s.platformRoutes || []).filter(route => route.enabled);
+  const safe = routes.filter(route => route.mode === 'safe').length;
+  const full = routes.filter(route => route.mode === 'full').length;
+  const summary = routes.length ? [safe && safe + ' 个安全模式', full && full + ' 个完整模式'].filter(Boolean).join(' · ') : '暂无接入实例';
+  $('bridgeMode').textContent = (summary || '查看实例接入') + (s.connected ? ' · 已同步 Coo' : ' · 等待 Coo 连接');
+  const recordInstance = $('recordInstance');
+  const reported = s.platformRoutes || [];
+  recordInstance.replaceChildren(new Option('全部实例', ''), ...reported.map(item => new Option(
+    (item.name || item.id) + ' · ' + adapterLabel(item), item.id)));
+  recordInstance.value = state.msgInstance;
+  if (!recordInstance.value && state.msgInstance) {
+    state.msgInstance = '';
+    recordInstance.value = '';
   }
-  if (previousApproval !== s.modeApproval || previousScope !== s.modeApprovalScopeVersion) $('modeRisk').checked = false;
-  $('modeApproval').hidden = !s.modeApproval;
-  if (s.modeApprovalScope && (previousApproval !== s.modeApproval || previousScope !== s.modeApprovalScopeVersion)) {
-    const scope = s.modeApprovalScope;
-    const list = values => values?.length ? values.join('、') : '无';
-    const sessions = [
-      `QQ 平台：${list(scope.platforms)}`,
-      `群聊：${scope.groupScope === 'all' ? '全部群' : list(scope.groupAllow)}（${scope.groupMode === 'all' ? '全部消息' : '仅被叫到'}）`,
-      `私聊：${{ all: '全部私聊', off: '关闭', allowlist: list(scope.privateAllow) }[scope.privateMode]}`,
-      ...Object.entries(scope.discordRoutes || {}).map(([platform, route]) =>
-        `Discord「${platform}」：频道 ${list(route.channels)} · 主人私聊 ${route.owner_umo || (route.owner_id ? '待绑定' : '未配置')}`),
-      ...(scope.privateAdminBypass?.length ? [`允许的管理员私聊：${list(scope.privateAdminBypass)}`] : []),
-      `可调用的工具：${list(scope.tools?.map(tool => tool.risk ? `${tool.name}（${tool.risk}）` : tool.name))}`,
-      `桌面主人工具：${scope.desktopOwner || '关闭'}`,
-      `桌面主动发送目标：${list(scope.desktopTargets)}`,
-    ];
-    $('modeApprovalScope').replaceChildren(...sessions.map(text => {
-      const item = document.createElement('li');
-      item.textContent = text;
-      return item;
-    }));
-  }
-  $('modeApprove').disabled = !$('modeRisk').checked;
-  $('modeNarrow').hidden = s.mode !== 'full';
-  $('accessDesktop').hidden = s.mode !== 'full';
+  const directory = $('platformInstances');
+  directory.replaceChildren(...(s.platformRoutes || []).map(route => {
+    const card = el('button', 'platform-card');
+    card.type = 'button';
+    const name = el('span', 'platform-card-name', route.name || route.id);
+    const status = el('span', 'platform-card-status', instanceStatus(route));
+    status.classList.toggle('is-enabled', route.enabled);
+    const info = el('span', 'platform-card-info', adapterLabel(route));
+    card.addEventListener('click', () => openInstance(route.id));
+    card.append(name, status, info);
+    return card;
+  }));
+  if (!directory.hasChildNodes()) directory.textContent = '暂无 AstrBot 实例';
   for (const panel of fullModePanels) {
-    const button = document.querySelector(`[data-panel="${panel}"], [data-qq-tab][data-open-panel="${panel}"]`);
+    const button = $('sharedTabs').querySelector('[data-open-panel="' + panel + '"]');
     if (button) button.hidden = s.mode !== 'full';
   }
   $('metricTools').hidden = s.mode !== 'full';
-  if (s.mode !== 'full' && fullModePanels.includes(state.panel)) setPanel(qqPanels.includes(state.panel) ? 'qq' : 'status');
+  if (s.mode !== 'full' && fullModePanels.includes(state.panel)) setPanel('status');
   $('btnVoiceSend').textContent = s.mode === 'safe' ? '发到主人私聊' : '发到最近的允许会话';
 
   const cls = lampClass(s);
@@ -688,10 +652,12 @@ function applyStatus(s) {
   };
   renderRefusals();
 
-  syncOwnerChoices(s.admins || []);
-
-  const convs = s.conversations || [];
-  state.convs = convs;
+  if (Array.isArray(s.recent)) {
+    state.rows = s.recent.slice().reverse();
+    renderRows();
+  }
+  if (Array.isArray(s.toolLog)) state.toolLog = s.toolLog;
+  state.convs = s.conversations || [];
   renderConvs();
   renderToolLog();
 }
@@ -701,6 +667,7 @@ function renderRows() {
   host.textContent = '';
   const filter = state.msgFilter;
   const shown = state.rows.filter((row) => {
+    if (state.msgInstance && row.umo?.split(':', 1)[0] !== state.msgInstance) return false;
     if (filter === 'in') return row.dir !== 'out';
     if (filter === 'out') return row.dir === 'out';
     if (filter === 'at') return !!row.mentioned;
@@ -729,16 +696,18 @@ function renderRows() {
 
     const body = el('div', 'mbody');
     const meta = el('div', 'mmeta');
-    const [kind, id] = String(row.conv || '').split(':');
+    const conv = String(row.conv || '');
+    const sep = conv.indexOf(':');
+    const kind = conv.slice(0, sep);
+    const id = conv.slice(sep + 1);
     meta.appendChild(
       el('b', null, row.dir === 'out' ? 'Coo' : row.notice ? '群通知' : (row.sender || '未知')),
     );
     if (row.owner && !row.notice && row.dir !== 'out') {
       meta.appendChild(el('span', 'who owner', '· 主人'));
     }
-    const ch = row.channel === 'discord'
-      ? (kind === 'private' ? 'Discord 私聊' : 'Discord 频道')
-      : (kind === 'private' ? 'QQ私聊' : 'QQ群');
+    const service = {'qq': 'QQ', 'discord': 'Discord', 'wecom_ai_bot': '企微'}[row.channel] || row.channel || 'AstrBot';
+    const ch = service + (kind === 'private' ? ' 私聊' : ' 群或频道');
     meta.appendChild(
       el('span', 'who', `· ${kind === 'private' ? ch : `${ch} ${convLabel(kind, id, row.convName)}`}`),
     );
@@ -817,10 +786,6 @@ function renderRefusals() {
 }
 
 function renderConvs() {
-  syncConversationChoices('accessTargetPreset', state.convs || [], '请选择会话');
-  const discord = $('discordPlatform').value;
-  const channels = (state.convs || []).filter(c => c.platform === discord && c.kind === 'group');
-  syncConversationChoices('discordChannelPreset', channels, '请选择频道');
   const host = $('convLog');
   if (!host) return;
   host.textContent = '';
@@ -1064,6 +1029,10 @@ async function act(path, label) {
 }
 
 function initMessages() {
+  $('recordInstance').addEventListener('change', event => {
+    state.msgInstance = event.target.value;
+    renderRows();
+  });
   $('msgFilters').addEventListener('click', (e) => {
     const chip = e.target.closest('.chip');
     if (!chip) return;
@@ -1465,374 +1434,6 @@ function armClear() {
 
 /* ---------------- 群聊 / 私聊 ---------------- */
 
-function renderRecent(hostId, kind, current, onPick) {
-  const host = $(hostId);
-  if (!host) return;
-  host.textContent = '';
-  const seen = new Set(current);
-  const items = [];
-  for (const conv of (state.status && state.status.conversations) || []) {
-    const umo = conv.umo || conv.key || '';
-    if (!umo.includes(`:${kind}:`) || seen.has(umo)) continue;
-    seen.add(umo);
-    items.push(umo);
-    if (items.length >= 4) break;
-  }
-  if (!items.length) {
-    host.hidden = true;
-    return;
-  }
-  host.hidden = false;
-  host.appendChild(el('span', 'recent-label', '最近会话'));
-  for (const umo of items) {
-    const chip = el('button', 'chip recent', umo);
-    chip.type = 'button';
-    chip.title = `添加 ${umo}`;
-    chip.setAttribute('aria-label', `添加最近会话 ${umo}`);
-    chip.addEventListener('click', () => onPick(umo));
-    host.appendChild(chip);
-  }
-}
-
-function removableChip(value, disabled, onRemove) {
-  const chip = el('button', 'chip on removable');
-  chip.type = 'button';
-  chip.disabled = disabled;
-  chip.title = disabled ? value : `移除 ${value}`;
-  chip.setAttribute('aria-label', disabled ? value : `移除 ${value}`);
-  chip.appendChild(el('span', 'chip-label', value));
-  chip.appendChild(el('span', 'chip-x', '×'));
-  chip.addEventListener('click', onRemove);
-  return chip;
-}
-
-function renderGroups() {
-  const list = $('groupList');
-  if (!list) return;
-  const scopeAll = state.groupScope === 'all';
-  list.textContent = '';
-  state.groups.forEach((value) => {
-    list.appendChild(
-      removableChip(value, false, () => {
-        state.groups = state.groups.filter((item) => item !== value);
-        state.groupsDirty = true;
-        renderGroups();
-      }),
-    );
-  });
-  if (!state.groups.length) {
-    list.appendChild(el('span', 'muted', scopeAll ? '全部群' : '还没有群'));
-  }
-
-  renderRecent('groupRecent', 'GroupMessage', state.groups, (umo) => {
-    if (!state.groups.includes(umo)) state.groups.push(umo);
-    state.groupScope = 'allowlist';
-    state.groupsDirty = true;
-    renderGroups();
-  });
-  if (scopeAll) $('groupRecent').hidden = true;
-
-  document.querySelectorAll('#groupScope .segbtn').forEach((btn) => {
-    const on = btn.dataset.scope === state.groupScope;
-    btn.classList.toggle('on', on);
-    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-  });
-  document.querySelectorAll('#groupMode .segbtn').forEach((btn) => {
-    const on = btn.dataset.mode === state.groupMode;
-    btn.classList.toggle('on', on);
-    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-  });
-
-  const hint = $('groupHint');
-  if (scopeAll) {
-    hint.textContent = '所有群都交给 Coo；指定群名单不生效。';
-    hint.classList.remove('warn');
-  } else if (!state.groups.length) {
-    hint.textContent = '至少添加一个群，否则不能保存。';
-    hint.classList.add('warn');
-  } else {
-    hint.textContent = '';
-    hint.classList.remove('warn');
-  }
-  hint.hidden = !hint.textContent;
-
-  $('groupAddRow').hidden = scopeAll;
-  $('groupList').hidden = scopeAll;
-  const saving = !!state.groupsSaving;
-  $('groupInput').disabled = scopeAll;
-  $('btnGroupAdd').disabled = scopeAll;
-  $('btnGroupSave').disabled = saving || (!scopeAll && state.groups.length === 0);
-  $('btnGroupRevert').disabled = saving;
-  $('groupSavebar').hidden = !state.groupsDirty && !saving;
-}
-
-/** 保存期间用快照对比：期间有编辑就不能拿响应覆盖当前名单。 */
-function groupSnapshot() {
-  return JSON.stringify({
-    scope: state.groupScope,
-    mode: state.groupMode,
-    groups: state.groups.slice(),
-  });
-}
-
-async function loadGroups() {
-  try {
-    const data = unwrap(await bridge.apiGet('groups'));
-    state.groups = Array.isArray(data.groups) ? data.groups.slice() : [];
-    if (data.scope === 'all' || data.scope === 'allowlist') {
-      state.groupScope = data.scope;
-    } else {
-      state.groupScope = state.groups.length ? 'allowlist' : 'all';
-    }
-    if (data.mode === 'all' || data.mode === 'mention') {
-      state.groupMode = data.mode;
-    } else {
-      state.groupMode = data.observeAll ? 'all' : 'mention';
-    }
-    state.groupsDirty = false;
-    $('groupError').hidden = true;
-    renderGroups();
-  } catch (e) {
-    $('groupErrorText').textContent = '读取失败：' + (e.message || e);
-    $('groupError').hidden = false;
-    throw e;
-  }
-}
-
-async function saveGroups() {
-  if (state.groupsSaving) return;
-  if (state.groupScope === 'allowlist' && !state.groups.length) {
-    toast('至少添加一个群，或选择「全部群」', true);
-    return;
-  }
-  // scope=all 时不带 groups：后端会保留原名单，切回 allowlist 还能看到（UI-005）。
-  const payload = { scope: state.groupScope, mode: state.groupMode };
-  if (state.groupScope === 'allowlist') payload.groups = state.groups.slice();
-  const btn = $('btnGroupSave');
-  const gen = ++state.groupSaveGen;
-  const snapshot = groupSnapshot();
-  state.groupsSaving = true;
-  btn.textContent = '保存中…';
-  renderGroups();
-  try {
-    const data = unwrap(await bridge.apiPost('groups', payload)) || {};
-    if (gen !== state.groupSaveGen) return;
-    // 等待响应时用户又改了范围/名单：保留当前编辑，别被响应回填盖掉。
-    if (groupSnapshot() !== snapshot) {
-      state.groupsDirty = true;
-      toast('保存期间有改动，请再保存一次', true);
-      return;
-    }
-    state.groupScope = data.scope === 'all' || data.scope === 'allowlist' ? data.scope : payload.scope;
-    state.groups = Array.isArray(data.groups) ? data.groups.slice() : state.groups.slice();
-    state.groupMode = data.mode === 'all' || data.mode === 'mention' ? data.mode : payload.mode;
-    state.groupsDirty = false;
-    renderGroups();
-    toast(
-      state.groupScope === 'all'
-        ? `已设为全部群${state.groups.length ? ` · 保留 ${state.groups.length} 个名单` : ''}`
-        : `已保存 ${state.groups.length} 个群 · ${state.groupMode === 'all' ? '全部消息' : '仅被叫'}`,
-    );
-  } catch (e) {
-    if (gen === state.groupSaveGen) toast('保存失败：' + (e.message || e), true);
-  } finally {
-    if (gen === state.groupSaveGen) {
-      state.groupsSaving = false;
-      btn.textContent = '保存';
-      renderGroups();
-    }
-  }
-}
-
-async function revertGroups() {
-  try {
-    await loadGroups();
-    toast('已恢复上次保存的群聊设置');
-  } catch (e) {
-    toast('读取群聊设置失败：' + (e.message || e), true);
-  }
-}
-
-function renderPrivate() {
-  const data = state.private;
-  const mode = data.mode || 'allowlist';
-  data.mode = mode;
-
-  document.querySelectorAll('#privateMode .segbtn').forEach((btn) => {
-    const on = btn.dataset.mode === mode;
-    btn.classList.toggle('on', on);
-    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-  });
-
-  const hint = $('privateHint');
-  if (mode === 'all') {
-    hint.textContent = '全部私聊都交给 Coo；白名单和管理员豁免不生效。';
-  } else if (mode === 'off') {
-    hint.textContent = '私聊不交给 Coo；「被拒时」仍决定消息是否留给 AstrBot。';
-  } else {
-    hint.textContent = '只处理名单里的私聊；管理员可以绕过名单。';
-  }
-
-  const allowlistOn = mode === 'allowlist';
-  const list = $('privateList');
-  list.textContent = '';
-  (data.allow || []).forEach((value) => {
-    list.appendChild(
-      removableChip(value, !allowlistOn, () => {
-        data.allow = data.allow.filter((item) => item !== value);
-        state.privateDirty = true;
-        renderPrivate();
-      }),
-    );
-  });
-  if (!(data.allow || []).length) {
-    list.appendChild(
-      el('span', 'muted', allowlistOn ? '名单为空：没人能私聊' : '名单已保留，但当前模式不读取'),
-    );
-  }
-  list.classList.toggle('disabled', !allowlistOn);
-
-  renderRecent('privateRecent', 'FriendMessage', data.allow || [], (umo) => {
-    if (!data.allow.includes(umo)) data.allow.push(umo);
-    state.privateDirty = true;
-    renderPrivate();
-  });
-  if (!allowlistOn) $('privateRecent').hidden = true;
-
-  $('privateInput').disabled = !allowlistOn;
-  $('btnPrivateAdd').disabled = !allowlistOn;
-  $('privateAddRow').classList.toggle('is-disabled', !allowlistOn);
-  $('privateAdmin').disabled = !allowlistOn;
-  $('privateAdmin').checked = data.adminBypass !== false;
-  $('privateAdminRow').classList.toggle('is-disabled', !allowlistOn);
-  $('privateDeny').disabled = mode === 'all';
-  $('privateDeny').value = data.deny || 'ignore';
-  $('privateDenyRow').classList.toggle('is-disabled', mode === 'all');
-  $('privateSavebar').hidden = !state.privateDirty;
-}
-
-async function loadPrivate() {
-  try {
-    const data = unwrap(await bridge.apiGet('private'));
-    state.private = {
-      mode: data.mode || 'allowlist',
-      allow: Array.isArray(data.allow) ? data.allow.slice() : [],
-      adminBypass: data.adminBypass !== false,
-      deny: data.deny || 'ignore',
-    };
-    state.privateDirty = false;
-    $('privateError').hidden = true;
-    renderPrivate();
-  } catch (e) {
-    $('privateErrorText').textContent = '读取失败：' + (e.message || e);
-    $('privateError').hidden = false;
-    throw e;
-  }
-}
-
-async function savePrivate() {
-  const btn = $('btnPrivateSave');
-  btn.disabled = true;
-  try {
-    await bridge.apiPost('private', state.private);
-    state.privateDirty = false;
-    renderPrivate();
-    toast('私聊设置已保存');
-  } catch (e) {
-    toast('保存失败：' + (e.message || e), true);
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-async function revertPrivate() {
-  try {
-    await loadPrivate();
-    toast('已恢复上次保存的私聊设置');
-  } catch (e) {
-    toast('读取私聊设置失败：' + (e.message || e), true);
-  }
-}
-
-function initScope() {
-  $('btnGroupAdd').addEventListener('click', () => {
-    const value = $('groupInput').value.trim();
-    if (!value) return;
-    if (!state.groups.includes(value)) state.groups.push(value);
-    $('groupInput').value = '';
-    state.groupScope = 'allowlist';
-    state.groupsDirty = true;
-    renderGroups();
-  });
-  $('groupInput').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      $('btnGroupAdd').click();
-    }
-  });
-  $('groupScope').addEventListener('click', (e) => {
-    const btn = e.target.closest('.segbtn');
-    if (!btn) return;
-    const scope = btn.dataset.scope === 'allowlist' ? 'allowlist' : 'all';
-    if (state.groupScope === scope) return;
-    state.groupScope = scope;
-    state.groupsDirty = true;
-    renderGroups();
-  });
-  $('groupMode').addEventListener('click', (e) => {
-    const btn = e.target.closest('.segbtn');
-    if (!btn) return;
-    const mode = btn.dataset.mode === 'all' ? 'all' : 'mention';
-    if (state.groupMode === mode) return;
-    state.groupMode = mode;
-    state.groupsDirty = true;
-    renderGroups();
-  });
-  $('btnGroupSave').addEventListener('click', saveGroups);
-  $('btnGroupRevert').addEventListener('click', revertGroups);
-  $('btnGroupRetry').addEventListener('click', () => {
-    loadGroups().catch((e) => toast('读取群聊设置失败：' + (e.message || e), true));
-  });
-
-  $('privateMode').addEventListener('click', (e) => {
-    const btn = e.target.closest('.segbtn');
-    if (!btn) return;
-    if (state.private.mode === btn.dataset.mode) return;
-    state.private.mode = btn.dataset.mode || 'allowlist';
-    state.privateDirty = true;
-    renderPrivate();
-  });
-  $('btnPrivateAdd').addEventListener('click', () => {
-    const value = $('privateInput').value.trim();
-    if (!value) return;
-    if (!state.private.allow.includes(value)) state.private.allow.push(value);
-    $('privateInput').value = '';
-    state.privateDirty = true;
-    renderPrivate();
-  });
-  $('privateInput').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      $('btnPrivateAdd').click();
-    }
-  });
-  $('privateAdmin').addEventListener('change', () => {
-    state.private.adminBypass = $('privateAdmin').checked;
-    state.privateDirty = true;
-    renderPrivate();
-  });
-  $('privateDeny').addEventListener('change', () => {
-    state.private.deny = $('privateDeny').value;
-    state.privateDirty = true;
-    renderPrivate();
-  });
-  $('btnPrivateSave').addEventListener('click', savePrivate);
-  $('btnPrivateRevert').addEventListener('click', revertPrivate);
-  $('btnPrivateRetry').addEventListener('click', () => {
-    loadPrivate().catch((e) => toast('读取私聊设置失败：' + (e.message || e), true));
-  });
-}
-
 function initTools() {
   $('toolSearch').addEventListener('input', (e) => {
     state.query = e.target.value;
@@ -2094,209 +1695,6 @@ async function sendVoiceTest() {
   }
 }
 
-function syncOwnerChoices(admins, force = false) {
-  const picker = $('accessOwnerPreset');
-  const options = [...new Set(admins.map(String).filter(id => /^[0-9]{1,20}$/.test(id)))];
-  const serial = JSON.stringify(options);
-  if (!force && serial === picker.dataset.ids) return;
-
-  const owner = $('accessOwner').value.trim();
-  const manual = picker.dataset.manual === 'true';
-  picker.replaceChildren(new Option('请选择主人 QQ', ''),
-    ...options.map(id => new Option(id, id)), new Option('手动指定 QQ', 'manual'));
-  picker.dataset.ids = serial;
-  picker.value = manual ? 'manual' : options.includes(owner) ? owner : owner ? 'manual' : '';
-  $('accessOwnerManual').hidden = picker.value !== 'manual';
-}
-
-function syncConversationChoices(id, conversations, prompt) {
-  const picker = $(id);
-  const choices = conversations.filter(c => c.umo).map(c => [c.umo, c.name ? `${c.name} · ${c.umo}` : c.umo]);
-  const serial = JSON.stringify(choices);
-  if (serial === picker.dataset.choices) return;
-  picker.dataset.choices = serial;
-  picker.replaceChildren(new Option(choices.length ? prompt : '暂无已见过的会话', ''),
-    ...choices.map(([value, label]) => new Option(label, value)));
-}
-
-function addFromConversationPicker(picker, target) {
-  const selected = picker.value;
-  picker.value = '';
-  const values = target.value.split('\n').map(value => value.trim()).filter(Boolean);
-  if (!selected || values.includes(selected)) return;
-  target.value = [...values, selected].join('\n');
-  target.dispatchEvent(new Event('input'));
-}
-
-function refreshDiscordBinding() {
-  const platform = $('discordPlatform').value;
-  const channels = (state.convs || []).filter(c => c.platform === platform && c.kind === 'group');
-  syncConversationChoices('discordChannelPreset', channels, '请选择频道');
-  const route = state.status?.platformRoutes?.find(item => item.id === platform && item.channel === 'discord');
-  const enabled = $('discordEnabled').checked;
-  const owner = $('discordOwner');
-  const ownerChanged = owner.value.trim() !== owner.dataset.savedOwner;
-  $('discordBinding').textContent = !enabled ? '该实例暂未接入 Coo。' : ownerChanged
-    ? '先保存主人用户 ID，再用该账号私信机器人完成绑定。'
-    : route?.ownerBound
-    ? '主人私聊已绑定。'
-    : '启用接入并保存主人用户 ID，再用该账号给机器人发一条私信完成绑定。';
-  const full = state.status?.mode === 'full';
-  $('discordChannelsConfig').hidden = !full;
-  $('discordRiskRow').hidden = !full || !enabled;
-}
-
-function initDiscordAccess(data, post) {
-  const routes = (data.platformRoutes || []).filter(route => route.channel === 'discord');
-  if (!routes.length) {
-    $('discordAvailability').textContent = '尚未配置 Discord 机器人';
-    $('discordAvailabilityDetail').textContent = '请在 AstrBot 的「机器人」中添加 Discord 适配器，再重新打开本页选择实例。';
-    return;
-  }
-  $('discordUnavailable').hidden = true;
-  const select = $('discordPlatform');
-  select.replaceChildren(...routes.map(route => new Option(route.id, route.id)));
-  let settings = data.discordRoutes || {};
-  function fill() {
-    const current = settings[select.value] || {};
-    $('discordEnabled').checked = current.enabled === true;
-    $('discordOwner').value = current.owner_id || '';
-    $('discordOwner').dataset.savedOwner = current.owner_id || '';
-    $('discordChannels').value = (current.channels || []).join('\n');
-    $('discordRisk').checked = false;
-    refreshDiscordBinding();
-  }
-  select.addEventListener('change', fill);
-  const channelPicker = $('discordChannelPreset');
-  channelPicker.addEventListener('change', () => addFromConversationPicker(channelPicker, $('discordChannels')));
-  const controls = [select, $('discordEnabled'), $('discordOwner'), $('discordChannels'), $('discordRisk'), channelPicker];
-  for (const control of controls.slice(1, 4)) {
-    control.addEventListener('input', () => { $('discordRisk').checked = false; refreshDiscordBinding(); });
-  }
-  $('discordSave').addEventListener('click', async event => {
-    const payload = {
-      action: 'save-discord',
-      platform: select.value,
-      enabled: $('discordEnabled').checked,
-      ownerId: $('discordOwner').value,
-      channels: $('discordChannels').value.split('\n').map(value => value.trim()).filter(Boolean),
-      confirmed: $('discordRisk').checked,
-    };
-    for (const control of controls) control.disabled = true;
-    try {
-      const updated = await post(event.currentTarget, payload, 'Discord 接入已保存');
-      if (updated) {
-        settings = updated.discordRoutes || {};
-        fill();
-      }
-    } finally {
-      for (const control of controls) control.disabled = false;
-    }
-  });
-  $('discordAccess').hidden = false;
-  fill();
-}
-
-async function initAccess() {
-  const save = $('accessSave');
-  const risk = $('modeRisk');
-  const approve = $('modeApprove');
-  const accessRisk = $('accessRisk');
-  const ownerInput = $('accessOwner');
-  const ownerPicker = $('accessOwnerPreset');
-  const platformInput = $('accessPlatform');
-  const toolsInput = $('accessTools');
-  const targetsInput = $('accessTargets');
-  const targetPicker = $('accessTargetPreset');
-  let savedAccess = {};
-  let saving = false;
-  const currentTargets = () => targetsInput.value.split('\n').map(v => v.trim()).filter(Boolean);
-  const expandsDesktop = () => state.status?.mode === 'full' && (
-    (toolsInput.checked && (!savedAccess.desktopTools || ownerInput.value.trim() !== savedAccess.ownerQQ
-      || platformInput.value !== savedAccess.ownerPlatform))
-    || currentTargets().some(target => !savedAccess.desktopTargets?.includes(target))
-  );
-  const refreshAccessForm = () => {
-    const expands = expandsDesktop();
-    $('accessRiskRow').hidden = !expands;
-    save.disabled = saving || (expands && !accessRisk.checked);
-  };
-  const post = async (button, payload, label) => {
-    button.disabled = true;
-    try {
-      const data = unwrap(await bridge.apiPost('access', payload));
-      await refresh();
-      toast(label);
-      return data;
-    } catch (e) {
-      toast(e.message || String(e), true);
-      await refresh().catch(() => {});
-    } finally {
-      button.disabled = button === approve && !risk.checked;
-    }
-  };
-  risk.addEventListener('change', () => { approve.disabled = !risk.checked; });
-  approve.addEventListener('click', () => {
-    void post(approve, { action: 'approve', approval: state.status?.modeApproval,
-      scopeVersion: state.status?.modeApprovalScopeVersion, confirmed: risk.checked }, '完整模式已批准，等待 Coo 同步');
-  });
-  $('modeReject').addEventListener('click', e => {
-    void post(e.currentTarget, { action: 'reject', approval: state.status?.modeApproval }, '已驳回完整模式请求');
-  });
-  $('modeNarrow').addEventListener('click', e => {
-    void post(e.currentTarget, { action: 'narrow' }, '已收窄为主人私聊，等待 Coo 同步');
-  });
-  const data = unwrap(await bridge.apiGet('access')) || {};
-  initDiscordAccess(data, post);
-  savedAccess = data;
-  ownerInput.value = data.ownerQQ || '';
-  syncOwnerChoices(state.status?.admins || [], true);
-  platformInput.replaceChildren(new Option('请选择平台实例', ''), ...(data.platforms || []).map(platform => {
-    const option = document.createElement('option');
-    option.value = platform;
-    option.textContent = platform;
-    return option;
-  }));
-  if (data.ownerPlatform) platformInput.value = data.ownerPlatform;
-  toolsInput.checked = data.desktopTools === true;
-  targetsInput.value = (data.desktopTargets || []).join('\n');
-  $('legacyDesktopReview').hidden = !data.legacyDesktopNeedsReview;
-  for (const field of [ownerInput, platformInput, toolsInput, targetsInput]) {
-    field.addEventListener('input', () => { accessRisk.checked = false; refreshAccessForm(); });
-  }
-  ownerPicker.addEventListener('change', () => {
-    const manual = ownerPicker.value === 'manual';
-    ownerPicker.dataset.manual = String(manual);
-    $('accessOwnerManual').hidden = !manual;
-    if (manual) ownerInput.focus();
-    else ownerInput.value = ownerPicker.value;
-    ownerInput.dispatchEvent(new Event('input'));
-  });
-  targetPicker.addEventListener('change', () => addFromConversationPicker(targetPicker, targetsInput));
-  accessRisk.addEventListener('change', refreshAccessForm);
-  refreshAccessForm();
-  save.addEventListener('click', async () => {
-    const payload = { action: 'save', ownerQQ: ownerInput.value, ownerPlatform: platformInput.value };
-    if (state.status?.mode === 'full') {
-      Object.assign(payload, { desktopTools: toolsInput.checked, desktopTargets: currentTargets(), confirmed: accessRisk.checked });
-    }
-    saving = true;
-    try {
-      const updated = await post(save, payload, '授权设置已保存');
-      if (updated) {
-        savedAccess = updated;
-        toolsInput.checked = updated.desktopTools === true;
-        targetsInput.value = (updated.desktopTargets || []).join('\n');
-        $('legacyDesktopReview').hidden = !updated.legacyDesktopNeedsReview;
-      }
-    } finally {
-      saving = false;
-      accessRisk.checked = false;
-      refreshAccessForm();
-    }
-  });
-}
-
 function initVoice() {
   $('ttsEnabled').addEventListener('change', (e) => saveVoiceEnabled(e.target.checked));
   $('ttsMaxChars').addEventListener('change', async (e) => {
@@ -2424,44 +1822,6 @@ function initManagedSettings() {
       && (old.enabled || next.enabled && ![local, 'localhost', '::1', '[::1]'].includes(next.host.toLowerCase())),
   });
 
-  const qqPicker = $('settingQqPlatform');
-  const qqForm = $('qqSettings');
-  let qqRows = [];
-  let selectedQq = [];
-  const drawQq = () => {
-    qqPicker.replaceChildren(new Option('请选择 QQ 实例', ''), ...qqRows
-      .filter(item => !selectedQq.includes(item.id))
-      .map(item => new Option(item.enabled ? item.id : `${item.id}（AstrBot 未启用）`, item.id)));
-    $('settingQqPicked').replaceChildren(...selectedQq.map(id => selectedSettingsChip(id, () => {
-      selectedQq = selectedQq.filter(value => value !== id);
-      drawQq();
-      qqForm.dispatchEvent(new Event('input', { bubbles: true }));
-    })));
-  };
-  qqPicker.addEventListener('change', () => {
-    if (!qqPicker.value) return;
-    selectedQq = [...selectedQq, qqPicker.value];
-    drawQq();
-    qqForm.dispatchEvent(new Event('input', { bubbles: true }));
-  });
-  mountManagedSettings('qq', 'qqSettings', 'settings/qq', {
-    fill(data) {
-      selectedQq = data.platforms;
-      qqRows = data.instances;
-      $('settingAliases').value = data.aliases.join('\n');
-      drawQq();
-    },
-    read: () => ({ platforms: selectedQq, aliases: settingLines($('settingAliases')) }),
-    confirm: (next, old) => next.platforms.some(id => !old.platforms.includes(id))
-      || state.status?.mode === 'full' && next.aliases.some(alias => !old.aliases.includes(alias)),
-    afterSave(data) {
-      const access = $('accessPlatform');
-      const current = access.value;
-      access.replaceChildren(new Option('请选择平台实例', ''), ...data.platforms.map(id => new Option(id, id)));
-      if (data.platforms.includes(current)) access.value = current;
-    },
-  });
-
   const imageMode = $('settingImageMode');
   const vision = $('settingVision');
   const syncVision = () => { $('settingVisionRow').hidden = !['auto', 'describe'].includes(imageMode.value); };
@@ -2511,6 +1871,336 @@ function initManagedSettings() {
   });
 }
 
+const instanceFields = [
+  { key: 'enabled', label: '接入 Coo', type: 'check', slot: 'instanceEnable' },
+  { key: 'mode', label: '接入模式', choices: { safe: '安全模式', full: '完整模式' }, slot: 'instanceModeField' },
+  { key: 'owner_id', label: '主人用户 ID', type: 'owner', slot: 'instanceOwnerField' },
+  { key: 'group_scope', label: '接入范围', choices: { allowlist: '仅指定会话', all: '全部群聊和频道' }, slot: 'instanceGroupFields' },
+  { key: 'group_mode', label: '唤醒方式', choices: { mention: '仅被叫到', all: '全部消息' }, slot: 'instanceGroupFields' },
+  { key: 'group_allow', label: '已放行的会话', type: 'list', kind: 'group', slot: 'instanceGroupFields' },
+  { key: 'aliases', label: '唤醒称呼（每行一个）', type: 'list', slot: 'instanceGroupFields' },
+  { key: 'private_mode', label: '私聊范围', choices: { owner: '仅主人私聊', allowlist: '仅指定私聊', all: '所有私聊', off: '关闭' }, slot: 'instancePrivateFields' },
+  { key: 'private_deny', label: '未放行的私聊', choices: { astrbot: '交回 AstrBot', ignore: '静默处理' }, slot: 'instancePrivateFields' },
+  { key: 'private_allow', label: '已放行的私聊', type: 'list', kind: 'private', slot: 'instancePrivateFields' },
+  { key: 'desktop_tools', label: '授权桌面使用该实例的主人工具', type: 'check', slot: 'instanceDesktopFields' },
+  { key: 'desktop_targets', label: '桌面主动发送目标', type: 'list', kind: 'all', slot: 'instanceDesktopFields' },
+];
+
+const adapterNames = { aiocqhttp: 'QQ', discord: 'Discord', wecom_ai_bot: '企业微信', telegram: 'Telegram' };
+
+function adapterLabel(route) {
+  return adapterNames[route.adapterType] || route.adapterType || route.channel || 'AstrBot';
+}
+
+function instanceStatus(row) {
+  if (row.astrbotEnabled === false) return '机器人已停用';
+  if (row.replySupported === false) return '无法原会话回复';
+  if (!row.enabled) return '待接入';
+  return row.mode === 'full' ? '完整模式' : row.mode === 'safe' ? '安全模式' : '已接入';
+}
+
+let instanceTab = 'access';
+let requestedInstance = '';
+let instanceData;
+let instanceLoading = false;
+let instanceDirty = false;
+let instanceSaving = false;
+let instanceSaved = false;
+const instanceControls = new Map();
+
+function selectedInstance() {
+  return instanceData?.instances.find(row => row.id === $('instancePick').value);
+}
+
+function updateInstanceSaveStatus() {
+  if (!instanceSaved || instanceDirty || instanceSaving) return;
+  $('instanceFeedback').textContent = state.status?.connected
+    ? '已保存 · Coo 权限已同步' : '已保存 · 等待 Coo 同步实例权限';
+}
+
+function setInstanceDirty(dirty) {
+  instanceDirty = dirty;
+  $('instanceSave').disabled = !dirty || instanceSaving;
+  $('instanceDiscard').disabled = !dirty || instanceSaving;
+  $('instancePick').disabled = dirty || instanceSaving;
+  for (const button of $('instanceDirectory').querySelectorAll('button')) button.disabled = dirty || instanceSaving;
+  $('instanceDraft').textContent = instanceSaving ? '正在保存…' : dirty ? '有未保存的修改' : '';
+  if (dirty) instanceSaved = false;
+}
+
+function showInstanceTab(name) {
+  instanceTab = name;
+  for (const button of $('instanceTabs').querySelectorAll('[data-instance-tab]')) {
+    const active = button.dataset.instanceTab === name;
+    if (active) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+    $('instance-pane-' + button.dataset.instanceTab).hidden = !active;
+  }
+}
+
+function syncInstanceFields() {
+  const full = instanceControls.get('mode')?.value === 'full';
+  $('instanceTabs').hidden = !full;
+  if (!full) showInstanceTab('access');
+  $('instanceModeHint').textContent = full
+    ? '已放行的会话共用 Coo 主对话。'
+    : '仅接入已绑定的主人私聊。';
+  instanceControls.get('group_allow')?.closest('.form-field').toggleAttribute('hidden', instanceControls.get('group_scope')?.value !== 'allowlist');
+  instanceControls.get('private_allow')?.closest('.form-field').toggleAttribute('hidden', instanceControls.get('private_mode')?.value !== 'allowlist');
+  for (const button of $('instanceTabs').querySelectorAll('[data-instance-tab]')) {
+    button.hidden = !full && button.dataset.instanceTab !== 'access';
+  }
+}
+
+function pickInstance(id) {
+  if (instanceDirty || instanceSaving || !instanceData?.instances.some(row => row.id === id)) return;
+  $('instancePick').value = id;
+  instanceSaved = false;
+  $('instanceFeedback').textContent = '';
+  showInstanceTab('access');
+  drawInstance();
+}
+
+function openInstance(id) {
+  if (!instanceDirty && !instanceSaving) requestedInstance = id;
+  setPanel('instances');
+}
+
+function drawInstanceDirectory() {
+  const selected = selectedInstance();
+  const rows = instanceData?.instances ?? [];
+  $('instanceCount').textContent = rows.length + ' 个实例';
+  $('instanceSearchRow').hidden = rows.length < 7;
+  const query = rows.length < 7 ? '' : $('instanceSearch').value.trim().toLowerCase();
+  const matches = rows.filter(row => !query ||
+    [row.name, row.id, adapterLabel(row), row.adapterType].some(value => value?.toLowerCase().includes(query)));
+  $('instanceDirectory').replaceChildren(...matches.map(row => {
+    const item = el('button', 'instance-directory-item');
+    item.type = 'button';
+    item.disabled = instanceDirty || instanceSaving;
+    item.dataset.instance = row.id;
+    if (row.id === selected?.id) item.setAttribute('aria-current', 'true');
+    const text = el('span', 'instance-directory-copy');
+    text.append(el('strong', '', row.name || row.id),
+      el('small', '', adapterLabel(row) + (row.name && row.name !== row.id ? ' · ' + row.id : '')));
+    item.append(text, el('span', 'instance-state-dot' + (row.enabled ? ' on' : ''), instanceStatus(row)));
+    item.addEventListener('click', () => pickInstance(row.id));
+    return item;
+  }));
+  if (query && !matches.length) $('instanceDirectory').append(el('p', 'instance-notice', '没有匹配的实例。'));
+}
+
+function renderInstanceTargets(field, row, item, control) {
+  const picker = el('select', 'kvselect');
+  picker.setAttribute('aria-label', '添加到' + field.label);
+  const sessions = row.sessions.filter(session => field.kind === 'all' || session.kind === field.kind);
+  picker.replaceChildren(new Option(sessions.length ? '从最近会话添加' : '暂无最近会话', ''),
+    ...sessions.map(session => new Option(session.umo, session.umo)));
+  picker.disabled = picker.options.length < 2;
+  const list = el('ul', 'instance-targets');
+  list.setAttribute('aria-label', field.label);
+  const draw = () => {
+    const values = settingLines(control);
+    list.replaceChildren(...values.map(value => {
+      const entry = el('li', 'instance-target');
+      const separator = value.indexOf(':', value.indexOf(':') + 1);
+      const address = el('code', '', separator > 0 ? value.slice(separator + 1) : value);
+      address.title = value;
+      const remove = el('button', 'instance-remove', '移除');
+      remove.type = 'button';
+      remove.setAttribute('aria-label', '移除会话 ' + address.textContent);
+      remove.addEventListener('click', () => {
+        control.value = settingLines(control).filter(other => other !== value).join('\n');
+        control.dispatchEvent(new Event('input', { bubbles: true }));
+        const next = list.querySelector('button') || item.querySelector('summary');
+        next?.focus();
+      });
+      entry.append(address, remove);
+      return entry;
+    }));
+    list.hidden = values.length === 0;
+  };
+  picker.addEventListener('change', () => {
+    if (!picker.value) return;
+    control.value = [...new Set([...settingLines(control), picker.value])].join('\n');
+    picker.value = '';
+    control.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  control.addEventListener('input', draw);
+  const manual = el('details', 'instance-manual');
+  manual.append(el('summary', '', '手动编辑会话 UMO'), control);
+  item.append(list, picker, manual);
+  draw();
+}
+
+function drawInstance() {
+  const row = selectedInstance();
+  $('instanceForm').hidden = !row;
+  for (const slot of new Set(instanceFields.map(field => field.slot))) $(slot).replaceChildren();
+  instanceControls.clear();
+  drawInstanceDirectory();
+  setInstanceDirty(false);
+  if (!row) return;
+  const platform = adapterLabel(row);
+  $('instanceMark').textContent = platform === 'QQ' ? 'QQ' : platform.slice(0, 1).toUpperCase();
+  $('instanceTitle').textContent = row.name || row.id;
+  $('instanceMeta').textContent = [platform, row.name && row.id !== row.name ? row.id : '', instanceStatus(row)].filter(Boolean).join(' · ');
+  $('instanceState').textContent = row.ownerUmo ? '已绑定主人私聊'
+    : row.policy.owner_id ? '等待该账号向此机器人发一条私聊。' : '指定主人后，由该账号发一条私聊完成绑定。';
+  $('instanceOwnerDetails').hidden = !row.ownerUmo;
+  $('instanceOwnerDetails').open = false;
+  $('instanceOwnerAddress').textContent = row.ownerUmo || '';
+
+  const capability = $('instanceCapabilities');
+  capability.textContent = row.capabilities?.reply === false
+    ? '这个机器人使用固定 Webhook 回复。可在 AstrBot 机器人设置中改用原会话回复。'
+    : row.capabilities?.replyTextOnly ? '这个实例支持原会话文字回复。' : '';
+  capability.hidden = !capability.textContent;
+
+  for (const field of instanceFields) {
+    const value = row.policy[field.key];
+    const id = 'instanceField-' + field.key;
+    const item = el('div', 'form-field');
+    const label = el('label', '', field.label);
+    label.htmlFor = id;
+    let control;
+    if (field.choices) {
+      control = el('select', 'kvselect');
+      control.replaceChildren(...Object.entries(field.choices).map(([key, text]) => new Option(text, key)));
+    } else if (field.type === 'list') {
+      control = el('textarea', 'kvselect mono');
+      control.rows = 3;
+      control.placeholder = field.kind ? '每行一个完整 UMO' : '';
+      item.classList.add('instance-field-wide');
+    } else {
+      control = el('input', field.type === 'check' ? '' : 'kvselect');
+      control.type = field.type === 'check' ? 'checkbox' : 'text';
+      if (field.type === 'owner') {
+        const list = el('datalist');
+        list.id = 'instanceOwnerOptions';
+        list.replaceChildren(...(instanceData.admins || []).map(admin => new Option(admin, admin)));
+        control.setAttribute('list', list.id);
+        control.autocomplete = 'off';
+        item.append(list);
+      }
+    }
+    control.id = id;
+    instanceControls.set(field.key, control);
+    if (field.type === 'check') {
+      control.checked = value;
+      label.className = 'cortico-switchrow instance-toggle';
+      const graphic = el('span', 'cortico-switch');
+      graphic.setAttribute('aria-hidden', 'true');
+      label.replaceChildren(el('span', '', field.label), control, graphic);
+      item.append(label);
+      if (field.key === 'desktop_tools') item.classList.add('instance-field-wide');
+    } else {
+      control.value = Array.isArray(value) ? value.join('\n') : value;
+      if (field.key === 'mode') label.className = 'visually-hidden';
+      item.append(label);
+      if (field.kind) renderInstanceTargets(field, row, item, control);
+      else item.append(control);
+    }
+    if (field.key === 'desktop_targets' && row.capabilities?.sessionSend === false) item.hidden = true;
+    $(field.slot).append(item);
+  }
+  showInstanceTab(instanceTab);
+  syncInstanceFields();
+}
+
+async function loadInstances(force = false) {
+  if (instanceLoading) return;
+  if (instanceDirty && !force) {
+    $('instanceFeedback').textContent = '保存当前修改后可刷新会话。';
+    return;
+  }
+  instanceLoading = true;
+  const pick = $('instancePick');
+  const previous = requestedInstance || pick.value;
+  try {
+    instanceData = unwrap(await bridge.apiGet('instances'));
+    pick.replaceChildren(...instanceData.instances.map(row => new Option(
+      (row.name !== row.id ? row.name + ' · ' : '') + row.id + ' · ' + row.adapterType, row.id)));
+    if (instanceData.instances.some(row => row.id === previous)) pick.value = previous;
+    if (requestedInstance) showInstanceTab('access');
+    requestedInstance = '';
+    $('instanceFeedback').textContent = instanceData.instances.length ? '' : '请先在 AstrBot「机器人」中添加实例。';
+    drawInstance();
+  } catch (error) {
+    $('instanceFeedback').textContent = '读取实例失败 · ' + (error.message || error);
+  } finally {
+    instanceLoading = false;
+  }
+}
+
+function initInstances() {
+  $('instanceSearch').addEventListener('input', drawInstanceDirectory);
+  $('instancePick').addEventListener('change', () => pickInstance($('instancePick').value));
+  for (const button of $('instanceTabs').querySelectorAll('[data-instance-tab]')) {
+    button.addEventListener('click', () => showInstanceTab(button.dataset.instanceTab));
+  }
+  $('instanceReload').addEventListener('click', () => void loadInstances());
+  $('instanceDiscard').addEventListener('click', () => {
+    $('instanceFeedback').textContent = '';
+    drawInstance();
+  });
+  $('instanceForm').addEventListener('input', () => {
+    setInstanceDirty(true);
+    syncInstanceFields();
+  });
+  $('instanceForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    const row = selectedInstance();
+    const button = $('instanceSave');
+    if (!row || button.disabled) return;
+    const policy = Object.fromEntries(instanceFields.map(field => {
+      const c = instanceControls.get(field.key);
+      return [field.key, field.type === 'check' ? c.checked : field.type === 'list' ? settingLines(c) : c.value.trim()];
+    }));
+    const changed = Object.keys(policy).some(key => JSON.stringify(policy[key]) !== JSON.stringify(row.policy[key]));
+    if (!changed) return;
+    instanceSaving = true;
+    setInstanceDirty(true);
+    const confirm = policy.enabled && (!row.policy.enabled || row.policy.owner_id !== policy.owner_id || policy.mode === 'full');
+    try {
+      if (confirm) {
+        const box = $('instanceConfirm');
+        $('instanceConfirmText').textContent = policy.mode === 'full'
+          ? row.id + ' 放行的会话将共用 Coo 主对话，回复可能提到桌面对话。勾选的桌面授权也会生效。'
+          : row.id + ' 将接入指定主人的私聊，并与 Coo 桌面共用主对话。';
+        const accepted = await new Promise(resolve => {
+          const events = new AbortController();
+          const settle = accepted => {
+            events.abort();
+            if (box.open) box.close();
+            resolve(accepted);
+          };
+          $('instanceAccept').addEventListener('click', () => settle(true), { signal: events.signal });
+          $('instanceCancel').addEventListener('click', () => settle(false), { signal: events.signal });
+          box.addEventListener('cancel', event => {
+            event.preventDefault();
+            settle(false);
+          }, { signal: events.signal });
+          box.showModal();
+        });
+        if (!accepted) return;
+      }
+      if (selectedInstance()?.id !== row.id) return;
+      await bridge.apiPost('instances', { instance: row.id, version: row.version, policy, confirmed: confirm });
+      setInstanceDirty(false);
+      await loadInstances(true);
+      instanceSaved = true;
+      await refresh();
+    } catch (error) {
+      $('instanceFeedback').textContent = '保存失败 · ' + (error.message || error);
+    } finally {
+      instanceSaving = false;
+      setInstanceDirty(instanceDirty);
+      updateInstanceSaveStatus();
+    }
+  });
+}
+
 /* ---------------- 启动 ---------------- */
 
 async function main() {
@@ -2545,16 +2235,11 @@ async function main() {
   });
 
   initMessages();
-  initScope();
   initTools();
   initToken();
   initVoice();
   initManagedSettings();
-  void initAccess().catch(e => {
-    $('discordAvailability').textContent = '读取 Discord 实例失败';
-    $('discordAvailabilityDetail').textContent = '重新打开控制台后重试。';
-    toast('读取桥接授权失败：' + (e.message || e), true);
-  });
+  initInstances();
 
   // 状态读取失败只影响状态卡，不该让整场没有实时流（UI-007）。
   try {
@@ -2567,7 +2252,8 @@ async function main() {
   renderRows();
   renderToolLog();
 
-  const wanted = new URLSearchParams(location.search).get('panel');
+  const requested = new URLSearchParams(location.search).get('panel');
+  const wanted = ['qq', 'discord', 'groups', 'private'].includes(requested) ? 'instances' : requested;
   if (wanted && PANELS[wanted]) setPanel(wanted);
 
   // 20 秒轮询兜底：SSE 断了也能把状态和流水补回来。

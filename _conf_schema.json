@@ -12,6 +12,18 @@
     "default": "",
     "invisible": true
   },
+  "instance_routes": {
+    "description": "AstrBot 原生实例接入授权",
+    "type": "dict",
+    "default": {},
+    "invisible": true
+  },
+  "instance_policy_migrated": {
+    "description": "旧平台授权已迁移至实例",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
   "discord_routes": {
     "description": "Discord 机器人实例的接入授权",
     "type": "dict",
@@ -107,6 +119,12 @@
     "type": "string",
     "default": "",
     "hint": "多个平台时选择主人所在的 QQ 平台实例。也可在插件概览页设定。",
+    "invisible": true
+  },
+  "owner_sessions": {
+    "description": "由实际私聊事件绑定的主人会话",
+    "type": "dict",
+    "default": {},
     "invisible": true
   },
   "desktop_tools_enabled": {
