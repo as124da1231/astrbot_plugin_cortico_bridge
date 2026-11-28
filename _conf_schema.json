@@ -12,6 +12,12 @@
     "default": "",
     "invisible": true
   },
+  "bridge_history_id": {
+    "description": "用于识别本桥历史来源的公有标识",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
   "instance_routes": {
     "description": "AstrBot 原生实例接入授权",
     "type": "dict",

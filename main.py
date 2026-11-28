@@ -35,6 +35,7 @@ import tempfile
 import time
 from collections import OrderedDict, deque
 from pathlib import Path
+from uuid import uuid4
 from types import SimpleNamespace
 from typing import Any
 
@@ -63,8 +64,6 @@ from .bridge import (
     MAX_IMAGE_TOTAL_B64,
     BridgeServer,
     is_loopback_host,
-    looks_like_command,
-    matches_command,
     parse_umo,
 )
 from .deliver import Delivery
@@ -238,8 +237,6 @@ class CorticoBridge(Star):
         # QQ 号 → 昵称；通知事件只给号码，靠这里补上人名。
         self._names: OrderedDict[tuple[str, str], str] = OrderedDict()
         # AstrBot 已注册的指令名；用于识别「不带唤醒前缀」的指令。
-        self._cmd_names: set[str] = set()
-        self._cmd_names_at = 0.0
         # SSE 订阅者（每个打开面板的浏览器一个队列）
         self._subscribers: set[asyncio.Queue] = set()
         self._listener_lock = asyncio.Lock()
@@ -589,6 +586,7 @@ class CorticoBridge(Star):
 
     def _platform_routes(self) -> list[dict]:
         result = []
+        desktop_instances = {parse_umo(umo)[0] for _, umo in self._desktop_bindings()} if self.config.get("instance_policy_migrated") else set()
         for instance, item in self._configured_platforms().items():
             adapter = _s(item.get("type")).strip()
             if not adapter:
@@ -600,7 +598,8 @@ class CorticoBridge(Star):
                            "ownerBound": bool(self._instance_owner(instance)[1]),
                            **({"mode": self._instance_policy(instance).get("mode", "safe"),
                                "astrbotEnabled": item.get("enable") is not False,
-                               "replySupported": capabilities["reply"],
+                               "desktopOwner": instance in desktop_instances,
+                                "replySupported": capabilities["reply"],
                                "replyTextOnly": capabilities["replyTextOnly"]}
                               if self.config.get("instance_policy_migrated") else {})})
         return result
@@ -692,22 +691,6 @@ class CorticoBridge(Star):
         """当前 token；空表示本机免密（只允许回环监听）。"""
         return _s(self.config.get("token", "")).strip()
 
-    def _wake_prefixes(self) -> list[str]:
-        """AstrBot 的指令前缀；读不到就按默认的 / 处理。"""
-        try:
-            cfg = self.context.get_config() or {}
-            raw = cfg.get("wake_prefix")
-        except Exception:  # noqa: BLE001
-            raw = None
-        if isinstance(raw, str):
-            items = [raw]
-        elif isinstance(raw, list):
-            items = [str(x) for x in raw]
-        else:
-            items = ["/"]
-        out = [p.strip() for p in items if p.strip()]
-        return out or ["/"]
-
     def _raw_message_text(self, event: AstrMessageEvent) -> str:
         """唤醒检查会把 message_str 的前缀剥掉；原始组件里还留着 /。"""
         parts: list[str] = []
@@ -720,40 +703,46 @@ class CorticoBridge(Star):
             return ""
         return "".join(parts)
 
-    def _command_names(self) -> set[str]:
-        """已注册的 AstrBot 指令名；30 秒缓存，读不到就退化成空前缀判断。"""
-        now = time.time()
-        if self._cmd_names and now - self._cmd_names_at < 30:
-            return self._cmd_names
-        names: set[str] = set()
-        try:
-            from astrbot.core.star.star_handler import star_handlers_registry
-
-            for handler in star_handlers_registry:
-                for event_filter in getattr(handler, "event_filters", []) or []:
-                    getter = getattr(event_filter, "get_complete_command_names", None)
-                    if not callable(getter):
-                        continue
-                    try:
-                        names.update(getter() or [])
-                    except Exception:  # noqa: BLE001
-                        continue
-        except Exception:  # noqa: BLE001
-            names = set()
-        self._cmd_names = names
-        self._cmd_names_at = now
-        return names
-
-    def _looks_like_command(self, event: AstrMessageEvent) -> bool:
-        prefixes = self._wake_prefixes()
-        if looks_like_command(event.get_message_str(), prefixes):
+    def _astrbot_owns_command(self, event: AstrMessageEvent, config: dict) -> bool:
+        slash_command = getattr(event, "is_slash_command", None)
+        if callable(slash_command) and slash_command():
             return True
-        if looks_like_command(self._raw_message_text(event), prefixes):
-            return True
-        # 私聊默认不需要唤醒前缀；这时靠「首词命中已注册指令名」判断。
-        if not getattr(event, "is_at_or_wake_command", False):
+
+        # WakingCheckStage 已按当前实例、会话、权限和插件配置完成匹配。
+        # 消费实际命中的指令、指令组和正则处理器，普通消息监听器可以共存。
+        handlers = event.get_extra("activated_handlers") or ()
+        if handlers:
+            from astrbot.core.star.filter.command import CommandFilter
+            from astrbot.core.star.filter.command_group import CommandGroupFilter
+            from astrbot.core.star.filter.regex import RegexFilter
+
+            if any(
+                isinstance(f, (CommandFilter, CommandGroupFilter, RegexFilter))
+                for handler in handlers
+                for f in handler.event_filters
+            ):
+                return True
+
+        # 保留显式指令入口：即使拼错或禁用了指令，也不把原文和参数交给模型。
+        # 前缀取自此事件的配置；它无需用于识别已匹配的指令或无前缀正文。
+        configured = config.get("wake_prefix", ["/"])
+        if isinstance(configured, str):
+            configured = [configured]
+        if not isinstance(configured, (list, tuple)):
+            configured = ["/"]
+        prefixes = tuple(item for item in configured if isinstance(item, str) and item)
+        return bool(prefixes) and (
+            self._raw_message_text(event).lstrip().startswith(prefixes)
+            or event.get_message_str().lstrip().startswith(prefixes)
+        )
+
+    async def _astrbot_llm_enabled(self, event: AstrMessageEvent) -> bool:
+        from astrbot.core.star.session_llm_manager import SessionServiceManager
+
+        if not await SessionServiceManager.should_process_llm_request(event):
             return False
-        return matches_command(event.get_message_str(), self._command_names())
+        config = self.context.get_config(umo=event.unified_msg_origin) or {}
+        return bool(config.get("provider_settings", {}).get("enable", True))
 
     def _matches_scope(self, event: AstrMessageEvent, items: list[str]) -> bool:
         """UMO 优先；旧配置里的群号/QQ 号继续兼容。"""
@@ -933,6 +922,11 @@ class CorticoBridge(Star):
     # ---------- 生命周期 ----------
 
     async def initialize(self):
+        history_id = _s(self.config.get("bridge_history_id"))
+        if not re.fullmatch(r"[0-9a-f]{32}", history_id):
+            candidate = uuid4().hex
+            history_id = candidate if self._commit_config({"bridge_history_id": candidate}) else ""
+        self.server.history_id = history_id
         self._migrate_instance_policies()
         if self.config.get("bridge_mode") not in ("safe", "full"):
             self._commit_config({"bridge_mode": self.server.mode})
@@ -1023,7 +1017,7 @@ class CorticoBridge(Star):
                 target_id in policy.get("legacy_admin_bypass", []) and target_id in self._admin_ids())))
 
     async def _on_tool_call(
-        self, name: str, args: dict, turn: str, actor: dict | None = None, *, scope: str = ""
+        self, name: str, args: dict, turn: str, actor: dict | None = None, *, scope: str = "", instance: str = ""
     ) -> tuple[bool, str | ComponentReceipt]:
         """执行一个 AstrBot 工具。
 
@@ -1033,6 +1027,9 @@ class CorticoBridge(Star):
             return False, "桥未启用，工具调用被拒绝"
         trusted = False
         read_scope = _s(args.get("umo")).strip()
+        if instance and (turn or self.config.get("instance_policy_migrated") is not True
+                         or name in (READ_COMPONENT_TOOL, "cortico_authorize_history")):
+            return False, "当前工具调用不能选择桌面执行实例"
         if turn:
             key = (scope, turn)
             hit = self._turns.get(key)
@@ -1068,8 +1065,12 @@ class CorticoBridge(Star):
                         return False, "桌面未获得该实例的读取授权"
                 else:
                     bindings = self._desktop_bindings()
+                    if instance:
+                        bindings = [binding for binding in bindings if parse_umo(binding[1])[0] == instance]
+                        if not bindings:
+                            return False, "此实例未授予桌面主人工具"
                     if len(bindings) != 1:
-                        return False, "有多个实例授予了桌面主人工具，请只保留一个明确的执行身份"
+                        return False, "请指定一个已授权的 AstrBot 实例作为桌面工具执行身份"
                     owner_id, owner_umo = bindings[0]
             if name == READ_COMPONENT_TOOL:
                 if not self._target_allowed(read_scope):
@@ -1294,6 +1295,8 @@ class CorticoBridge(Star):
                 hit = self._turns.get((umo, turn))
                 if hit is None or time.time() - hit[0] > 600 or not self._event_allowed(hit[1]):
                     return False, "原会话已失效，请让对方重新发消息", False, False, "scope_denied"
+                if image is not None and not self._instance_admin(hit[1]):
+                    return False, "当前消息的发件人没有发图权限", False, False, "scope_denied"
                 if capabilities["replyTextOnly"] and (image is not None or voice or at):
                     return False, "该实例当前仅支持原会话文字回复", False, False, "scope_denied"
                 if capabilities["replyTextOnly"]:
@@ -1376,18 +1379,13 @@ class CorticoBridge(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=-sys.maxsize)
     async def observe_all_messages(self, event: AstrMessageEvent):
-        """最后一个跑：只标记这一轮归 Coo，不抢在其他插件前面 stop。
-
-        指令、自己轮询的插件先执行；它们 stop 了，就不会走到 LLM 层。
-        没人认领的消息由 on_llm_request 推给 Coo。
-        通知类没有正文、进不了 LLM 阶段，所以仍然在这里直接推走。
-        """
+        """在 AstrBot 指令和插件之后判定接入；点名群聊和通知可以直推。"""
         if not self.config.get("enabled", False):
             return
         if event.is_stopped():
             return
-        slash_command = getattr(event, "is_slash_command", None)
-        if callable(slash_command) and slash_command():
+        config = self.context.get_config(umo=event.unified_msg_origin) or {}
+        if self._astrbot_owns_command(event, config):
             return
         route = parse_umo(self._umo_of(event))
         if route and route[0] == _s(event.get_platform_id()) and self._instance_enabled(route[0]):
@@ -1397,7 +1395,8 @@ class CorticoBridge(Star):
         platform = _s(event.get_platform_id())
         policy = self._instance_policy(platform)
         notice, ref = self._notice_text(event)
-        if not notice and not self._looks_like_command(event) and (
+        already_replied = getattr(event, "_has_send_oper", False)
+        if not notice and not already_replied and (
             event.get_message_str() or event.get_messages()
         ) and self._bind_instance_owner(event):
             return
@@ -1406,17 +1405,6 @@ class CorticoBridge(Star):
 
         if self._adapter_channel(platform) == "qq":
             self._remember_self(event)
-        if self._looks_like_command(event):
-            logger.info(
-                "Cortico Bridge: 指令交给 AstrBot —— %r", event.get_message_str()[:40]
-            )
-            return
-        if event.is_private_chat() or self._group_allowed(event):
-            logger.info(
-                "Cortico Bridge: 事件进入 private=%s text=%r"
-                % (event.is_private_chat(), event.get_message_str()[:60])
-            )
-
         # 通知类事件先处理：撤回、入群、退群、戳一戳、上传文件。
         if notice:
             # A-9/P-003：只有真的推给 Cortico 才拦下来；桥断开时放它继续走，
@@ -1428,7 +1416,7 @@ class CorticoBridge(Star):
 
         # 桥没连上时不要强制唤醒：否则 AstrBot 自己的模型会接管整个群，
         # Cortico 一断就开始刷屏。
-        if not self.server.connected:
+        if not self.server.connected or already_replied:
             return
 
         # 私聊和 B 模式群消息只做标记；真正推送留到 LLM 层。
@@ -1451,9 +1439,8 @@ class CorticoBridge(Star):
             text = self._raw_message_text(event) or event.get_message_str()
             if not self._is_called_for_wake(event, text):
                 return
-            # 尊重 AstrBot /llm 的会话级设置，直推也要经过这一层判断。
-            config = self.context.get_config(umo=event.unified_msg_origin)
-            if not config.get("provider_settings", {}).get("enable", True):
+            # 直推绕过 AgentRequestSubStage，沿用它的配置文件和会话两道检查。
+            if not await self._astrbot_llm_enabled(event):
                 return
             event.is_at_or_wake_command = True
             event.set_extra("_cortico_llm_owned", "group")
@@ -1482,11 +1469,6 @@ class CorticoBridge(Star):
             return
         # 事件层已经直接推过（或已经停掉这一轮）就不再推第二次。
         if event.is_stopped() or bool(event.get_extra("_cortico_pushed", False)):
-            return
-        if self._looks_like_command(event):
-            logger.info(
-                "Cortico Bridge: 指令交给 AstrBot —— %r", event.get_message_str()[:40]
-            )
             return
         await self._push_event(event)
 
@@ -1584,14 +1566,18 @@ class CorticoBridge(Star):
             if self.image_plan(event)["native"] and any(part["type"] == "reply" for part in segments):
                 frame["quote_image_history"] = True
 
+        # 配置文件或会话可能在上面的语音、图片处理期间关闭。
+        llm_enabled = await self._astrbot_llm_enabled(event)
+
         # A fast Coo turn can call back before push() has finished. Stage the
         # lookup with the frame and remove it if delivery failed.
         message_key = (frame["umo"], msg_id)
         self._turns[message_key] = (time.time(), event)
         self._message_segments[message_key] = ComponentPage(segments, len(segments), deferred_media)
-        delivery = await self.server.offer_message(frame) if self._event_allowed(event) else "declined"
+        delivery = await self.server.offer_message(frame) if llm_enabled and self._event_allowed(event) else "declined"
         if delivery == "declined":
-            logger.warning("Cortico Bridge: 推送失败，本轮交给 AstrBot")
+            if llm_enabled:
+                logger.warning("Cortico Bridge: 推送失败，本轮交给 AstrBot")
             self._turns.pop(message_key, None)
             self._message_segments.pop(message_key, None)
             if has_platform_id and msg_id:

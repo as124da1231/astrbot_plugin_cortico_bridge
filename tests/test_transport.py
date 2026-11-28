@@ -117,6 +117,30 @@ class ScopedModeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await server.offer_message(message), status)
                 self.assertEqual(server._message_receipts, {})
 
+    async def test_pending_delivery_does_not_count_as_acceptance(self):
+        server = _server()
+        server._client = ws = _Ws()
+        server.capabilities = {"message_delivery_ack": True, "message_delivery_queue": True}
+        incoming = asyncio.create_task(server.offer_message({"t": "msg", "id": "fixture", "umo": "default:GroupMessage:123456"}))
+        await asyncio.sleep(0)
+        delivery_id = ws.last()["deliveryId"]
+        await server._on_frame(ws, {"t": "msg-ack", "deliveryId": delivery_id, "queued": True})
+        await asyncio.sleep(0)
+        self.assertFalse(incoming.done())
+        await server._on_frame(ws, {"t": "msg-ack", "deliveryId": delivery_id, "accepted": False})
+        self.assertEqual(await incoming, "declined")
+        self.assertEqual(server._message_receipts, {})
+
+    async def test_media_capability_updates_and_generic_mentions(self):
+        server = _server()
+        server._client = ws = _Ws()
+        await server._on_frame(ws, {"t": "media-capabilities", "images": True})
+        self.assertTrue(server.capabilities["images"])
+        await server._on_frame(ws, {"t": "media-capabilities", "images": False})
+        self.assertFalse(server.capabilities["images"])
+        self.assertEqual(bridge._parse_at(["U_FIXTURE"], numeric_only=False), (["U_FIXTURE"], "", ""))
+        self.assertTrue(bridge._parse_at(["U_FIXTURE"])[1])
+
     async def test_voice_receipt_negotiates_audio_and_does_not_cache_bytes(self):
         async def read(*_args, **_scope):
             return True, bridge.ComponentReceipt("voice", audio={"mime": "audio/silk", "base64": "AQID"})

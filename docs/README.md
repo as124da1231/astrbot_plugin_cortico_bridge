@@ -2,10 +2,10 @@
 
 ## 第一次部署
 
-- [新手图文教程：安装、连接和每项设置](beginner-guide.md)
-- [部署流程简表](tutorial.md)
+- [1.3.13 新手图文教程：安装、实例接入和每项设置](beginner-guide.md)
+- [旧版 QQ 部署参考](tutorial.md)
 
-从安装插件、配置 World，到第一条私聊、群聊和工具调用。
+首次部署按新手教程操作，从安装两端扩展到绑定主人、测试私聊、开放群聊和授权工具。
 
 ## 理解实现
 
@@ -19,7 +19,7 @@
 
 - [接入安全模型](security.md)
 
-回环免密、Origin 拒绝、非回环 token、`/llm off` 的行为。
+回环免密、Origin 拒绝、非回环令牌和会话权限。
 
 ## 跨仓库契约
 
@@ -30,7 +30,7 @@
 ## 按角色阅读
 
 ```text
-部署的人     tutorial → reference
+部署的人     beginner-guide → reference
 维护的人     architecture → reference → security
 改 World 的人 architecture → coo-side → 两个契约
 ```

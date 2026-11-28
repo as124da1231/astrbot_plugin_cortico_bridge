@@ -4,7 +4,7 @@ short_desc: 通过 AstrBot 原生机器人实例接入 Coo
 desc: >-
   读取 AstrBot 的机器人实例，按实例设置主人私聊、安全模式、完整模式和会话权限。通过原生事件转发消息，
   引用、图片、语音和主动发送能力由适配器决定。
-version: 1.3.12
+version: 1.3.13
 author: as124da1231
 repo: https://github.com/as124da1231/astrbot_plugin_cortico_bridge
 entry: main.py

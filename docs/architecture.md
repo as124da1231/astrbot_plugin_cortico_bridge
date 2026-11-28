@@ -56,7 +56,7 @@ QQ 消息
 ### 事件层
 
 ```text
-指令（wake_prefix 或已注册指令名）
+AstrBot 已匹配的指令、平台斜杠指令、带当前配置指令前缀的输入
   → 交给 AstrBot
 通知（撤回 / 戳一戳 / 入群…）
   → 桥已连接且范围允许：推送并 stop
@@ -66,7 +66,7 @@ QQ 消息
 群范围 allowlist 且不在名单
   → 不进入
 group_mode=mention
-  → @ 自己 / 回复自己 / 命中 name_aliases：直接推 + stop
+  → @ 自己 / 回复自己 / 命中 name_aliases，且两级 LLM 开关都开启：直接推 + stop
   → @全体不算点名
   → 普通闲聊不进入
 group_mode=all / 私聊
@@ -80,9 +80,8 @@ group_mode=all / 私聊
 
 ```text
 没有 _cortico_llm_owned → 不是 Coo 的轮次，放行
-是指令                   → 交给 AstrBot
 已经直接推过 / 已 stop   → 不重复推
-有标记                   → 推帧 + stop
+有标记且仍获准接管       → 推帧 + stop
 ```
 
 `stop_event()` 之后，后面的 `on_llm_request` 注入全部跳过。  
@@ -92,16 +91,7 @@ group_mode=all / 私聊
 
 ## 4. 指令怎么切
 
-三条规则：
-
-```text
-1. wake_prefix 前缀（默认 /）
-2. 原始消息组件里的前缀（唤醒检查会剥掉 message_str 的前缀）
-3. 已注册指令名（无前缀私聊指令）
-```
-
-第三条只在 `is_at_or_wake_command` 为真时生效，避免群聊误判。  
-指令名从 AstrBot 的 handler 注册表读取，缓存 30 秒。
+事件钩子读取 AstrBot 已命中的指令、指令组和正则处理器，也保留平台提供的结构化斜杠指令。带当前配置文件指令前缀的输入留在 AstrBot，避免拼错或停用的指令参数进入对话。普通监听器仍可先观察消息，前置插件停止事件或已发出普通回复时，桥不会接管。
 
 执行顺序：
 
@@ -111,7 +101,7 @@ wakepro / 注册指令 / 自轮询插件
   → LLM 层
 ```
 
-谁先 stop，谁赢；没人 stop，才归 Coo。
+LLM 钩子只处理事件钩子已标记的对话。发送帧前再次读取 AstrBot 的两级 LLM 开关。
 
 ---
 
@@ -390,10 +380,9 @@ conv_id → reply_to 查 knownMsgConv → 多会话拒绝 → turnConv（只有 
 `astrbot_plugin_wakepro` 的优先级是 99999，先于我们。  
 它判「不唤醒」时直接 `stop_event()`，Coo 收不到；这是它的职责，不是桥的问题。
 
-### `/llm off`
+### AstrBot 的 LLM 开关
 
-会话级静音，AstrBot 和 Coo 一起停。  
-指令不受影响；通知仍作为上下文进入，但不触发回复。
+官方指令扩展的 `/llm` 切换当前消息来源所用配置文件的 LLM 开关。只想控制一个会话时，在 AstrBot「自定义规则」调整该会话的 LLM 设置。任意一层关闭后，桥停止接管新的对话。AstrBot 指令和群通知继续按原规则处理，已交给 Coo 的消息仍可完成回包。
 
 ### 其他插件的 LLM 注入
 

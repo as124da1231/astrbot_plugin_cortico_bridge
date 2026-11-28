@@ -144,23 +144,6 @@ def is_loopback_host(host: str) -> bool:
     return str(host).strip().lower() in ("127.0.0.1", "localhost", "::1", "[::1]")
 
 
-def looks_like_command(text: str, prefixes: list[str]) -> bool:
-    """消息是不是 AstrBot 指令；命中 wake_prefix 就交给宿主，不进桥。"""
-    value = _s(text).lstrip()
-    if not value:
-        return False
-    return any(value.startswith(_s(p).strip()) for p in prefixes if _s(p).strip())
-
-
-def matches_command(text: str, names) -> bool:
-    """无前缀指令：首词或整句命中已注册的指令名。"""
-    value = " ".join(_s(text).split())
-    if not value or not names:
-        return False
-    return any(value == n or value.startswith(n + " ") for n in names if n)
-
-
-
 # 图片 base64 的上限；World 那边限制原始 6MB，编码后会更大一些。
 MAX_IMAGE_B64 = 8 * 1024 * 1024
 # 一帧里最多带多少图片数据（base64 总和）；两张 8MB 的图会把帧撑到 16MB，
@@ -190,6 +173,7 @@ SEND_LOCK_MAX = 256
 # 发送回执缓存：同一个 rid 重发时直接回上一次的结果，别把消息发两遍。
 ACK_CACHE_TTL = 300.0
 MESSAGE_RECEIPT_TIMEOUT = 2.0
+QUEUED_MESSAGE_RECEIPT_TIMEOUT = 125.0
 ACK_CACHE_MAX = 200
 
 
@@ -222,7 +206,7 @@ def _parse_image(raw: Any) -> tuple[dict | None, str, str]:
 AT_MAX = 10
 
 
-def _parse_at(raw: Any) -> tuple[list[str], str, str]:
+def _parse_at(raw: Any, *, numeric_only: bool = True) -> tuple[list[str], str, str]:
     """校验 send 帧里的 at（群 @）。
 
     返回 (QQ 号列表, 错误码, 中文说明)；没有 at 时三个值是 ([], "", "")。
@@ -242,8 +226,11 @@ def _parse_at(raw: Any) -> tuple[list[str], str, str]:
         if value == "all":
             out.append("all")
             continue
-        if not (5 <= len(value) <= 20) or not value.isascii() or not value.isdigit():
-            return [], codes.BAD_AT, f"「{value}」不是有效用户 ID，at 只接受数字"
+        valid = (5 <= len(value) <= 20 and value.isascii() and value.isdigit()) if numeric_only else bool(
+            re.fullmatch(r"[^\s\x00-\x1f\x7f<>]{1,160}", value)
+        )
+        if not valid:
+            return [], codes.BAD_AT, "at 必须使用当前平台的原生成员 ID"
         out.append(value)
     if "all" in out:
         return ["all"], "", ""
@@ -316,7 +303,8 @@ class BridgeServer:
         self._epoch = 0
         # 正在跑的 send/tool 任务数；上限见 MAX_INFLIGHT。
         self._inflight = 0
-        self._message_receipts: dict[str, tuple[int, str, asyncio.Future[bool]]] = {}
+        self._message_receipts: dict[str, tuple[int, str, asyncio.Future[bool | None], asyncio.Future[None]]] = {}
+        self.history_id = ""
         # 给状态面板看的信息
         self.client_address = ""
         self.connected_at: float | None = None
@@ -456,11 +444,17 @@ class BridgeServer:
             return "declined"
         delivery_id = uuid4().hex
         receipt = asyncio.get_running_loop().create_future()
-        self._message_receipts[delivery_id] = (self._epoch, self._mode_revision, receipt)
+        queued = asyncio.get_running_loop().create_future()
+        self._message_receipts[delivery_id] = (self._epoch, self._mode_revision, receipt, queued)
         try:
             if not await self.push({**frame, "deliveryId": delivery_id}):
                 return "declined"
-            accepted = await asyncio.wait_for(receipt, timeout=MESSAGE_RECEIPT_TIMEOUT)
+            done, _ = await asyncio.wait((receipt, queued), timeout=MESSAGE_RECEIPT_TIMEOUT, return_when=asyncio.FIRST_COMPLETED)
+            if not done:
+                return "unknown"
+            accepted = receipt.result() if receipt.done() else await asyncio.wait_for(receipt, timeout=QUEUED_MESSAGE_RECEIPT_TIMEOUT)
+            if accepted is None:
+                return "unknown"
             if not accepted:
                 self._turn_scopes.pop((_s(frame.get("umo")), _s(frame.get("id"))), None)
             return "accepted" if accepted else "declined"
@@ -468,6 +462,10 @@ class BridgeServer:
             return "unknown"
         finally:
             self._message_receipts.pop(delivery_id, None)
+            if not receipt.done():
+                receipt.cancel()
+            if not queued.done():
+                queued.cancel()
 
     async def push(self, obj: dict) -> bool:
         """往当前客户端发一帧；没连上时返回 False。"""
@@ -569,6 +567,8 @@ class BridgeServer:
             "desktopSend": self.mode == "full" and self._has_credentials(self._client) and bool(self._desktop_targets()),
             "ownerBound": bool(any(self._owner_dms()) if self.supports_multiple_platforms else self._owner_umo()),
             "modeApprovalPending": bool(self.pending_mode_approval()),
+            "pendingDelivery": self.capabilities.get("message_delivery_queue") is True,
+            **({"historyId": self.history_id} if self.history_id else {}),
             **({"instancePolicies": True} if self._instance_managed() else {}),
             # 桥这边能不能发语音，以及会用哪个 provider（World 可据此少试一次）。
             "tts": await self._tts_info(),
@@ -613,6 +613,9 @@ class BridgeServer:
         return ""
 
     def revise_permissions(self) -> None:
+        for _, revision, receipt, _ in self._message_receipts.values():
+            if revision == self._mode_revision and not receipt.done():
+                receipt.set_result(None)
         self._pending_full = None
         self._mode_ready = False
         self._mode_revision = uuid4().hex
@@ -833,6 +836,9 @@ class BridgeServer:
             for task in list(tasks):
                 task.cancel()
             if registered:
+                for receipt_epoch, _, receipt, _ in self._message_receipts.values():
+                    if receipt_epoch == epoch and not receipt.done():
+                        receipt.set_result(None)
                 async with self._lock:
                     if self._client is websocket:
                         self._client = None
@@ -978,7 +984,6 @@ class BridgeServer:
         conv_kind = _s(conv.get("kind"))
         conv_id = _s(conv.get("id"))
         voice = frame.get("voice") is True
-        at, at_code, at_note = _parse_at(frame.get("at"))
 
         # UMO 是权威键；有 UMO 时从它派生 kind/id，并拒绝与 conv 冲突。
         umo_code = ""
@@ -994,6 +999,7 @@ class BridgeServer:
                     platform = p_platform or platform
                     conv_kind, conv_id, umo = p_kind, p_id, p_umo
         channel = next((route["channel"] for route in self._platform_routes() if route["id"] == platform), "qq")
+        at, at_code, at_note = _parse_at(frame.get("at"), numeric_only=channel == "qq")
         if channel == "discord":
             # 被引用的文字可能含有全体或角色提及，避免原样转发触发通知。
             text = re.sub(r"@(?=everyone\b|here\b|&[0-9]+>)", "@\u200b", text)
@@ -1136,8 +1142,10 @@ class BridgeServer:
             ok, text = False, "桥没有配置工具执行"
         else:
             try:
-                scope = {"scope": _s(frame.get("umo"))} if self._save_mode else {}
-                ok, text = await self._on_tool(name, args, turn, actor, **scope)
+                options = {"scope": _s(frame.get("umo"))} if self._save_mode else {}
+                if self._instance_managed() and "instance" in frame:
+                    options["instance"] = _s(frame["instance"]).strip()
+                ok, text = await self._on_tool(name, args, turn, actor, **options)
             except Exception as exc:  # noqa: BLE001 - 异常原文可能包含媒体地址或凭据
                 logger.error("Cortico Bridge: 工具执行失败 name=%s（%s）", name, type(exc).__name__)
                 ok, text = False, ""
@@ -1172,10 +1180,17 @@ class BridgeServer:
         if kind == "msg-ack":
             pending = self._message_receipts.get(_s(frame.get("deliveryId")))
             accepted = frame.get("accepted")
-            if pending is not None and pending[:2] == (self._epoch, self._mode_revision) and isinstance(accepted, bool):
-                receipt = pending[2]
-                if not receipt.done():
+            if pending is not None and pending[:2] == (self._epoch, self._mode_revision):
+                _, _, receipt, queued = pending
+                if isinstance(accepted, bool) and not receipt.done():
                     receipt.set_result(accepted)
+                elif frame.get("queued") is True and self.capabilities.get("message_delivery_queue") is True and not queued.done():
+                    queued.set_result(None)
+            return
+
+        if kind == "media-capabilities":
+            if type(frame.get("images")) is bool:
+                self.capabilities["images"] = frame["images"]
             return
 
         if self._save_mode and kind == "mode-accept":

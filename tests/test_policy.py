@@ -98,6 +98,35 @@ from plugin import main as main_mod  # noqa: E402
 from plugin import owner_event  # noqa: E402
 
 
+class CommandFilter:
+    pass
+
+
+class CommandGroupFilter:
+    pass
+
+
+class RegexFilter:
+    pass
+
+
+class SessionServiceManager:
+    @staticmethod
+    async def should_process_llm_request(event):
+        return event.session_llm_enabled
+
+
+for native_type, native_module in (
+    (CommandFilter, "astrbot.core.star.filter.command"),
+    (CommandGroupFilter, "astrbot.core.star.filter.command_group"),
+    (RegexFilter, "astrbot.core.star.filter.regex"),
+    (SessionServiceManager, "astrbot.core.star.session_llm_manager"),
+):
+    stub = types.ModuleType(native_module)
+    setattr(stub, native_type.__name__, native_type)
+    sys.modules[native_module] = stub
+
+
 class FakeConfig(dict):
     def __init__(self, data=None, fail=False):
         super().__init__(data or {})
@@ -155,6 +184,8 @@ class FakeEvent:
         self._self_id = self_id
         self._extras = {}
         self._stopped = False
+        self._has_send_oper = False
+        self.session_llm_enabled = True
         self.is_at_or_wake_command = False
         self.is_wake = False
         self.unified_msg_origin = (
@@ -371,8 +402,6 @@ def make_bridge(
     bridge._names = OrderedDict()
     bridge._image_cache = OrderedDict()
     bridge._vision_logged = ""
-    bridge._cmd_names = set()
-    bridge._cmd_names_at = 0.0
     bridge.started_at = time.time()
     bridge.stats = {
         "pushed": 0,
@@ -408,6 +437,199 @@ def fake_responses():
         yield
     finally:
         main_mod.json_response, main_mod.error_response = old_json, old_error
+
+
+class CommandAdmissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_command_filters_are_excluded_before_binding_and_delivery(self):
+        for command_type in (CommandFilter, CommandGroupFilter, RegexFilter):
+            for private, mode in ((False, "mention"), (False, "all"), (True, "all")):
+                with self.subTest(command=command_type.__name__, private=private, mode=mode):
+                    bridge = make_bridge({"group_mode": mode})
+                    event = FakeEvent("custom alias private-argument", messages=[At("999")], private=private)
+                    event.set_extra("activated_handlers", [types.SimpleNamespace(event_filters=[command_type()])])
+                    with mock.patch.object(bridge, "_bind_instance_owner") as bind, mock.patch.object(main_mod, "logger") as log:
+                        await bridge.observe_all_messages(event)
+                        await bridge.on_llm_request(event, None)
+                    bind.assert_not_called()
+                    self.assertNotIn("private-argument", str(log.mock_calls))
+                    self.assertFalse(event.get_extra("_cortico_llm_owned"))
+                    self.assertFalse(event.is_stopped())
+                    self.assertEqual(bridge.server.pushed, [])
+                    self.assertFalse(bridge._turns)
+                    self.assertFalse(bridge._recent)
+
+    async def test_structured_slash_interaction_is_excluded_without_handler_metadata(self):
+        bridge = make_bridge({"group_mode": "all"})
+        event = FakeEvent("reset", messages=[At("999")])
+        event.is_slash_command = lambda: True
+        await bridge.observe_all_messages(event)
+        await bridge.on_llm_request(event, None)
+        self.assertFalse(event.get_extra("_cortico_llm_owned"))
+        self.assertEqual(bridge.server.pushed, [])
+
+    async def test_unmatched_explicit_prefix_uses_the_current_umo_profile(self):
+        class PrefixedContext(FakeContext):
+            def get_config(self, *, umo=None):
+                config = super().get_config(umo=umo)
+                if umo == "default:GroupMessage:1":
+                    config["wake_prefix"] = ["!", "::"]
+                return config
+
+        bridge = make_bridge({"group_mode": "all"}, context=PrefixedContext())
+        for index, (group, raw) in enumerate((("1", "!typo arg"), ("1", " ::typo arg"), ("2", "/typo arg"))):
+            with self.subTest(group=group, raw=raw):
+                event = FakeEvent("typo arg", [Plain(raw)], group_id=group, message_id=str(index))
+                await bridge.observe_all_messages(event)
+                await bridge.on_llm_request(event, None)
+                self.assertFalse(event.get_extra("_cortico_llm_owned"))
+        self.assertEqual(bridge.server.pushed, [])
+
+        ordinary = FakeEvent("/some/path", [Plain("/some/path")], group_id="1", message_id="4")
+        await bridge.observe_all_messages(ordinary)
+        await bridge.on_llm_request(ordinary, None)
+        self.assertEqual([frame["text"] for frame in bridge.server.pushed], ["/some/path"])
+
+    async def test_chat_with_unrelated_listener_uses_a_single_admission_decision(self):
+        for private, mode in ((False, "mention"), (False, "all"), (True, "all")):
+            with self.subTest(private=private, mode=mode):
+                bridge = make_bridge({"group_mode": mode})
+                event = FakeEvent("help me read this", [At("999"), Plain("help me read this")], private=private)
+                event.set_extra("activated_handlers", [types.SimpleNamespace(event_filters=[object()])])
+                with mock.patch.object(bridge, "_astrbot_owns_command", wraps=bridge._astrbot_owns_command) as admission:
+                    await bridge.observe_all_messages(event)
+                    await bridge.on_llm_request(event, None)
+                admission.assert_called_once()
+                frame, = bridge.server.pushed
+                self.assertEqual(frame["text"], "help me read this")
+                self.assertEqual(frame["umo"], event.unified_msg_origin)
+
+    async def test_an_earlier_plugin_can_stop_or_reply_without_the_bridge_taking_over(self):
+        for key in ("stopped", "sent"):
+            with self.subTest(previous_plugin=key):
+                bridge = make_bridge()
+                event = FakeEvent("Coo hello", [At("999"), Plain("Coo hello")])
+                if key == "stopped":
+                    event.stop_event()
+                else:
+                    event._has_send_oper = True
+                await bridge.observe_all_messages(event)
+                await bridge.on_llm_request(event, None)
+                self.assertFalse(event.get_extra("_cortico_llm_owned"))
+                self.assertEqual(bridge.server.pushed, [])
+
+    async def test_mute_and_reopen_are_scoped_to_the_umo(self):
+        bridge = make_bridge()
+        muted = FakeEvent("Coo hello", [At("999")], group_id="1", message_id="101")
+        muted.session_llm_enabled = False
+        other = FakeEvent("Coo hello", [At("999")], group_id="2", message_id="102")
+        await bridge.observe_all_messages(muted)
+        await bridge.on_llm_request(muted, None)
+        await bridge.observe_all_messages(other)
+        self.assertFalse(muted.get_extra("_cortico_llm_owned"))
+        self.assertEqual([frame["umo"] for frame in bridge.server.pushed], [other.unified_msg_origin])
+
+        muted.session_llm_enabled = True
+        await bridge.observe_all_messages(muted)
+        await bridge.on_llm_request(muted, None)
+        self.assertEqual([frame["umo"] for frame in bridge.server.pushed], [other.unified_msg_origin, muted.unified_msg_origin])
+
+    async def test_llm_hook_rechecks_mute_between_the_two_hooks(self):
+        for private in (False, True):
+            with self.subTest(private=private):
+                bridge = make_bridge({"group_mode": "all"})
+                event = FakeEvent("hello", [Plain("hello")], private=private, message_id="201")
+                await bridge.observe_all_messages(event)
+                self.assertTrue(event.get_extra("_cortico_llm_owned"))
+                event.session_llm_enabled = False
+                await bridge.on_llm_request(event, None)
+                self.assertEqual(bridge.server.pushed, [])
+                self.assertFalse(bridge._turns)
+                self.assertFalse(bridge._seen)
+                self.assertFalse(event.is_stopped())
+
+    async def test_close_while_preparing_media_drops_the_frame_and_allows_reopen(self):
+        context = FakeContext()
+        profile = {"enable": True}
+        context.get_config = lambda *, umo=None: {"provider_settings": profile, "wake_prefix": ["/"]}
+        for switch in ("profile", "session"):
+            with self.subTest(switch=switch):
+                bridge = make_bridge(context=context)
+                event = FakeEvent("Coo hello", [At("999")], message_id="301")
+
+                async def mute_during_media(*args):
+                    if switch == "profile":
+                        profile["enable"] = False
+                    else:
+                        event.session_llm_enabled = False
+                    return [], [], []
+
+                with mock.patch.object(bridge, "_image_payloads", side_effect=mute_during_media):
+                    await bridge.observe_all_messages(event)
+                self.assertEqual(bridge.server.pushed, [])
+                self.assertFalse(bridge._turns)
+                self.assertFalse(bridge._message_segments)
+                self.assertFalse(bridge._seen)
+                self.assertFalse(event.is_stopped())
+
+                profile["enable"] = True
+                event.session_llm_enabled = True
+                await bridge.observe_all_messages(event)
+                await bridge.on_llm_request(event, None)
+                self.assertEqual(len(bridge.server.pushed), 1)
+
+    async def test_already_accepted_turn_stays_available_after_close(self):
+        bridge = make_bridge()
+        earlier = FakeEvent("Coo earlier", [At("999")], message_id="401")
+        await bridge.observe_all_messages(earlier)
+        later = FakeEvent("Coo later", [At("999")], message_id="402")
+        later.session_llm_enabled = False
+        await bridge.observe_all_messages(later)
+        frame, = bridge.server.pushed
+        self.assertEqual(frame["id"], "401")
+        self.assertEqual(set(bridge._turns), {(earlier.unified_msg_origin, "401")})
+
+    async def test_profile_is_read_after_waiting_for_native_session_state(self):
+        context = FakeContext()
+        profile = {"enable": True}
+        context.get_config = lambda *, umo=None: {"provider_settings": profile, "wake_prefix": ["/"]}
+        bridge = make_bridge({"group_mode": "all"}, context=context)
+        event = FakeEvent("hello", [Plain("hello")], message_id="450")
+        await bridge.observe_all_messages(event)
+
+        async def get_session_state(_event):
+            await asyncio.sleep(0)
+            profile["enable"] = False
+            return True
+
+        with mock.patch.object(SessionServiceManager, "should_process_llm_request", side_effect=get_session_state):
+            await bridge.on_llm_request(event, None)
+        self.assertEqual(bridge.server.pushed, [])
+        self.assertFalse(bridge._turns)
+
+    async def test_llm_command_and_next_message_have_separate_outcomes(self):
+        context = FakeContext()
+        profile = {"enable": True}
+        context.get_config = lambda *, umo=None: {"provider_settings": profile, "wake_prefix": ["/"]}
+        bridge = make_bridge(context=context)
+        earlier = FakeEvent("Coo earlier", [At("999")], message_id="501")
+        await bridge.observe_all_messages(earlier)
+
+        cmd = FakeEvent("llm", [Plain("/llm")], message_id="502")
+        cmd._has_send_oper = True
+        cmd.set_extra("activated_handlers", [types.SimpleNamespace(event_filters=[CommandFilter()])])
+        profile["enable"] = False  # AstrBot 的 /llm 指令已先执行。
+        await bridge.observe_all_messages(cmd)
+        await bridge.on_llm_request(cmd, None)
+        later = FakeEvent("Coo later", [At("999")], message_id="503")
+        await bridge.observe_all_messages(later)
+        self.assertEqual([frame["id"] for frame in bridge.server.pushed], ["501"])
+        self.assertFalse(bridge._recent[-1]["notice"])
+        self.assertIn((earlier.unified_msg_origin, "501"), bridge._turns)
+
+        profile["enable"] = True
+        await bridge.observe_all_messages(later)
+        await bridge.on_llm_request(later, None)
+        self.assertEqual([frame["id"] for frame in bridge.server.pushed], ["501", "503"])
 
 
 class MentionPolicyTests(unittest.IsolatedAsyncioTestCase):
